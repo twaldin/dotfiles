@@ -2,7 +2,7 @@
 # export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
 
 # Oh My Posh configuration
-eval "$(oh-my-posh init zsh --config $(brew --prefix oh-my-posh)/themes/stelbent-compact.minimal.omp.json)"
+eval "$(oh-my-posh init zsh --config stelbent-compact.minimal)"
 
 alias vi="nvim"
 # Git aliases and completions
