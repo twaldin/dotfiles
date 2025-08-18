@@ -2,7 +2,7 @@
 # export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
 
 # Oh My Posh configuration
-eval "$(oh-my-posh init zsh --config kali)"
+eval "$(oh-my-posh init zsh --config pure)"
 export PATH="$HOME/.local/share/bob/nvim-bin:$PATH"
 alias tmx="$HOME/scripts/tmux_sessionizer.sh"
 alias vi="nvim"
