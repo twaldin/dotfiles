@@ -6,11 +6,12 @@ vim.keymap.set("n", "<leader>q", ":quit<CR>")
 
 --no more lazy.nvim ever agin
 vim.pack.add({
-  { src = "https://github.com/ellisonleao/gruvbox.nvim" },
-  { src = "https://github.com/stevearc/oil.nvim" },
-  { src = "https://github.com/nvim-treesitter/nvim-treesitter", version = "main" },
-  { src = "https://github.com/ibhagwan/fzf-lua" },
-	{ src = "https://github.com/mason-org/mason.nvim"},
+	{ src = "https://github.com/ellisonleao/gruvbox.nvim" },
+	{ src = "https://github.com/stevearc/oil.nvim" },
+	{ src = "https://github.com/nvim-treesitter/nvim-treesitter", version = "main" },
+	{ src = "https://github.com/ibhagwan/fzf-lua" },
+	{ src = "https://github.com/mason-org/mason.nvim" },
+	{ src = "https://github.com/Saghen/blink.cmp" },
 })
 
 --lsp (not using nvimlspconfig cuz i took the whole lsp/ instead)
@@ -32,6 +33,17 @@ require "fzf-lua".setup()
 vim.keymap.set("n", "<leader>f", ":FzfLua files<CR>")
 vim.keymap.set("n", "<leader>/", ":FzfLua live_grep<CR>")
 
+require "blink.cmp".setup({
+	keymap = { preset = 'enter' },
+	appearance = {
+		nerd_font_variant = 'mono'
+	},
+	completion = { documentation = { auto_show = false } },
+	sources = {
+		default = { 'lsp', 'path', 'snippets', 'buffer' },
+	},
+	fuzzy = { implementation = "lua" },
+})
 --corporate slave colorscheme
 vim.cmd("colorscheme gruvbox")
 vim.cmd(":hi statusline guibg=NONE")
