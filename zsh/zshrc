@@ -3,7 +3,7 @@
 
 # Oh My Posh configuration
 eval "$(oh-my-posh init zsh --config kali)"
-
+export PATH="$HOME/.local/share/bob/nvim-bin:$PATH"
 alias vi="nvim"
 # Git aliases and completions
 autoload -Uz compinit && compinit
