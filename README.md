@@ -2,19 +2,11 @@
 
 My personal configuration files for zsh and neovim.
 
-## Structure
-
-- `zsh/zshrc` - Zsh configuration
-- `nvim/` - LazyVim neovim configuration
-
-## Usage
-
-### Local
-Symlink files to home directory:
+I symlink the files to my home directory:
 ```bash
-ln -sf ~/.dotfiles/zsh/zshrc ~/.zshrc
-ln -sf ~/.dotfiles/nvim ~/.config/nvim
+ln -sf ~/dev/dotfiles/zsh/zshrc ~/.zshrc
+ln -sf ~/dev/dotfiles/nvim ~/.config/nvim
+ln -sf ~/dev/dotfiles/tmux/.tmux.conf ~/.tmux.conf
+ln -sf ~/dev/dotfiles/terminal/ghostty/config ~/.config/ghostty/config
+ln -sf ~/dev/dotfiles/scripts ~/scripts
 ```
-
-### Container
-Files are automatically symlinked during container build.
