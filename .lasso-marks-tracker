@@ -1,2 +1,4 @@
 nvim/init.lua
-nvim/lua/lasso.lua
+nvim/lua/keybinds.lua
+nvim/lua/options.lua
+nvim/lua/theme.lua
