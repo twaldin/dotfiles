@@ -18,6 +18,7 @@ vim.o.cmdheight = 1
 vim.o.showmode = false
 vim.o.ruler = false
 vim.o.laststatus = 0
+vim.o.shortmess = vim.o.shortmess .. "S"
 
 --winbar
 local winbar = require "winbar"
