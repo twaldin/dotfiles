@@ -1,4 +1,4 @@
---no more lazy.nvim ever agin
+--plugins
 vim.pack.add({
 	{ src = "https://github.com/ellisonleao/gruvbox.nvim" },
 	{ src = "https://github.com/stevearc/oil.nvim" },
@@ -13,8 +13,13 @@ vim.lsp.enable('ts_ls')
 
 require "mason".setup()
 require "oil".setup()
-require "nvim-treesitter".setup({ highlight = { enable = true, }, auto_install = true })
 require "fzf-lua".setup()
+require "nvim-treesitter".setup({
+	highlight = {
+		enable = true,
+	},
+	auto_install = true,
+})
 require "blink.cmp".setup({
 	keymap = {
 		preset = 'super-tab',
@@ -30,9 +35,10 @@ require "blink.cmp".setup({
 	},
 	fuzzy = { implementation = "lua" },
 })
+
+--load other files
 _G.lasso = require "lasso"
 _G.lasso.setup()
---load other files
 require "theme"
 require "autocmds"
 require "options"
