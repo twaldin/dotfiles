@@ -8,8 +8,6 @@ vim.pack.add({
 	{ src = "https://github.com/Saghen/blink.cmp" },
 })
 
-vim.lsp.enable('lua_ls')
-vim.lsp.enable('ts_ls')
 
 require "mason".setup()
 require "oil".setup()

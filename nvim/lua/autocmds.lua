@@ -24,3 +24,29 @@ vim.api.nvim_create_autocmd("BufWritePre", {
 		vim.fn.setpos(".", save_cursor)
 	end,
 })
+
+--lazy load lsp
+vim.api.nvim_create_autocmd("FileType", {
+	callback = function(args)
+		local ft_to_lsps = {
+			c = { "clangd" },
+			cpp = { "clangd" },
+			dockerfile = { "dockerls" },
+			typescript = { "ts_ls" },
+			typescriptreact = { "ts_ls" },
+			javascript = { "ts_ls" },
+			javascriptreact = { "ts_ls" },
+			bash = { "bashls" },
+			sh = { "bashls" },
+			zsh = { "bashls" },
+			lua = { "lua_ls" },
+		}
+
+		local lsps = ft_to_lsps[args.match]
+		if lsps then
+			for _, lsp in ipairs(lsps) do
+				vim.lsp.enable(lsp)
+			end
+		end
+	end,
+})
