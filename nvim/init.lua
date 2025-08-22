@@ -28,14 +28,10 @@ require "blink.cmp".setup({
 	sources = {
 		default = { 'lsp', 'path', 'snippets', 'buffer' },
 	},
-	cmdline = {
-		sources = {}, -- Disable blink.cmp in command line mode
-	},
 	fuzzy = { implementation = "lua" },
 })
 _G.lasso = require "lasso"
 _G.lasso.setup()
-_G.cmdline = require "cmdline"
 --load other files
 require "theme"
 require "autocmds"

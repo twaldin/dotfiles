@@ -14,9 +14,8 @@ vim.o.scrolloff = 10
 
 --theming
 vim.o.winborder = "rounded"
-vim.o.cmdheight = 0
+vim.o.cmdheight = 1
 vim.o.showmode = false
-vim.o.showcmd = false
 vim.o.ruler = false
 vim.o.laststatus = 0
 

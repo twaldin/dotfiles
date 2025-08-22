@@ -65,7 +65,7 @@ function M.get_winbar()
 	path_display = path_display .. "%#GruvboxOrange#" .. parts[#parts] .. "%*"
 
 	-- Add git status and right-align search count, mode/position info
-	return path_display .. M.status() .. "%=" .. "%{v:lua.get_search_count()}" .. "%{mode()} %l,%c"
+	return path_display .. M.status() .. "%=" .. "%{v:lua.get_search_count()}" .. "  [%{mode()}] (%l,%c) "
 end
 
 return M
