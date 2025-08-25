@@ -2,11 +2,19 @@
 # export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
 
 # Oh My Posh configuration
-eval "$(oh-my-posh init zsh --config pure)"
+if [[ "$(uname)" == "Linux" ]]; then
+	eval "$(oh-my-posh init zsh --config /usr/share/oh-my-posh/themes/pure.omp.json)"
+fi
+
+if [[ "$(uname)" == "Darwin" ]]; then
+ eval "$(oh-my-posh init zsh --config pure)"
+fi
+
+export PATH="$HOME/.cargo/bin:$PATH"
 export PATH="$HOME/.local/share/bob/nvim-bin:$PATH"
 alias tmx="$HOME/scripts/tmux_sessionizer.sh"
 alias vi="nvim"
-# Git aliases and completions
+# Git aliases and c.ompompletions
 autoload -Uz compinit && compinit
 
 # User configuration
@@ -37,3 +45,7 @@ autoload -Uz compinit && compinit
 # Example aliases
 # alias zshconfig="mate ~/.zshrc"
 # alias ohmyzsh="mate ~/.oh-my-zsh"
+
+
+
+eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
