@@ -1,0 +1,13 @@
+{
+  "noteheader": {
+    "prefix": "noteheader",
+    "body": [
+      "# ${1:Title}",
+      "**${CURRENT_MONTH_NAME} ${CURRENT_DATE}**",
+      "**${2:class}**",
+      "---",
+      "",
+      "$0"
+    ]
+  }
+}
