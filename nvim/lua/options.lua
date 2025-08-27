@@ -26,3 +26,5 @@ _G.get_winbar = winbar.get_winbar
 _G.get_search_count = winbar.get_search_count
 vim.o.winbar = "%{%v:lua.get_winbar()%}"
 
+--cursor
+vim.o.guicursor = ""
