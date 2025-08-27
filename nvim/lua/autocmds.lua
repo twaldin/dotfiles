@@ -16,6 +16,26 @@ vim.api.nvim_create_autocmd("TextYankPost", {
 	end,
 })
 
+--auto turn on nabla for txt and md
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = {"markdown", "txt"},
+  callback = function()
+    require("nabla").enable_virt()
+  end,
+})
+
+vim.api.nvim_create_autocmd("BufWritePost", {
+  pattern = {"*.md", "*.tex", "*.latex"},
+  callback = function()
+    local nabla = require("nabla")
+    nabla.disable_virt()
+    -- Small delay to ensure disable completes before re-enabling
+    vim.defer_fn(function()
+      nabla.enable_virt()
+    end, 50)
+  end,
+})
+
 --remove trailing whitespace on :w
 vim.api.nvim_create_autocmd("BufWritePre", {
 	callback = function()
@@ -40,6 +60,7 @@ vim.api.nvim_create_autocmd("FileType", {
 			sh = { "bashls" },
 			zsh = { "bashls" },
 			lua = { "lua_ls" },
+			markdown = { "marksman" },
 		}
 
 		local lsps = ft_to_lsps[args.match]
