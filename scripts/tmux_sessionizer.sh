@@ -3,7 +3,7 @@
 if [[ $# -eq 1 ]]; then
     selected=$1
 else
-    selected=$(find ~/purdue/ece264 ~/purdue ~/dev ~/dev/studyspot-ui ~/ ~/dev/term-site -mindepth 1 -maxdepth 1 -type d | fzf)
+    selected=$(find ~/purdue/fa25 ~/dev ~ -mindepth 0 -maxdepth 1 -type d | fzf)
 fi
 
 if [[ -z $selected ]]; then
