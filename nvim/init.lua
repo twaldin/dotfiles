@@ -8,9 +8,11 @@ vim.pack.add({
 	{ src = "https://github.com/Saghen/blink.cmp" },
 	{ src = "https://github.com/L3MON4D3/LuaSnip" },
 	{ src = "https://github.com/jbyuki/nabla.nvim", ft = "markdown" },
+	{ src = "https://github.com/chomosuke/typst-preview.nvim" },
 })
 
 require "mason".setup()
+require "typst-preview".setup()
 require "oil".setup()
 require "fzf-lua".setup()
 require "nvim-treesitter".setup({
