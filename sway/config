@@ -22,6 +22,7 @@ default_border pixel 1
 #
 # Default wallpaper (more resolutions are available in /usr/share/backgrounds/sway/)
 output * bg /home/twaldin/Downloads/bg.jpg fill
+output DP-1 mode 1920x1080@240Hz
 #
 # Example configuration:
 #
@@ -224,6 +225,10 @@ bar {
         inactive_workspace #282828 #282828 #928374
 				focused_workspace #d65d0e #d65d0e #282828
   	}
+}
+input "type:pointer" {
+	accel_profile flat
+	pointer_accel 0
 }
 client.focused #d65d0e #fe8019 #ebdbb2 #d65d0e #d65d0e
 gaps inner 10
