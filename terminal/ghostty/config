@@ -1,5 +1,5 @@
-theme = GruvboxDarkHard 
-font-size = 24 
-font-family = JetBrainsMono Nerd Font Mono
+theme = GruvboxDarkHard
+font-size = 24
+font-family = JetBrains Mono
 keybind = shift+enter=text:\n
 macos-titlebar-style = hidden
