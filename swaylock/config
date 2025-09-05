@@ -1,0 +1,44 @@
+# Gruvbox theme for swaylock - minimal working config
+# Background image (or use color for solid background)
+image=/home/twaldin/dev/dotfiles/swaylock/bg2_blurred.jpg
+
+# Indicator appearance
+indicator-radius=100
+indicator-thickness=20
+
+# Ring colors
+ring-color=fbf1c7ff
+ring-ver-color=83a598ff
+ring-wrong-color=fb4934ff
+ring-clear-color=b8bb26ff
+
+# Inside colors (transparent to show image)
+inside-color=00000000
+inside-ver-color=83a59833
+inside-wrong-color=fb493433
+inside-clear-color=b8bb2633
+
+# Text colors
+text-color=fbf1c7ff
+text-ver-color=fbf1c7ff
+text-wrong-color=fbf1c7ff
+text-clear-color=fbf1c7ff
+
+# Line separator between inside and ring
+line-color=00000000
+line-ver-color=00000000
+line-wrong-color=00000000
+line-clear-color=00000000
+
+# Key press highlight colors
+key-hl-color=8ec07cff
+bs-hl-color=fb4934ff
+
+# Font
+font=JetBrainsMono
+
+# Behavior
+show-failed-attempts
+ignore-empty-password
+indicator-idle-visible
+daemonize

@@ -1,15 +1,7 @@
 # If you come from bash you might have to change your $PATH.
 # export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
 
-# Oh My Posh configuration
-if [[ "$(uname)" == "Linux" ]]; then
-	eval "$(oh-my-posh init zsh --config /usr/share/oh-my-posh/themes/pure.omp.json)"
-fi
-
-if [[ "$(uname)" == "Darwin" ]]; then
- eval "$(oh-my-posh init zsh --config pure)"
-fi
-
+eval "$(oh-my-posh init zsh --config ~/pure-modified.omp.json)"
 export PATH="$HOME/.cargo/bin:$PATH"
 export PATH="$HOME/.local/share/bob/nvim-bin:$PATH"
 export PATH="$HOME/.local/bin:$PATH"

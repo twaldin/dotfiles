@@ -1,0 +1,64 @@
+* {
+    font-family: "JetBrainsMono", monospace;
+    font-size: 14px;
+}
+
+window {
+    margin: 0px;
+    border: 2px solid #fbf1c7;
+    border-radius: 0px;
+    background-color: #1d2021;
+}
+
+#input {
+    margin: 5px;
+    border: 2px solid #504945;
+    color: #ebdbb2;
+    background-color: #3c3836;
+    border-radius: 0px;
+    padding: 8px;
+}
+
+#input:focus {
+    border: 2px solid #fe8019;
+}
+
+#inner-box {
+    margin: 5px;
+    border: none;
+    background-color: #1d2021;
+}
+
+#outer-box {
+    margin: 5px;
+    border: none;
+    background-color: #1d2021;
+}
+
+#scroll {
+    margin: 0px;
+    border: none;
+}
+
+#text {
+    margin: 5px;
+    border: none;
+    color: #ebdbb2;
+}
+
+#entry {
+    border: none;
+    border-radius: 0px;
+    padding: 6px;
+}
+
+#entry:selected {
+    background-color: #504945;
+    border: 2px solid #fe8019;
+    outline: none;
+}
+
+#entry:selected #text {
+    color: #fbf1c7;
+    font-weight: bold;
+}

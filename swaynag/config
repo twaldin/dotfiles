@@ -1,0 +1,12 @@
+# Swaynag gruvbox theme configuration
+
+[gruvbox]
+font=JetBrainsMono 14
+background=1d2021
+text=fbf1c7
+button-background=1d2021
+button-text=ebdbb2
+button-margin-right=5
+button-padding=8
+message-padding=10
+details-background=282828
