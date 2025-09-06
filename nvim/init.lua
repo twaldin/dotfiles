@@ -30,6 +30,7 @@ require "blink.cmp".setup({
 	},
 	completion = {
 		documentation = { auto_show = false, },
+		menu = {scrollbar = false},
 	},
 	sources = {
 		default = { 'lsp', 'path', 'snippets', 'buffer' },

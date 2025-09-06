@@ -5,3 +5,4 @@ keybind = shift+enter=text:\n
 macos-titlebar-style = hidden
 window-padding-y = 10
 window-padding-x = 10
+background-opacity = 0.95
