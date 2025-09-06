@@ -28,7 +28,7 @@ vim.keymap.set("n", "<leader>F", vim.lsp.buf.format)
 --oil & fzf binds
 vim.keymap.set("n", "<leader>e", ":Oil<CR>")
 vim.keymap.set("n", "<leader>f", ":FzfLua files<CR>")
-vim.keymap.set("n", "<leader>/", ":FzfLua live_grep<CR>")
+vim.keymap.set("n", "<leader>/", ":FzfLua live_grep -- --glob ' node_modules/*'<CR>")
 vim.keymap.set('n', '<leader>p', function()
     require('nabla').popup()
 end)
