@@ -51,7 +51,7 @@ input "1739:0:Synaptics_TM3276-022" {
 }
 
 input "type:keyboard" {
-	xkb_options caps:super,shift:both_capslock
+	xkb_options caps:super,shift:both_capslock,ctrl:swap_lalt_lctl
 }
 
 corner_radius 25

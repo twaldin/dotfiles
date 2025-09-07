@@ -29,12 +29,11 @@ window#waybar.hidden {
 #workspaces button.focused {
     background-color: rgba(204, 36, 29, 0.15);
 		border: 1px solid rgba(204, 36, 29, 1);
-		border-radius: 25px
+		border-radius: 25px;
 }
 
 #clock,
 #battery,
-#temperature,
 #backlight,
 #network,
 #pulseaudio,
@@ -50,30 +49,40 @@ window#waybar.hidden {
 		margin-left: 20px;
 }
 
-.modules-right {
-    background-color: rgba(22, 32, 33, 0.60);
-		border: 1px solid #fbf1c7;
-}
-
+#pulseaudio,
+#network,
+#backlight,
+#battery,
+#power-profiles-daemon,
 #clock {
     background-color: rgba(22, 32, 33, 0.60);
 		border: 1px solid #fbf1c7;
 }
+
 #battery.charging, #battery.plugged {
-    color: rgba(142, 192, 124, 1);
+    background-color: rgba(142, 192, 124, 1);
+		color: #1d2021;
+}
+
+#power-profiles-daemon.performance {
+    background-color: rgba(204, 36, 29, 1);
+}
+
+#power-profiles-daemon.power-saver {
+		background-color: rgba(142, 192, 124, 1);
+}
+
+#power-profiles-daemon.balanced {
+		background-color: rgba(69, 133, 136, 1);
 }
 
 @keyframes blink {
     to {
-        background-color: #ffffff;
-        color: #000000;
+        background-color: rgba(204, 36, 29, 1);
     }
 }
-
 /* Using steps() instead of linear as a timing function to limit cpu usage */
 #battery.critical:not(.charging) {
-    background-color: #f53c3c;
-    color: #ffffff;
     animation-name: blink;
     animation-duration: 0.5s;
     animation-timing-function: steps(12);
