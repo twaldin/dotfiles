@@ -1,4 +1,2 @@
-nvim/init.lua
-nvim/lua/keybinds.lua
-nvim/lua/options.lua
-nvim/lua/theme.lua
+waybar/style.css
+waybar/config.jsonc
