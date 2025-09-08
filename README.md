@@ -1,12 +1,8 @@
 # Personal Dotfiles
 
-My personal configuration files for zsh and neovim.
+My personal configuration files. For swayfx wm, waybar, wofi launcher, ghostty terminal, zsh, tmux and neovim
 
-I symlink the files to my home directory:
+I symlink the files to my home directory, for example,
 ```bash
-ln -sf ~/dev/dotfiles/zsh/zshrc ~/.zshrc
-ln -sf ~/dev/dotfiles/nvim ~/.config/nvim
-ln -sf ~/dev/dotfiles/tmux/.tmux.conf ~/.tmux.conf
-ln -sf ~/dev/dotfiles/terminal/ghostty/config ~/.config/ghostty/config
-ln -sf ~/dev/dotfiles/scripts ~/scripts
+ln -sf /absolute/path/to/dotfiles/waybar /absolute/path/to/.config/waybar
 ```
