@@ -18,11 +18,11 @@ set $browser firefox
 
 # Your preferred application launcher
 set $menu wofi --show drun
-set $ws1 1:terminal
-set $ws2 2:firefox
-set $ws3 3:spotify
-set $ws4 4:discord
-set $ws5 5:games
+set $ws1 1:term 
+set $ws2 2:firefox 
+set $ws3 3:spotify 󰓇
+set $ws4 4:discord 
+set $ws5 5
 set $ws6 6
 set $ws7 7
 set $ws8 8
@@ -53,9 +53,7 @@ input "1739:0:Synaptics_TM3276-022" {
 input "type:keyboard" {
 	xkb_options caps:super,shift:both_capslock,ctrl:swap_lalt_lctl
 }
-
-corner_radius 25
-shadows enable
+blur enable
 # Auto-lock and power management
 exec swayidle -w \
          timeout 300 'swaylock -f' \
@@ -250,8 +248,9 @@ input "type:pointer" {
 }
 
 exec waybar
+exec swaymsg 'workspace 1; exec $term; workspace 2; exec $browser; workspace 3; exec Discord; exec flatpak run com.spotify.Client; workspace 1'
 
-client.focused #fbf1c7 #fe8019 #ebdbb2 #fbf1c7 #fbf1c7
+client.focused #fbf1c740 #fe801900 #ebdbb200 #fbf1c740 #fbf1c740
 gaps inner 10
 gaps outer 10
 include /etc/sway/config.d/*

@@ -11,7 +11,7 @@
           "type": "session"
         },
         {
-          "foreground": "#d65d0e",
+          "foreground": "#fbf1c7",
           "properties": {
             "style": "full"
           },
@@ -29,14 +29,14 @@
           "foreground": "#928374",
           "properties": {
             "branch_ahead_icon": "<#b8bb26>\u21e1 </>",
-            "branch_behind_icon": "<#b8bb26>\u21e3 </>",
+            "branch_behind_icon": "<#cc241d>\u21e3 </>",
             "branch_icon": " ",
             "fetch_status": true,
             "fetch_upstream_icon": true,
             "github_icon": "  "
           },
           "style": "plain",
-          "template": "{{ .UpstreamIcon }}{{ .HEAD }}{{if .BranchStatus }} {{ .BranchStatus }}{{ end }}{{ if .Working.Changed }}<#d65d0e>*</>{{ .Working.String }}{{ end }}{{ if and (.Working.Changed) (.Staging.Changed) }} |{{ end }}{{ if .Staging.Changed }} \uf046 {{ .Staging.String }}{{ end }}{{ if gt .StashCount 0 }} \ueb4b {{ .StashCount }}{{ end }} ",
+          "template": "{{ .UpstreamIcon }}{{ .HEAD }}{{if .BranchStatus }} {{ .BranchStatus }}{{ end }}{{ if .Working.Changed }}<#b8bb26>*</>{{ .Working.String }}{{ end }}{{ if and (.Working.Changed) (.Staging.Changed) }} |{{ end }}{{ if .Staging.Changed }} \uf046 {{ .Staging.String }}{{ end }}{{ if gt .StashCount 0 }} \ueb4b {{ .StashCount }}{{ end }} ",
           "type": "git"
         }
       ],
@@ -62,7 +62,7 @@
       "newline": true,
       "segments": [
         {
-          "foreground": "#d65d0e",
+          "foreground": "#cc241d",
           "foreground_templates": [
             "{{ if gt .Code 0 }}#d65d0e{{ end }}"
           ],
