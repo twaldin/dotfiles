@@ -1,5 +1,5 @@
 * {
-    font-family: 'JetBrains Mono', 'Font Awesome 6 Free', 'Font Awesome 6 Brands', monospace;
+    font-family: 'JetBrains Mono Nerd Font', monospace;
     font-size: 20px;
 }
 
@@ -19,17 +19,17 @@ window#waybar.hidden {
     opacity: 0.2;
 }
 
-
 #workspaces button {
-    padding: 0 15px;
+    padding: 0px 25px 0px 20px;
     background-color: transparent;
     color: #fbf1c7;
+		border-radius: 25px;
 }
 
 #workspaces button.focused {
     background-color: rgba(204, 36, 29, 0.15);
 		border: 1px solid rgba(204, 36, 29, 1);
-		border-radius: 25px;
+		color: rgba(204, 36, 29, 1);
 }
 
 #clock,
@@ -37,26 +37,18 @@ window#waybar.hidden {
 #backlight,
 #network,
 #pulseaudio,
-#tray,
+#custom-media,
+#custom-power,
 #power-profiles-daemon {
     padding: 0 15px;
     color: #fbf1c7;
-}
-
-#window,
-#workspaces {
-    margin: 0 4px;
-		margin-left: 20px;
-}
-
-#pulseaudio,
-#network,
-#backlight,
-#battery,
-#power-profiles-daemon,
-#clock {
     background-color: rgba(22, 32, 33, 0.60);
 		border: 1px solid #fbf1c7;
+}
+
+#workspaces {
+		padding: 0px 4px;
+		padding-left: 10px;
 }
 
 #battery.charging, #battery.plugged {
@@ -66,14 +58,22 @@ window#waybar.hidden {
 
 #power-profiles-daemon.performance {
     background-color: rgba(204, 36, 29, 1);
+    color: rgba(22, 32, 33, 0.60);
 }
 
 #power-profiles-daemon.power-saver {
 		background-color: rgba(142, 192, 124, 1);
+    color: rgba(22, 32, 33, 0.60);
 }
 
 #power-profiles-daemon.balanced {
 		background-color: rgba(69, 133, 136, 1);
+		color: rgba(22, 32, 33, 0.60);
+}
+
+#power-profiles-daemon{
+		padding-right: 5px;
+		padding-left: 10px
 }
 
 @keyframes blink {
@@ -88,16 +88,4 @@ window#waybar.hidden {
     animation-timing-function: steps(12);
     animation-iteration-count: infinite;
     animation-direction: alternate;
-}
-
-#power-profiles-daemon {
-    padding-right: 15px;
-}
-
-#tray > .passive {
-    -gtk-icon-effect: dim;
-}
-
-#tray > .needs-attention {
-    -gtk-icon-effect: highlight;
 }
