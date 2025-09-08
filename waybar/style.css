@@ -97,9 +97,9 @@ window#waybar.hidden {
 
 #network.ethernet,
 #network.wifi {
-	background-color: rgba(142, 192, 124, 0.15);
-	border: 1px solid rgba(142, 192, 124, 1);
-	color: rgba(142, 192, 124, 1);
+	background-color: rgba(69, 133, 136, 0.15);
+	color: rgba(69, 133, 136, 1);
+	border: 1px solid rgba(69, 133, 136, 1);
 	padding-right: 15px;
 }
 
@@ -108,6 +108,7 @@ window#waybar.hidden {
 	border: 1px solid rgba(204, 36, 29, 1);
 	color: rgba(204, 36, 29, 1);
 }
+
 #pulseaudio.muted,
 #pulseaudio.source-muted {
 	background-color: rgba(204, 36, 29, 0.15);
@@ -117,7 +118,9 @@ window#waybar.hidden {
 
 @keyframes blink {
 	to {
-		background-color: rgba(204, 36, 29, 1);
+		background-color: rgba(204, 36, 29, 0.15);
+		border: 1px solid rgba(204, 36, 29, 1);
+		color: rgba(204, 36, 29, 1);
 	}
 }
 /* Using steps() instead of linear as a timing function to limit cpu usage */
