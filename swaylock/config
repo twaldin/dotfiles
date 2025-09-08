@@ -1,6 +1,6 @@
 # Gruvbox theme for swaylock - minimal working config
 # Background image (or use color for solid background)
-image=/home/twaldin/dev/dotfiles/swaylock/bg2_blurred.jpg
+image=/home/twaldin/dev/dotfiles/sway/bg1-blurred.jpg
 
 # Indicator appearance
 indicator-radius=100

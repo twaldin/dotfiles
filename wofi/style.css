@@ -5,20 +5,8 @@
 
 window {
     margin: 0px;
-    border: 2px solid #fbf1c7;
+    border: none;
 		background-color: rgba(29, 32, 33, 0.7);
-		border-radius: 25px;
-}
-
-#input {
-    margin: 5px;
-    color: #ebdbb2;
-    padding: 8px;
-		background-color: rgba(29, 32, 33, 0);
-}
-
-#input:focus {
-    border: 2px solid #fe8019;
 }
 
 #inner-box {
@@ -50,7 +38,7 @@ window {
 
 #entry:selected {
     outline: none;
-		background-color: rgba(251, 241, 199, 0.1);
+    background-color: rgba(204, 36, 29, 0.15);
 }
 
 #entry:selected #text {
