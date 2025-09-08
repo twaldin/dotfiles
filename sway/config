@@ -27,6 +27,8 @@ bindsym $mod+Shift+p exec swaylock
 
 input "1739:0:Synaptics_TM3276-022" {
 	natural_scroll enabled
+	tap enabled
+	dwt enabled
 }
 
 input "type:keyboard" {
@@ -122,7 +124,8 @@ bindsym $mod+r mode "resize"
     bindsym --locked XF86AudioMicMute exec pactl set-source-mute \@DEFAULT_SOURCE@ toggle
     bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
     bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
-    bindsym Print exec grim
+    bindsym Print exec grimshot copy area
+		bindsym Shift+Print exec grimshot save area
 
 input "type:pointer" {
 	accel_profile flat
@@ -135,7 +138,8 @@ exec swaymsg 'workspace $ws1; exec $term; workspace $ws2; exec $browser; workspa
 client.focused #fbf1c740 #fe801900 #ebdbb200 #fbf1c740 #fbf1c740
 gaps inner 10
 gaps outer 10
-
+mouse_warping none
+focus_follows_mouse no
 #swayfx specials
 blur enable
 blur_xray enable
@@ -144,7 +148,6 @@ blur_passes 3
 
 layer_effects "wofi" {
 	blur enable
-	blur_xray enable
 }
 
 include /etc/sway/config.d/*
