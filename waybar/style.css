@@ -21,9 +21,10 @@ window#waybar.hidden {
 
 #workspaces button {
     padding: 0px 25px 0px 20px;
-    background-color: transparent;
-    color: #fbf1c7;
 		border-radius: 25px;
+    color: #fbf1c7;
+    background-color: rgba(251, 241, 199, 0.15);
+		border: 1px solid #fbf1c7;
 }
 
 #workspaces button.focused {
@@ -42,7 +43,7 @@ window#waybar.hidden {
 #power-profiles-daemon {
     padding: 0 15px;
     color: #fbf1c7;
-    background-color: rgba(22, 32, 33, 0.60);
+    background-color: rgba(251, 241, 199, 0.15);
 		border: 1px solid #fbf1c7;
 }
 
@@ -51,29 +52,48 @@ window#waybar.hidden {
 		padding-left: 10px;
 }
 
+#custom-power {
+		padding-right: 15px;
+		padding-left: 10px;
+}
+
 #battery.charging, #battery.plugged {
-    background-color: rgba(142, 192, 124, 1);
-		color: #1d2021;
+		background-color: rgba(142, 192, 124, 0.15);
+		border: 1px solid rgba(142, 192, 124, 1);
+		color: rgba(142, 192, 124, 1);
 }
 
 #power-profiles-daemon.performance {
     background-color: rgba(204, 36, 29, 1);
     color: rgba(22, 32, 33, 0.60);
+		padding-left: 10px;
+		padding-right: 10px;
 }
 
 #power-profiles-daemon.power-saver {
 		background-color: rgba(142, 192, 124, 1);
     color: rgba(22, 32, 33, 0.60);
+		padding-left: 5px;
+		padding-right: 15px;
 }
 
 #power-profiles-daemon.balanced {
 		background-color: rgba(69, 133, 136, 1);
 		color: rgba(22, 32, 33, 0.60);
+		padding-left: 5px;
+		padding-right: 15px;
 }
 
 #power-profiles-daemon{
-		padding-right: 5px;
-		padding-left: 10px
+		padding-right: 12px;
+		padding-left: 5px
+}
+
+#network.ethernet,
+#network.wifi {
+				background-color: rgba(142, 192, 124, 0.15);
+				border: 1px solid rgba(142, 192, 124, 1);
+				color: rgba(142, 192, 124, 1);
 }
 
 @keyframes blink {
