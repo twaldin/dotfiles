@@ -130,7 +130,7 @@ input "type:pointer" {
 }
 
 exec waybar
-exec swaymsg 'workspace 1; exec $term; workspace 2; exec $browser; workspace 3; exec Discord; exec flatpak run com.spotify.Client; workspace 1'
+exec swaymsg 'workspace $ws1; exec $term; workspace $ws2; exec $browser; workspace $ws1'
 
 client.focused #fbf1c740 #fe801900 #ebdbb200 #fbf1c740 #fbf1c740
 gaps inner 10
