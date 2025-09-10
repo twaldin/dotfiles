@@ -1,0 +1,34 @@
+{
+  "03a8e7ef-cf00-4f41-bf24-a90deeafc9db": {
+    "id": "03a8e7ef-cf00-4f41-bf24-a90deeafc9db",
+    "name": "Zen Colored Picker",
+    "description": "Adds the rainbow color pad to the theme picker",
+    "homepage": "https://github.com/Nimit1705/zen-colored-picker",
+    "style": "https://raw.githubusercontent.com/zen-browser/theme-store/main/themes/03a8e7ef-cf00-4f41-bf24-a90deeafc9db/chrome.css",
+    "readme": "https://raw.githubusercontent.com/zen-browser/theme-store/main/themes/03a8e7ef-cf00-4f41-bf24-a90deeafc9db/readme.md",
+    "image": "https://raw.githubusercontent.com/zen-browser/theme-store/main/themes/03a8e7ef-cf00-4f41-bf24-a90deeafc9db/image.png",
+    "author": "Nimit1705",
+    "version": "2.0.1",
+    "tags": [],
+    "createdAt": "2025-02-23",
+    "updatedAt": "2025-07-15",
+    "preferences": "https://raw.githubusercontent.com/zen-browser/theme-store/main/themes/03a8e7ef-cf00-4f41-bf24-a90deeafc9db/preferences.json",
+    "enabled": true
+  },
+  "642854b5-88b4-4c40-b256-e035532109df": {
+    "id": "642854b5-88b4-4c40-b256-e035532109df",
+    "name": "Transparent Zen",
+    "description": "Make the Zen Browser's tab background transparent, get smooth animations and more. Enable  features in mod settings and visit the homepage below to learn more about the features. 👇",
+    "homepage": "https://github.com/sameerasw/zen-themes/tree/main/TransparentZen",
+    "style": "https://raw.githubusercontent.com/zen-browser/theme-store/main/themes/642854b5-88b4-4c40-b256-e035532109df/chrome.css",
+    "readme": "https://raw.githubusercontent.com/zen-browser/theme-store/main/themes/642854b5-88b4-4c40-b256-e035532109df/readme.md",
+    "image": "https://raw.githubusercontent.com/zen-browser/theme-store/main/themes/642854b5-88b4-4c40-b256-e035532109df/image.png",
+    "author": "sameerasw",
+    "version": "1.13.0",
+    "tags": [],
+    "createdAt": "2025-02-04",
+    "updatedAt": "2025-06-22",
+    "preferences": "https://raw.githubusercontent.com/zen-browser/theme-store/main/themes/642854b5-88b4-4c40-b256-e035532109df/preferences.json",
+    "enabled": true
+  }
+}
