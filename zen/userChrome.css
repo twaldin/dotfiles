@@ -1,0 +1,33 @@
+.tabbrowser-tab[selected="true"] .tab-background {
+    background-color: #fbf1c715 !important;
+    border: 1px solid #fbf1c7 !important;
+}
+
+.tabbrowser-tab {
+    color: #fbf1c7 !important;
+}
+
+.zen-current-workspace-indicator-name {
+    color: #fbf1c7 !important;
+}
+
+.urlbar-input-box {
+    color: #fbf1c7 !important;
+}
+
+.customization-target {
+    color: #fbf1c7 !important;
+}
+
+.zen-essentials-container .zen-workspace-tab-section {
+    background-color: #000000 !important;
+}
+
+#zen-media-controls-toolbar toolbaritem {
+    background-color: #1d2021 !important;
+}
+
+.tab-group-container {
+    background-color: #fbf1c700 !important;
+}
+
