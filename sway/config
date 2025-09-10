@@ -5,11 +5,11 @@ set $up k
 set $right l
 
 set $term ghostty
-set $browser firefox
+set $browser zen-browser
 set $menu wofi --show drun
 
-set $ws1 1:term 
-set $ws2 2:firefox 
+set $ws1 1:terminal 
+set $ws2 2:browser 
 set $ws3 3:spotify 󰓇
 set $ws4 4:discord 
 set $ws5 5
@@ -135,7 +135,10 @@ input "type:pointer" {
 exec waybar
 exec swaymsg 'workspace $ws1; exec $term; workspace $ws2; exec $browser; workspace $ws1'
 
-client.focused #fbf1c740 #fe801900 #ebdbb200 #fbf1c740 #fbf1c740
+client.focused #fbf1c760 #fe801900 #ebdbb200 #fbf1c760 #fbf1c760
+client.focused_inactive #fbf1c710 #fe801900 #ebdbb200 #fbf1c710 #fbf1c710
+client.unfocused #fbf1c700 #fe801900 #ebdbb200 #fbf1c700 #fbf1c700
+
 gaps inner 10
 gaps outer 10
 mouse_warping none

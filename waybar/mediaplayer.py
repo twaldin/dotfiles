@@ -129,7 +129,7 @@ class PlayerManager:
                 track_info = " " + track_info
             else:
                 track_info = " " + track_info
-        max_char = 33
+        max_char = 30
         if len(track_info) > max_char:
             track_info = track_info[:max_char -1] + '...'
         # only print output if no other player is playing
