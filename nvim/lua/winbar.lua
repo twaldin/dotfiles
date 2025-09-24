@@ -62,7 +62,7 @@ function M.get_winbar()
 	end
 
 	-- Show last part (filename) in orange
-	path_display = path_display .. "%#GruvboxOrange#" .. parts[#parts] .. "%*"
+	path_display = path_display .. "%#GruvboxGreen#" .. parts[#parts] .. "%*"
 
 	-- Add git status and right-align search count, mode/position info
 	return path_display .. M.status() .. "%=" .. "%{v:lua.get_search_count()}" .. " [%{mode()}] (%l,%c) "

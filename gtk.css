@@ -1,0 +1,9 @@
+.xfce4-panel {
+	font-size: 18px;
+	background-color: rgba(0, 0, 0, 0);
+}
+
+#clock-button {
+	color: white;
+}
+
