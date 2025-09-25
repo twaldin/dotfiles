@@ -10,7 +10,6 @@ set $menu xfce4-popup-whiskermenu
 set $settings xfce4-settings-manager
 set $logout xfce4-session-logout
 
-exec --no-startup-id xmodmap /home/twaldin/.Xmodmap
 
 set $ws1 1
 set $ws2 2
@@ -102,14 +101,15 @@ mode "resize" {
 }
 bindsym $mod+r mode "resize"
 
-client.focused #fbf1c700 #1d2021 #ebdbb2 #fbf1c700 #fbf1c700
-client.focused_inactive #fbf1c700 #1d202175 #ebdbb2 #fbf1c7 #fbf1c700
-client.unfocused #fbf1c700 #1d202175 #ebdbb2 #fbf1c7 #fbf1c700
+client.focused #fbf1c700 #000000 #ebdbb2 #fbf1c700 #fbf1c700
+client.focused_inactive #fbf1c700 #000000 #ebdbb2 #fbf1c7 #fbf1c700
+client.unfocused #fbf1c700 #000000 #ebdbb2 #fbf1c7 #fbf1c700
 exec_always --no-startup-id "picom &"
+exec --no-startup-id xmodmap /home/twaldin/.Xmodmap
 gaps inner 10
 gaps outer 10
 gaps bottom 0
 mouse_warping none
 focus_follows_mouse no
 bindsym Print exec NOW=$(date +%d-%b-%Y_%H-%M-%S) && maim --format png --select > ~/screenshots/screenshot_$NOW.png && xclip -selection clip -t image/png ~/screenshots/screenshot_$NOW.png
-font pango:JetBrainsMono NF 12
+font pango:JetBrainsMono NF 18

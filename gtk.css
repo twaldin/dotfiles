@@ -7,3 +7,12 @@
 	color: white;
 }
 
+.xfce4-panel widget grid button.flat.toggle:checked {
+	border-bottom: 1px solid white;
+	color: white;
+}
+
+.xfce4-panel widget grid button.flat.toggle {
+	color: gray;
+}
+

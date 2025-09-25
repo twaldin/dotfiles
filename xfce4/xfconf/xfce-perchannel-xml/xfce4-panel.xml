@@ -1,0 +1,286 @@
+<?xml version="1.1" encoding="UTF-8"?>
+
+<channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="dark-mode" type="bool" value="true"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=5;x=960;y=984"/>
+      <property name="length" type="double" value="100"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="icon-size" type="uint" value="0"/>
+      <property name="size" type="uint" value="28"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="35"/>
+        <value type="int" value="11"/>
+        <value type="int" value="15"/>
+        <value type="int" value="45"/>
+        <value type="int" value="7"/>
+        <value type="int" value="5"/>
+        <value type="int" value="12"/>
+        <value type="int" value="43"/>
+        <value type="int" value="3"/>
+        <value type="int" value="23"/>
+        <value type="int" value="27"/>
+        <value type="int" value="2"/>
+        <value type="int" value="8"/>
+        <value type="int" value="29"/>
+        <value type="int" value="28"/>
+        <value type="int" value="18"/>
+        <value type="int" value="4"/>
+        <value type="int" value="64"/>
+        <value type="int" value="63"/>
+        <value type="int" value="14"/>
+        <value type="int" value="26"/>
+        <value type="int" value="17"/>
+        <value type="int" value="19"/>
+        <value type="int" value="9"/>
+        <value type="int" value="25"/>
+        <value type="int" value="21"/>
+        <value type="int" value="20"/>
+        <value type="int" value="22"/>
+        <value type="int" value="16"/>
+        <value type="int" value="24"/>
+        <value type="int" value="1"/>
+        <value type="int" value="13"/>
+        <value type="int" value="30"/>
+        <value type="int" value="31"/>
+        <value type="int" value="6"/>
+        <value type="int" value="32"/>
+        <value type="int" value="33"/>
+        <value type="int" value="34"/>
+        <value type="int" value="40"/>
+        <value type="int" value="42"/>
+        <value type="int" value="53"/>
+        <value type="int" value="55"/>
+      </property>
+      <property name="background-style" type="uint" value="1"/>
+      <property name="background-image" type="string" value="file:///home/twaldin/dev/dotfiles/i3/bg.jpg"/>
+      <property name="mode" type="uint" value="0"/>
+      <property name="enable-struts" type="bool" value="true"/>
+      <property name="border-width" type="uint" value="10"/>
+      <property name="nrows" type="uint" value="1"/>
+      <property name="enter-opacity" type="uint" value="100"/>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-4" type="string" value="pager">
+      <property name="rows" type="uint" value="1"/>
+      <property name="miniature-view" type="bool" value="false"/>
+      <property name="wrap-workspaces" type="bool" value="false"/>
+      <property name="numbering" type="bool" value="false"/>
+      <property name="workspace-scrolling" type="bool" value="false"/>
+    </property>
+    <property name="plugin-6" type="string" value="systray">
+      <property name="square-icons" type="bool" value="true"/>
+      <property name="known-legacy-items" type="array">
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (61%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (72%)"/>
+        <value type="string" value="wi-fi network connection “eduroam” active: eduroam (67%)"/>
+        <value type="string" value="wi-fi network connection “eduroam” active: eduroam (69%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (71%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (70%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (68%)"/>
+        <value type="string" value="xfce4-power-manager"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (58%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (66%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (65%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (60%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (69%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (67%)"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (63%)"/>
+        <value type="string" value="configuring wi-fi network connection “@everresident”…"/>
+        <value type="string" value="networking disabled"/>
+        <value type="string" value="wi-fi network connection “@everresident” active: @everresident (62%)"/>
+        <value type="string" value="no network connection"/>
+      </property>
+      <property name="single-row" type="bool" value="true"/>
+      <property name="hide-new-items" type="bool" value="false"/>
+      <property name="icon-size" type="int" value="0"/>
+      <property name="known-items" type="array">
+        <value type="string" value="chrome_status_icon_1"/>
+      </property>
+    </property>
+    <property name="plugin-8" type="string" value="clock">
+      <property name="mode" type="uint" value="2"/>
+      <property name="digital-date-font" type="string" value="JetBrainsMono Nerd Font 12"/>
+      <property name="digital-layout" type="uint" value="2"/>
+      <property name="tooltip-format" type="string" value="%A %d %B %Y"/>
+      <property name="digital-date-format" type="string" value="%m/%d/%Y"/>
+      <property name="digital-time-font" type="string" value="JetBrainsMono Nerd Font 15"/>
+    </property>
+    <property name="plugin-19" type="string" value="pulseaudio">
+      <property name="enable-keyboard-shortcuts" type="bool" value="true"/>
+      <property name="known-players" type="string" value="firefox;Firefox;spotify"/>
+      <property name="play-sound" type="bool" value="false"/>
+      <property name="persistent-players" type="string" value=""/>
+      <property name="rec-indicator-persistent" type="bool" value="true"/>
+    </property>
+    <property name="plugin-20" type="string" value="power-manager-plugin"/>
+    <property name="plugin-13" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+      <property name="expand" type="bool" value="false"/>
+    </property>
+    <property name="plugin-14" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-16" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-18" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-21" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-1" type="string" value="notification-plugin"/>
+    <property name="plugin-2" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-3" type="string" value="clock">
+      <property name="digital-layout" type="uint" value="3"/>
+      <property name="digital-time-font" type="string" value="JetBrainsMono Nerd Font Mono 12"/>
+      <property name="digital-time-format" type="string" value="%I:%M %p"/>
+    </property>
+    <property name="plugin-5" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-7" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-9" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-11" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-12" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-15" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-17" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-22" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-23" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-24" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-25" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-26" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-27" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-28" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-29" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-30" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-31" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-32" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-33" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-34" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-35" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-40" type="string" value="diskperf"/>
+    <property name="plugin-42" type="string" value="systemload">
+      <property name="swap" type="empty">
+        <property name="enabled" type="bool" value="false"/>
+      </property>
+      <property name="uptime" type="empty">
+        <property name="enabled" type="bool" value="false"/>
+      </property>
+    </property>
+    <property name="plugin-43" type="string" value="weather">
+      <property name="location" type="empty">
+        <property name="name" type="string" value="West Lafayette, Lafayette Township"/>
+        <property name="latitude" type="string" value="40.275349"/>
+        <property name="longitude" type="string" value="-81.750960"/>
+      </property>
+      <property name="msl" type="int" value="242"/>
+      <property name="timezone" type="string" value="America/New_York"/>
+      <property name="offset" type="string" value="-04:00"/>
+      <property name="cache-max-age" type="int" value="172800"/>
+      <property name="power-saving" type="bool" value="true"/>
+      <property name="units" type="empty">
+        <property name="temperature" type="int" value="1"/>
+        <property name="pressure" type="int" value="2"/>
+        <property name="windspeed" type="int" value="1"/>
+        <property name="precipitation" type="int" value="1"/>
+        <property name="altitude" type="int" value="1"/>
+        <property name="apparent-temperature" type="int" value="0"/>
+      </property>
+      <property name="round" type="bool" value="true"/>
+      <property name="single-row" type="bool" value="true"/>
+      <property name="tooltip-style" type="int" value="1"/>
+      <property name="forecast" type="empty">
+        <property name="layout" type="int" value="0"/>
+        <property name="days" type="int" value="5"/>
+      </property>
+      <property name="theme-dir" type="string" value="/usr/share/xfce4/weather/icons/liquid-dark"/>
+      <property name="scrollbox" type="empty">
+        <property name="show" type="bool" value="true"/>
+        <property name="animate" type="bool" value="true"/>
+        <property name="lines" type="int" value="1"/>
+        <property name="color" type="string" value="rgb(255,255,255)"/>
+        <property name="use-color" type="bool" value="true"/>
+        <property name="font" type="string" value="JetBrainsMono Nerd Font 10"/>
+      </property>
+    </property>
+    <property name="plugin-45" type="string" value="whiskermenu">
+      <property name="view-mode" type="int" value="2"/>
+      <property name="show-button-icon" type="bool" value="true"/>
+      <property name="show-button-title" type="bool" value="true"/>
+      <property name="button-title" type="string" value="twaldin"/>
+      <property name="button-icon" type="string" value="emblem-readonly"/>
+      <property name="profile-shape" type="int" value="1"/>
+      <property name="default-category" type="int" value="0"/>
+      <property name="hover-switch-category" type="bool" value="true"/>
+      <property name="show-command-logoutuser" type="bool" value="true"/>
+      <property name="show-command-restart" type="bool" value="true"/>
+      <property name="show-command-shutdown" type="bool" value="true"/>
+      <property name="recent" type="array">
+        <value type="string" value="org.keepassxc.KeePassXC.desktop"/>
+        <value type="string" value="com.spotify.Client.desktop"/>
+        <value type="string" value="com.discordapp.Discord.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-53" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-55" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-63" type="string" value="separator">
+      <property name="style" type="uint" value="2"/>
+    </property>
+    <property name="plugin-64" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+  </property>
+</channel>
