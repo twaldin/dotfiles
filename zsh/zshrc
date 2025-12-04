@@ -3,7 +3,7 @@
 # confirmations, etc.) must go above this block; everything else may go below.
 export PF_ASCII="linux"
 export PF_INFO="ascii title os de host shell kernel uptime"
-pfetch
+/home/twaldin/scripts/pfetch.sh
 if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
   source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
 fi
@@ -13,6 +13,7 @@ fi
 alias ls='ls --color=auto'
 alias vi='nvim'
 alias tmx='/home/twaldin/scripts/tmux_sessionizer.sh'
+alias pfetch='/home/twaldin/scripts/pfetch.sh'
 source ~/powerlevel10k/powerlevel10k.zsh-theme
 
 export PATH="$PATH:/home/twaldin/.cargo/bin"
