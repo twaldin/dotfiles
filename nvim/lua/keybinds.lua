@@ -24,6 +24,7 @@ for i = 1, 9 do
 end
 
 vim.keymap.set("n", "<leader>F", vim.lsp.buf.format)
+vim.keymap.set("n", "gd", vim.lsp.buf.definition)
 
 --oil & fzf binds
 vim.keymap.set("n", "<leader>e", ":Oil<CR>")
