@@ -1,6 +1,6 @@
 # Personal Dotfiles
 
-My personal configuration files. For swayfx wm, waybar, wofi launcher, ghostty terminal, zsh, tmux and neovim
+My personal configuration files. Branches are maintained per device main is my linux laptop (fedora) as well as macbook on the same branch
 
 I symlink the files to my home directory, for example,
 ```bash
