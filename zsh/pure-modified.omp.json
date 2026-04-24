@@ -5,13 +5,13 @@
       "alignment": "left",
       "segments": [
         {
-          "foreground": "#cc241d",
+          "foreground": "lightMagenta",
           "style": "plain",
           "template": "{{ .UserName }} ",
           "type": "session"
         },
         {
-          "foreground": "#fbf1c7",
+          "foreground": "lightWhite",
           "properties": {
             "style": "full"
           },
@@ -26,17 +26,17 @@
       "alignment": "left",
       "segments": [
         {
-          "foreground": "#928374",
+          "foreground": "darkGray",
           "properties": {
-            "branch_ahead_icon": "<#b8bb26>\u21e1 </>",
-            "branch_behind_icon": "<#cc241d>\u21e3 </>",
-            "branch_icon": " ",
+            "branch_ahead_icon": "<lightGreen>⇡ </>",
+            "branch_behind_icon": "<red>⇣ </>",
+            "branch_icon": " ",
             "fetch_status": true,
             "fetch_upstream_icon": true,
-            "github_icon": "  "
+            "github_icon": "  "
           },
           "style": "plain",
-          "template": "{{ .UpstreamIcon }}{{ .HEAD }}{{if .BranchStatus }} {{ .BranchStatus }}{{ end }}{{ if .Working.Changed }}<#b8bb26>*</>{{ .Working.String }}{{ end }}{{ if and (.Working.Changed) (.Staging.Changed) }} |{{ end }}{{ if .Staging.Changed }} \uf046 {{ .Staging.String }}{{ end }}{{ if gt .StashCount 0 }} \ueb4b {{ .StashCount }}{{ end }} ",
+          "template": "{{ .UpstreamIcon }}{{ .HEAD }}{{if .BranchStatus }} {{ .BranchStatus }}{{ end }}{{ if .Working.Changed }}<lightGreen>*</>{{ .Working.String }}{{ end }}{{ if and (.Working.Changed) (.Staging.Changed) }} |{{ end }}{{ if .Staging.Changed }}  {{ .Staging.String }}{{ end }}{{ if gt .StashCount 0 }}  {{ .StashCount }}{{ end }} ",
           "type": "git"
         }
       ],
@@ -46,7 +46,7 @@
       "alignment": "left",
       "segments": [
         {
-          "foreground": "#b8bb26",
+          "foreground": "lightGreen",
           "properties": {
             "style": "austin"
           },
@@ -62,15 +62,15 @@
       "newline": true,
       "segments": [
         {
-          "foreground": "#cc241d",
+          "foreground": "lightMagenta",
           "foreground_templates": [
-            "{{ if gt .Code 0 }}#d65d0e{{ end }}"
+            "{{ if gt .Code 0 }}blue{{ end }}"
           ],
           "properties": {
             "always_enabled": true
           },
           "style": "plain",
-          "template": "\u276f ",
+          "template": "❯ ",
           "type": "status"
         }
       ],
@@ -79,11 +79,11 @@
   ],
   "console_title_template": "{{if .Root}}(Admin){{end}} {{.PWD}}",
   "transient_prompt": {
-    "foreground": "#b8bb26",
+    "foreground": "lightGreen",
     "foreground_templates": [
-      "{{ if gt .Code 0 }}#cc241d{{ end }}"
+      "{{ if gt .Code 0 }}red{{ end }}"
     ],
-    "template": "\u276f "
+    "template": "❯ "
   },
   "version": 3
 }
