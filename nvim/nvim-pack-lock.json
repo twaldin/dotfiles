@@ -1,0 +1,65 @@
+{
+  "plugins": {
+    "LuaSnip": {
+      "rev": "de10d8414235b0a8cabfeba60d07c24304e71f5c",
+      "src": "https://github.com/L3MON4D3/LuaSnip"
+    },
+    "blink.cmp": {
+      "rev": "4e9edba1b1cef1585cc65e54287229e5d34e4df8",
+      "src": "https://github.com/Saghen/blink.cmp"
+    },
+    "fzf-lua": {
+      "rev": "f579824e744aad6a747e8e6ff674dd92cd10d521",
+      "src": "https://github.com/ibhagwan/fzf-lua"
+    },
+    "gruvbox.nvim": {
+      "rev": "58a2cda2e953a99e2f87c12b7fb4602da4e0709c",
+      "src": "https://github.com/ellisonleao/gruvbox.nvim"
+    },
+    "mason.nvim": {
+      "rev": "7dc4facca9702f95353d5a1f87daf23d78e31c2a",
+      "src": "https://github.com/mason-org/mason.nvim"
+    },
+    "mini.icons": {
+      "rev": "b8f6fa6f5a3fd0c56936252edcd691184e5aac0c",
+      "src": "https://github.com/echasnovski/mini.icons"
+    },
+    "mini.pick": {
+      "rev": "82ec629ca108c7b96b8b9bb733d235b39e137690",
+      "src": "https://github.com/echasnovski/mini.pick"
+    },
+    "nabla.nvim": {
+      "rev": "9b69b709063ccf40ac36fabb4fff7d90b3736475",
+      "src": "https://github.com/jbyuki/nabla.nvim"
+    },
+    "nvim-lspconfig": {
+      "rev": "b0caeef0d835fbe19df6ad71dbc4345eaaea649c",
+      "src": "https://github.com/neovim/nvim-lspconfig"
+    },
+    "nvim-treesitter": {
+      "rev": "32cb9f9b9db71b0dc2454817727cd9a5d840658c",
+      "src": "https://github.com/nvim-treesitter/nvim-treesitter",
+      "version": "'main'"
+    },
+    "oil.nvim": {
+      "rev": "bbad9a76b2617ce1221d49619e4e4b659b3c61fc",
+      "src": "https://github.com/stevearc/oil.nvim"
+    },
+    "render-markdown.nvim": {
+      "rev": "b7dad793f4750b7e95884c0db374b917898a979b",
+      "src": "https://github.com/MeanderingProgrammer/render-markdown.nvim"
+    },
+    "showkeys": {
+      "rev": "cb0a50296f11f1e585acffba8c253b9e8afc1f84",
+      "src": "https://github.com/NvChad/showkeys"
+    },
+    "tokyonight.nvim": {
+      "rev": "057ef5d260c1931f1dffd0f052c685dcd14100a3",
+      "src": "https://github.com/folke/tokyonight.nvim"
+    },
+    "typst-preview.nvim": {
+      "rev": "dea4525d5420b7c32eebda7de15a6beb9d6574fa",
+      "src": "https://github.com/chomosuke/typst-preview.nvim"
+    }
+  }
+}
