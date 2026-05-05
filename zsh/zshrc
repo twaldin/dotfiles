@@ -71,5 +71,14 @@ load-nvmrc() {
     nvm use default
   fi
 }
+
+export NVM_DIR="$HOME/.nvm"
+[ -s "/opt/homebrew/opt/nvm/nvm.sh" ] && \. "/opt/homebrew/opt/nvm/nvm.sh"
 add-zsh-hook chpwd load-nvmrc
 load-nvmrc
+
+# The next line updates PATH for the Google Cloud SDK.
+if [ -f '/Users/twaldin/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/twaldin/google-cloud-sdk/path.zsh.inc'; fi
+
+# The next line enables shell command completion for gcloud.
+if [ -f '/Users/twaldin/google-cloud-sdk/completion.zsh.inc' ]; then . '/Users/twaldin/google-cloud-sdk/completion.zsh.inc'; fi

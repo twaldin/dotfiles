@@ -2,6 +2,7 @@
 vim.pack.add({
 	{ src = "https://github.com/RRethy/base16-nvim" },
 	{ src = "https://github.com/stevearc/oil.nvim" },
+	{ src = "https://github.com/echasnovski/mini.icons" },
 	{ src = "https://github.com/nvim-treesitter/nvim-treesitter", version = "main" },
 	{ src = "https://github.com/ibhagwan/fzf-lua" },
 	{ src = "https://github.com/mason-org/mason.nvim" },
@@ -13,6 +14,7 @@ vim.pack.add({
 
 require "mason".setup()
 require "typst-preview".setup()
+require "mini.icons".setup()
 require "oil".setup()
 require "fzf-lua".setup()
 require "nvim-treesitter".setup({

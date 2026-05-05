@@ -30,10 +30,10 @@
           "properties": {
             "branch_ahead_icon": "<lightGreen>⇡ </>",
             "branch_behind_icon": "<red>⇣ </>",
-            "branch_icon": " ",
+            "branch_icon": " ",
             "fetch_status": true,
             "fetch_upstream_icon": true,
-            "github_icon": "  "
+            "github_icon": " "
           },
           "style": "plain",
           "template": "{{ .UpstreamIcon }}{{ .HEAD }}{{if .BranchStatus }} {{ .BranchStatus }}{{ end }}{{ if .Working.Changed }}<lightGreen>*</>{{ .Working.String }}{{ end }}{{ if and (.Working.Changed) (.Staging.Changed) }} |{{ end }}{{ if .Staging.Changed }}  {{ .Staging.String }}{{ end }}{{ if gt .StashCount 0 }}  {{ .StashCount }}{{ end }} ",

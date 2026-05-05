@@ -1,6 +1,6 @@
 theme = Hardcore
 font-size = 24
-font-family = JetBrains Mono
+font-family = JetBrainsMono Nerd Font
 keybind = shift+enter=text:\n
 macos-titlebar-style = hidden
 window-padding-y = 10
