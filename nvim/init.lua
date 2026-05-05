@@ -1,3 +1,12 @@
+-- disable unused providers (silences checkhealth noise)
+vim.g.loaded_node_provider = 0
+vim.g.loaded_perl_provider = 0
+vim.g.loaded_python3_provider = 0
+vim.g.loaded_ruby_provider = 0
+
+-- treesitter parser dir lives in site/, make sure it's on rtp
+vim.opt.runtimepath:prepend(vim.fn.stdpath("data") .. "/site")
+
 --plugins
 vim.pack.add({
 	{ src = "https://github.com/RRethy/base16-nvim" },
@@ -5,6 +14,7 @@ vim.pack.add({
 	{ src = "https://github.com/echasnovski/mini.icons" },
 	{ src = "https://github.com/nvim-treesitter/nvim-treesitter", version = "main" },
 	{ src = "https://github.com/ibhagwan/fzf-lua" },
+	{ src = "https://github.com/echasnovski/mini.icons" },
 	{ src = "https://github.com/mason-org/mason.nvim" },
 	{ src = "https://github.com/Saghen/blink.cmp" },
 	{ src = "https://github.com/L3MON4D3/LuaSnip" },
@@ -16,6 +26,7 @@ require "mason".setup()
 require "typst-preview".setup()
 require "mini.icons".setup()
 require "oil".setup()
+require "mini.icons".setup()
 require "fzf-lua".setup()
 require "nvim-treesitter".setup({
 	highlight = {
@@ -40,7 +51,10 @@ require "blink.cmp".setup({
 	snippets = {
 		preset = 'default',
 	},
-	fuzzy = { implementation = "lua" },
+	fuzzy = {
+		implementation = "lua",
+		prebuilt_binaries = { download = false },
+	},
 })
 
 --load other files

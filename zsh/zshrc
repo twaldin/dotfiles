@@ -8,6 +8,17 @@ export PATH="$HOME/.local/bin:$PATH"
 alias tmx="$HOME/scripts/tmux_sessionizer.sh"
 alias cc="claude --dangerously-skip-permissions"
 alias vi="nvim"
+
+# Atomically paste stdin into a flt agent's tmux pane (bracketed paste).
+# Survives terminal lag — the paste starts and ends as one unit, no Enter mid-paste.
+# usage: ftpaste <agent-name>             # reads stdin
+#        pbpaste | ftpaste <agent>        # from clipboard
+#        ftpaste <agent> < file.txt       # from file
+ftpaste() {
+  local agent="${1:?usage: ftpaste <agent-name>}"
+  local sess="flt-$agent"
+  tmux load-buffer -t "$sess" - && tmux paste-buffer -t "$sess" -p
+}
 # Git aliases and c.ompompletions
 autoload -Uz compinit && compinit
 
