@@ -6,6 +6,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 export PATH="$HOME/.local/share/bob/nvim-bin:$PATH"
 export PATH="$HOME/.local/bin:$PATH"
 alias tmx="$HOME/scripts/tmux_sessionizer.sh"
+alias cc="claude --dangerously-skip-permissions"
 alias vi="nvim"
 # Git aliases and c.ompompletions
 autoload -Uz compinit && compinit
