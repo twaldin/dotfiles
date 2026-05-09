@@ -7,6 +7,8 @@ export PATH="$HOME/.local/share/bob/nvim-bin:$PATH"
 export PATH="$HOME/.local/bin:$PATH"
 alias tmx="$HOME/scripts/tmux_sessionizer.sh"
 alias cc="claude --dangerously-skip-permissions"
+alias nosleep="sudo pmset -a disablesleep 1"
+alias yessleep="sudo pmset -a disablesleep 0"
 alias vi="nvim"
 
 # Atomically paste stdin into a flt agent's tmux pane (bracketed paste).

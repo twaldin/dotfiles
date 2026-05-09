@@ -68,5 +68,5 @@ return {
     'typescriptreact',
     'typescript.tsx',
   },
-  root_markers = { 'tsconfig.json', 'package.json', 'jsconfig.json', '.git' },
+  root_markers = { 'tsconfig.json', 'jsconfig.json' },
 }
