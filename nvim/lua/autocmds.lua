@@ -16,23 +16,15 @@ vim.api.nvim_create_autocmd("TextYankPost", {
 	end,
 })
 
---auto turn on nabla for txt and md
+--markdown buffer settings (wrap + conceal for render-markdown)
 vim.api.nvim_create_autocmd("FileType", {
-	pattern = { "markdown", "txt" },
+	pattern = "markdown",
 	callback = function()
-		require("nabla").enable_virt()
-	end,
-})
-
-vim.api.nvim_create_autocmd("BufWritePost", {
-	pattern = { "*.md", "*.tex", "*.latex" },
-	callback = function()
-		local nabla = require("nabla")
-		nabla.disable_virt()
-		-- Small delay to ensure disable completes before re-enabling
-		vim.defer_fn(function()
-			nabla.enable_virt()
-		end, 50)
+		vim.opt_local.wrap = true
+		vim.opt_local.linebreak = true
+		vim.opt_local.breakindent = true
+		vim.opt_local.conceallevel = 2
+		vim.opt_local.concealcursor = "nc"
 	end,
 })
 

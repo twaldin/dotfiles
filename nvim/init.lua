@@ -18,7 +18,7 @@ vim.pack.add({
 	{ src = "https://github.com/mason-org/mason.nvim" },
 	{ src = "https://github.com/Saghen/blink.cmp" },
 	{ src = "https://github.com/L3MON4D3/LuaSnip" },
-	{ src = "https://github.com/jbyuki/nabla.nvim", ft = "markdown" },
+	{ src = "https://github.com/MeanderingProgrammer/render-markdown.nvim", ft = "markdown" },
 	{ src = "https://github.com/chomosuke/typst-preview.nvim" },
 	{ src = "https://github.com/lewis6991/gitsigns.nvim"},
 	{ src = "https://github.com/juacker/git-link.nvim" },
@@ -30,6 +30,30 @@ require "mini.icons".setup()
 require "oil".setup()
 require "mini.icons".setup()
 require "fzf-lua".setup()
+require "render-markdown".setup({
+	heading = {
+		enabled = true,
+		sign = true,
+		icons = { "󰼏 ", "󰎨 ", "󰼑 ", "󰎲 ", "󰼓 ", "󰎴 " },
+	},
+	code = {
+		enabled = true,
+		sign = false,
+		width = "block",
+		right_pad = 1,
+	},
+	bullet = {
+		enabled = true,
+		icons = { "●", "○", "◆", "◇" },
+	},
+	checkbox = {
+		enabled = true,
+	},
+	pipe_table = {
+		enabled = true,
+		style = "full",
+	},
+})
 require "nvim-treesitter".setup({
 	highlight = {
 		enable = true,

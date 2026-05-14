@@ -31,7 +31,4 @@ vim.keymap.set("n", "gl", function() require("git-link.main").open_line_url() en
 vim.keymap.set("n", "<leader>e", ":Oil<CR>")
 vim.keymap.set("n", "<leader>f", ":FzfLua files<CR>")
 vim.keymap.set("n", "<leader>/", ":FzfLua live_grep -- --glob ' node_modules/*'<CR>")
-vim.keymap.set('n', '<leader>p', function()
-    require('nabla').popup()
-end)
-vim.keymap.set("n", "<leader>nv", function() require("nabla").toggle_virt() end)
+vim.keymap.set("n", "<leader>nv", ":RenderMarkdown toggle<CR>", { silent = true })

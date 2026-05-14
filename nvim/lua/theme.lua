@@ -26,6 +26,39 @@ local function to_kebab(s)
   return (s:gsub("(%u)", function(c) return "-" .. c:lower() end):gsub("^%-", ""))
 end
 
+-- Groups whose bg we keep — selection/search indicators rely on a visible bg.
+local KEEP_BG = {
+  Visual = true, VisualNOS = true,
+  Search = true, IncSearch = true, CurSearch = true,
+  Substitute = true,
+  DiffAdd = true, DiffChange = true, DiffDelete = true, DiffText = true,
+  MatchParen = true,
+}
+
+local function make_transparent()
+  for _, group in ipairs(vim.fn.getcompletion("", "highlight")) do
+    if not KEEP_BG[group] then
+      local hl = vim.api.nvim_get_hl(0, { name = group })
+      if not hl.link and (hl.bg or hl.ctermbg) then
+        hl.bg = nil
+        hl.ctermbg = nil
+        vim.api.nvim_set_hl(0, group, hl)
+      end
+    end
+  end
+end
+
+local function apply_overrides()
+  make_transparent()
+  local ok, b16 = pcall(require, "base16-colorscheme")
+  if ok and b16.colors then
+    vim.api.nvim_set_hl(0, "RenderMarkdownCode", { bg = b16.colors.base02 })
+  end
+  vim.cmd("hi link BlinkCmpMenuSelection Visual")
+end
+
+vim.api.nvim_create_autocmd("ColorScheme", { callback = apply_overrides })
+
 local fallback = "base16-default-dark"
 local ghostty = ghostty_theme()
 if ghostty then
@@ -37,27 +70,4 @@ else
   vim.cmd("colorscheme " .. fallback)
 end
 
-vim.cmd("hi Normal guibg=none guifg=none")
-vim.cmd("hi LineNr guibg=none")
-vim.cmd("hi CursorLineNr guibg=none")
-vim.cmd("hi SignColumn guibg=none")
-vim.cmd("hi WinBar guibg=none")
-vim.cmd("hi NormalFloat guibg=none")
-vim.cmd("hi FloatBorder guibg=none")
-vim.cmd("hi StatusLine guibg=none")
-
-vim.cmd("hi BlinkCmpMenu guibg=none")
-vim.cmd("hi BlinkCmpMenuBorder guibg=none")
-vim.cmd("hi link BlinkCmpMenuSelection Visual")
-vim.cmd("hi BlinkCmpScrollBarThumb guibg=none guifg=none")
-vim.cmd("hi BlinkCmpScrollBarGutter guibg=none")
-vim.cmd("hi BlinkCmpDoc guibg=none")
-vim.cmd("hi BlinkCmpDocBorder guibg=none")
-vim.cmd("hi BlinkCmpDocSeparator guibg=none")
-vim.cmd("hi BlinkCmpSignatureHelp guibg=none")
-vim.cmd("hi BlinkCmpSignatureHelpBorder guibg=none")
-vim.cmd("hi BlinkCmpSignatureHelpActiveParameter guibg=none")
-vim.cmd("hi Pmenu guibg=none")
-vim.cmd("hi PmenuSel guibg=none")
-vim.cmd("hi PmenuSbar guibg=none")
-vim.cmd("hi PmenuThumb guibg=none")
+apply_overrides()
