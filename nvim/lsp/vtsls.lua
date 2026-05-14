@@ -69,4 +69,12 @@ return {
     'typescript.tsx',
   },
   root_markers = { 'tsconfig.json', 'jsconfig.json' },
+  settings = {
+    typescript = {
+      tsserver = {
+        nodePath = '/Users/twaldin/.nvm/versions/node/v24.8.0/bin/node',
+        maxTsServerMemory = 8192,
+      },
+    },
+  },
 }

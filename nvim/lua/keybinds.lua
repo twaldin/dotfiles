@@ -25,6 +25,7 @@ end
 
 vim.keymap.set("n", "<leader>F", vim.lsp.buf.format)
 vim.keymap.set("n", "gd", vim.lsp.buf.definition)
+vim.keymap.set("n", "gl", function() require("git-link.main").open_line_url() end)
 
 --oil & fzf binds
 vim.keymap.set("n", "<leader>e", ":Oil<CR>")
