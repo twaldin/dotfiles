@@ -53,6 +53,10 @@
       "src": "https://github.com/nvim-treesitter/nvim-treesitter",
       "version": "'main'"
     },
+    "nvim-treesitter-context": {
+      "rev": "b311b30818951d01f7b4bf650521b868b3fece16",
+      "src": "https://github.com/nvim-treesitter/nvim-treesitter-context"
+    },
     "oil.nvim": {
       "rev": "bbad9a76b2617ce1221d49619e4e4b659b3c61fc",
       "src": "https://github.com/stevearc/oil.nvim"

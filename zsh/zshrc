@@ -10,6 +10,8 @@ alias cc="claude --dangerously-skip-permissions"
 alias nosleep="sudo pmset -a disablesleep 1"
 alias yessleep="sudo pmset -a disablesleep 0"
 alias vi="nvim"
+alias cx="codex"
+alias codex="codex --yolo"
 
 # Atomically paste stdin into a flt agent's tmux pane (bracketed paste).
 # Survives terminal lag — the paste starts and ends as one unit, no Enter mid-paste.

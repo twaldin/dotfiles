@@ -28,3 +28,10 @@ vim.o.winbar = "%{%v:lua.get_winbar()%}"
 
 --cursor
 vim.o.guicursor = ""
+
+--folding (treesitter-driven, start fully open)
+vim.o.foldmethod = "expr"
+vim.o.foldexpr = "v:lua.vim.treesitter.foldexpr()"
+vim.o.foldenable = true
+vim.o.foldlevel = 99
+vim.o.foldlevelstart = 99

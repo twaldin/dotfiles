@@ -13,6 +13,7 @@ vim.pack.add({
 	{ src = "https://github.com/stevearc/oil.nvim" },
 	{ src = "https://github.com/echasnovski/mini.icons" },
 	{ src = "https://github.com/nvim-treesitter/nvim-treesitter", version = "main" },
+	{ src = "https://github.com/nvim-treesitter/nvim-treesitter-context" },
 	{ src = "https://github.com/ibhagwan/fzf-lua" },
 	{ src = "https://github.com/echasnovski/mini.icons" },
 	{ src = "https://github.com/mason-org/mason.nvim" },
@@ -29,8 +30,30 @@ require "typst-preview".setup()
 require "mini.icons".setup()
 require "oil".setup()
 require "mini.icons".setup()
-require "fzf-lua".setup()
+require "fzf-lua".setup({
+	defaults = {
+		formatter = "path.filename_first",
+	},
+	files = {
+		fd_opts = table.concat({
+			"--color=never --type f --hidden --follow",
+			"--exclude .git --exclude node_modules --exclude __generated__",
+			"--exclude dist --exclude .next --exclude coverage",
+			"--exclude '*.tsbuildinfo'",
+		}, " "),
+	},
+	grep = {
+		rg_opts = table.concat({
+			"--column --line-number --no-heading --color=always",
+			"--smart-case --hidden --max-columns=512",
+			"-g '!.git' -g '!node_modules' -g '!__generated__'",
+			"-g '!dist' -g '!.next' -g '!coverage'",
+			"-g '!*-lock.*' -g '!*.tsbuildinfo'",
+		}, " "),
+	},
+})
 require "render-markdown".setup({
+	render_modes = { 'n', 'c', 't', 'i' },
 	heading = {
 		enabled = true,
 		sign = true,
@@ -59,6 +82,12 @@ require "nvim-treesitter".setup({
 		enable = true,
 	},
 	auto_install = true,
+})
+require "treesitter-context".setup({
+	max_lines = 3,
+	multiline_threshold = 1,
+	trim_scope = "outer",
+	mode = "cursor",
 })
 require "blink.cmp".setup({
 	keymap = {
@@ -109,7 +138,7 @@ require('gitsigns').setup {
   },
   auto_attach = true,
   attach_to_untracked = false,
-  current_line_blame = false, -- Toggle with `:Gitsigns toggle_current_line_blame`
+  current_line_blame = true, -- Toggle with `:Gitsigns toggle_current_line_blame`
   current_line_blame_opts = {
     virt_text = true,
     virt_text_pos = 'eol', -- 'eol' | 'overlay' | 'right_align'
