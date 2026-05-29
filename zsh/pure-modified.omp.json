@@ -5,7 +5,7 @@
       "alignment": "left",
       "segments": [
         {
-          "foreground": "#a6e22e",
+          "foreground": "green",
           "style": "plain",
           "template": "{{ .UserName }} ",
           "type": "session"
@@ -62,7 +62,7 @@
       "newline": true,
       "segments": [
         {
-          "foreground": "#a6e22e",
+          "foreground": "green",
           "foreground_templates": [
             "{{ if gt .Code 0 }}red{{ end }}"
           ],
