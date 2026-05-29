@@ -5,7 +5,7 @@
       "alignment": "left",
       "segments": [
         {
-          "foreground": "lightMagenta",
+          "foreground": "#a6e22e",
           "style": "plain",
           "template": "{{ .UserName }} ",
           "type": "session"
@@ -62,9 +62,9 @@
       "newline": true,
       "segments": [
         {
-          "foreground": "lightMagenta",
+          "foreground": "#a6e22e",
           "foreground_templates": [
-            "{{ if gt .Code 0 }}blue{{ end }}"
+            "{{ if gt .Code 0 }}red{{ end }}"
           ],
           "properties": {
             "always_enabled": true
