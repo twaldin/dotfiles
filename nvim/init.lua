@@ -13,16 +13,14 @@ vim.pack.add({
 	{ src = "https://github.com/stevearc/oil.nvim" },
 	{ src = "https://github.com/echasnovski/mini.icons" },
 	{ src = "https://github.com/nvim-treesitter/nvim-treesitter", version = "main" },
-	{ src = "https://github.com/nvim-treesitter/nvim-treesitter-context" },
 	{ src = "https://github.com/ibhagwan/fzf-lua" },
 	{ src = "https://github.com/echasnovski/mini.icons" },
 	{ src = "https://github.com/mason-org/mason.nvim" },
 	{ src = "https://github.com/Saghen/blink.cmp" },
 	{ src = "https://github.com/L3MON4D3/LuaSnip" },
-	{ src = "https://github.com/MeanderingProgrammer/render-markdown.nvim", ft = "markdown" },
+	{ src = "https://github.com/jbyuki/nabla.nvim",               ft = "markdown" },
+	{ src = "https://github.com/lewis6991/gitsigns.nvim" },
 	{ src = "https://github.com/chomosuke/typst-preview.nvim" },
-	{ src = "https://github.com/lewis6991/gitsigns.nvim"},
-	{ src = "https://github.com/juacker/git-link.nvim" },
 })
 
 require "mason".setup()
@@ -30,64 +28,12 @@ require "typst-preview".setup()
 require "mini.icons".setup()
 require "oil".setup()
 require "mini.icons".setup()
-require "fzf-lua".setup({
-	defaults = {
-		formatter = "path.filename_first",
-	},
-	files = {
-		fd_opts = table.concat({
-			"--color=never --type f --hidden --follow",
-			"--exclude .git --exclude node_modules --exclude __generated__",
-			"--exclude dist --exclude .next --exclude coverage",
-			"--exclude '*.tsbuildinfo'",
-		}, " "),
-	},
-	grep = {
-		rg_opts = table.concat({
-			"--column --line-number --no-heading --color=always",
-			"--smart-case --hidden --max-columns=512",
-			"-g '!.git' -g '!node_modules' -g '!__generated__'",
-			"-g '!dist' -g '!.next' -g '!coverage'",
-			"-g '!*-lock.*' -g '!*.tsbuildinfo'",
-		}, " "),
-	},
-})
-require "render-markdown".setup({
-	render_modes = { 'n', 'c', 't', 'i' },
-	heading = {
-		enabled = true,
-		sign = true,
-		icons = { "󰼏 ", "󰎨 ", "󰼑 ", "󰎲 ", "󰼓 ", "󰎴 " },
-	},
-	code = {
-		enabled = true,
-		sign = false,
-		width = "block",
-		right_pad = 1,
-	},
-	bullet = {
-		enabled = true,
-		icons = { "●", "○", "◆", "◇" },
-	},
-	checkbox = {
-		enabled = true,
-	},
-	pipe_table = {
-		enabled = true,
-		style = "full",
-	},
-})
+require "fzf-lua".setup()
 require "nvim-treesitter".setup({
 	highlight = {
 		enable = true,
 	},
 	auto_install = true,
-})
-require "treesitter-context".setup({
-	max_lines = 3,
-	multiline_threshold = 1,
-	trim_scope = "outer",
-	mode = "cursor",
 })
 require "blink.cmp".setup({
 	keymap = {
@@ -98,7 +44,7 @@ require "blink.cmp".setup({
 	},
 	completion = {
 		documentation = { auto_show = false, },
-		menu = {scrollbar = false},
+		menu = { scrollbar = false },
 	},
 	sources = {
 		default = { 'lsp', 'path', 'snippets', 'buffer' },
@@ -111,57 +57,18 @@ require "blink.cmp".setup({
 		prebuilt_binaries = { download = false },
 	},
 })
-require('gitsigns').setup {
-  signs = {
-    add          = { text = '┃' },
-    change       = { text = '┃' },
-    delete       = { text = '_' },
-    topdelete    = { text = '‾' },
-    changedelete = { text = '~' },
-    untracked    = { text = '┆' },
-  },
-  signs_staged = {
-    add          = { text = '┃' },
-    change       = { text = '┃' },
-    delete       = { text = '_' },
-    topdelete    = { text = '‾' },
-    changedelete = { text = '~' },
-    untracked    = { text = '┆' },
-  },
-  signs_staged_enable = true,
-  signcolumn = true,  -- Toggle with `:Gitsigns toggle_signs`
-  numhl      = false, -- Toggle with `:Gitsigns toggle_numhl`
-  linehl     = false, -- Toggle with `:Gitsigns toggle_linehl`
-  word_diff  = false, -- Toggle with `:Gitsigns toggle_word_diff`
-  watch_gitdir = {
-    follow_files = true
-  },
-  auto_attach = true,
-  attach_to_untracked = false,
-  current_line_blame = true, -- Toggle with `:Gitsigns toggle_current_line_blame`
-  current_line_blame_opts = {
-    virt_text = true,
-    virt_text_pos = 'eol', -- 'eol' | 'overlay' | 'right_align'
-    delay = 1000,
-    ignore_whitespace = false,
-    virt_text_priority = 100,
-    use_focus = true,
-  },
-  current_line_blame_formatter = '<author>, <author_time:%R> - <summary>',
-  blame_formatter = nil, -- Use default
-  sign_priority = 6,
-  update_debounce = 100,
-  status_formatter = nil, -- Use default
-  max_file_length = 40000, -- Disable if file is longer than this (in lines)
-  preview_config = {
-    -- Options passed to nvim_open_win
-    style = 'minimal',
-    relative = 'cursor',
-    row = 0,
-    col = 1
-  },
-}
-
+require('gitsigns').setup({
+	current_line_blame = true,
+	current_line_blame_opts = {
+		delay = 500,
+		virt_text_pos = 'eol', -- or 'right_align'
+	},
+	signs = {
+		add    = { text = '▎' },
+		change = { text = '▎' },
+		delete = { text = '▁' },
+	},
+})
 --load other files
 _G.lasso = require "lasso"
 _G.lasso.setup()
