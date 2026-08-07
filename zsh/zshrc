@@ -24,7 +24,8 @@ ftpaste() {
   local sess="flt-$agent"
   tmux load-buffer -t "$sess" - && tmux paste-buffer -t "$sess" -p
 }
-# Git aliases and c.ompompletions
+# Git aliases and completions
+fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
 autoload -Uz compinit && compinit
 
 # User configuration
