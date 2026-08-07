@@ -20,6 +20,7 @@ vim.pack.add({
 	{ src = "https://github.com/L3MON4D3/LuaSnip" },
 	{ src = "https://github.com/jbyuki/nabla.nvim",               ft = "markdown" },
 	{ src = "https://github.com/lewis6991/gitsigns.nvim" },
+	{ src = "https://github.com/juacker/git-link.nvim" },
 	{ src = "https://github.com/chomosuke/typst-preview.nvim" },
 })
 
