@@ -84,7 +84,7 @@ check(debug_fixture < optimized_fixture < release_build < manifest < candidate_p
 check('$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.binary.XXXXXX' in source and '$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.hash.XXXXXX' in source, 'candidates must share the owned canonical destination')
 check('system-controls-helper-install-transaction.sh" "$controls_candidate" "$controls_marker_candidate" "$SYSTEM_CONTROLS_HELPER_DIR" "$SYSTEM_CONTROLS_SOURCE_SHA256"' in source, 'transaction must receive the caller-pinned source hash')
 check('system_controls = os.getenv("HOME") .. "/.local/share/sketchybar-controls/system-controls"' in settings, 'inert system controls path is missing')
-check('switch_audio = "/opt/homebrew/bin/SwitchAudioSource"' in settings, 'transition audio dependency must remain configured')
+check('switch_audio' not in settings and 'switchaudio-osx' not in source, 'retired transition audio dependency remains configured')
 check(transaction.is_file(), 'system controls rollback transaction is missing')
 transaction_source = transaction.read_text()
 check(transaction_source.count('sync-directory') >= 5 and transaction_source.count('sync-file') >= 2, 'system controls transaction durability is incomplete')

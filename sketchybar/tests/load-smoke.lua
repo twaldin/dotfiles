@@ -26,8 +26,31 @@ local function object(name, properties)
 end
 
 local function mock_output(command)
-  if command:find("audio%-state%.sh.*'output'") then return "0\ttrue\tMock Speakers", 0 end
-  if command:find("audio%-state%.sh.*'input'") then return "50\tMock Microphone", 0 end
+  if command:find("'audio' 'state'", 1, true) then
+    return {
+      schema = 1, ok = true, warning_count = 0,
+      defaults = { output = "fixture-output", system_output = "fixture-output", input = "fixture-input" },
+      default_settable = { output = true, system_output = true, input = true },
+      devices = {
+        {
+          uid = "fixture-output", name = "Mock Speakers",
+          directions = { "output" }, roles = { "output", "system_output" },
+          output = {
+            volume = { available = true, settable = true, value = 50 },
+            mute = { available = true, settable = true, value = false },
+          },
+        },
+        {
+          uid = "fixture-input", name = "Mock Microphone",
+          directions = { "input" }, roles = { "input" },
+          input = {
+            volume = { available = true, settable = true, value = 75 },
+            mute = { available = true, settable = true, value = false },
+          },
+        },
+      },
+    }, 0
+  end
   if command:find("network%-sample%.sh") then return "1\ten0\t100\t100\t192.0.2.2\t192.0.2.1\tMock", 0 end
   if command:find("blueutil") then return {}, 0 end
   if command:find("system_profiler") then return { SPBluetoothDataType = { { controller_properties = { controller_state = "attrib_on" }, device_connected = {} } } }, 0 end

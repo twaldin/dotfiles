@@ -28,8 +28,7 @@ reviews do not claim to review the Swift body. The unchanged full offline native
 gate still builds, self-tests, and exercises that exact source on every smoke.
 
 `install-deps.sh` runs that full offline smoke gate after every dependency
-installation and fails the install if the gate fails. Lua, switchaudio-osx,
-icalBuddy, blueutil, and media-control are intentionally live Homebrew formula
+installation and fails the install if the gate fails. Lua, icalBuddy, blueutil, and media-control are intentionally live Homebrew formula
 inputs, not reproducibly frozen artifacts. Any Homebrew update invalidates the
 prior runtime proof until the full gate passes again. Lua and luac are accepted
 only from the supported 5.5.x line. The reproducibly frozen inputs are SbarLua,
@@ -136,10 +135,10 @@ Interactions:
   the next surface appears.
 - Right click opens Wi-Fi, Bluetooth, Sound, or Battery settings where
   applicable. Calendar bracket right and middle clicks are no-ops.
-- Audio scroll changes output by two points and preserves mute state. The panel
-  exposes explicit mute, output/input sliders, and device selectors. A muted
-  output is rendered as effective 0% even when macOS preserves a nonzero raw
-  restore level. Microphone controls update the same real input state.
+- Audio changes require explicit popup actions; scrolling the bar item does not
+  mutate state. The Audio and Microphone panels expose true mute, capability-aware
+  level sliders, and device selectors. A muted device keeps its confirmed stored
+  level visible for restore context while the mute state remains explicit.
 - Bluetooth cache invalidates when the light connected-device fingerprint
   changes. VPN recognizes NetworkExtension connections, split `utun` tunnels,
   and a running Tailscale tunnel.

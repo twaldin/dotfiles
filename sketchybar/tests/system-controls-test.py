@@ -37,44 +37,15 @@ def safe_text(value):
         check(not any(start <= scalar <= end for start, end in ((0x00ad, 0x00ad), (0x034f, 0x034f), (0x0600, 0x0605), (0x061c, 0x061d), (0x06dd, 0x06dd), (0x070f, 0x070f), (0x0890, 0x0891), (0x08e2, 0x08e2), (0x115f, 0x1160), (0x17b4, 0x17b5), (0x180b, 0x180f), (0x200b, 0x200f), (0x202a, 0x202e), (0x2060, 0x206f), (0x3164, 0x3164), (0xfe00, 0xfe0f), (0xfeff, 0xfeff), (0xffa0, 0xffa0), (0xfff0, 0xfffb), (0x110bd, 0x110bd), (0x110cd, 0x110cd), (0x13430, 0x13455), (0x1bca0, 0x1bca3), (0x1d173, 0x1d17a), (0xe0000, 0xe0fff))) and not 0xfdd0 <= scalar <= 0xfdef and scalar & 0xffff not in {0xfffe, 0xffff}, 'display text contains a prohibited scalar')
 
 
-def sanitize_transition_name(value):
-    rejected_ranges = (
-        (0x00ad, 0x00ad), (0x034f, 0x034f), (0x0600, 0x0605), (0x061c, 0x061d),
-        (0x06dd, 0x06dd), (0x070f, 0x070f), (0x0890, 0x0891), (0x08e2, 0x08e2),
-        (0x115f, 0x1160), (0x17b4, 0x17b5), (0x180b, 0x180f), (0x200b, 0x200f),
-        (0x202a, 0x202e), (0x2060, 0x206f), (0x3164, 0x3164), (0xfe00, 0xfe0f),
-        (0xfeff, 0xfeff), (0xffa0, 0xffa0), (0xfff0, 0xfffb), (0x110bd, 0x110bd),
-        (0x110cd, 0x110cd), (0x13430, 0x13455), (0x1bca0, 0x1bca3),
-        (0x1d173, 0x1d17a), (0xe0000, 0xe0fff),
-    )
-    pieces = []
-    separator = False
-    for character in value:
-        scalar = ord(character)
-        category = unicodedata.category(character)
-        rejected = category in {'Cc', 'Cf', 'Zl', 'Zp', 'Co', 'Cs'} or character.isspace() or any(start <= scalar <= end for start, end in rejected_ranges) or 0xfdd0 <= scalar <= 0xfdef or scalar & 0xffff in {0xfffe, 0xffff}
-        if rejected:
-            if pieces:
-                separator = True
-            continue
-        if separator:
-            pieces.append(' ')
-        pieces.append(character)
-        separator = False
-    output = ''
-    for character in ''.join(pieces).strip():
-        candidate = output + character
-        if len(candidate) > 64 or len(candidate.encode()) > 256:
-            break
-        output = candidate
-    return output
-
 
 def validate_audio(value):
     check(value.get('ok') is True and isinstance(value.get('warning_count'), int) and value['warning_count'] >= 0, 'audio state envelope is invalid')
+    check(set(value) == {'schema', 'ok', 'defaults', 'default_settable', 'devices', 'warning_count'}, 'audio state keys are invalid')
     defaults = value.get('defaults')
+    default_settable = value.get('default_settable')
     devices = value.get('devices')
     check(isinstance(defaults, dict) and set(defaults) == {'input', 'output', 'system_output'}, 'audio defaults are invalid')
+    check(isinstance(default_settable, dict) and set(default_settable) == {'input', 'output', 'system_output'} and all(isinstance(item, bool) for item in default_settable.values()), 'audio default capabilities are invalid')
     check(all(item is None or isinstance(item, str) and 0 < len(item.encode()) <= 4096 for item in defaults.values()), 'audio default UID is invalid')
     check(isinstance(devices, list), 'audio device list is invalid')
     uids = []
@@ -207,15 +178,6 @@ with tempfile.TemporaryDirectory(prefix='system-controls-test.') as raw:
         wifi = validate_wifi(one_json(execute(production, ['wifi', 'state'])))
         caffeine = one_json(execute(production, ['caffeine', 'status']))
         check(caffeine.get('state') == 'off' and caffeine.get('stale_marker') is False, 'bar-owned caffeine must be off on the read-only host probe')
-        switcher = pathlib.Path('/opt/homebrew/bin/SwitchAudioSource')
-        if switcher.is_file():
-            current = subprocess.run([str(switcher), '-c'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            check(current.returncode == 0 and current.stderr == '', 'read-only transition audio comparison failed')
-            output_uid = audio['defaults']['output']
-            output = next(item for item in audio['devices'] if item['uid'] == output_uid)
-            safe_text(output['name'])
-            legacy_safe = sanitize_transition_name(current.stdout.strip())
-            check(bool(legacy_safe) and legacy_safe == output['name'], 'read-only transition audio comparison did not match the native default output')
         check(wifi['association'] != 'associated' or wifi['mode'] == 'station', 'associated wifi must use station mode')
 
 print('System controls pure, compile, ownership, and privacy-safe read contracts passed' if live else 'System controls pure, compile, and ownership contracts passed')

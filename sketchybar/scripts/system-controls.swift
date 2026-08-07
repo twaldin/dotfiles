@@ -230,10 +230,17 @@ private struct AudioDefaults: Encodable, Equatable {
     }
 }
 
+private struct AudioDefaultSettable: Encodable, Equatable {
+    let input: Bool
+    let output: Bool
+    let system_output: Bool
+}
+
 private struct AudioStateDocument: Encodable, Equatable {
     let schema = schemaVersion
     let ok = true
     let defaults: AudioDefaults
+    let default_settable: AudioDefaultSettable
     let devices: [AudioDeviceState]
     let warning_count: Int
 }
@@ -272,6 +279,39 @@ private protocol AudioBackend {
     func mute(device: AudioObjectID, direction: AudioDirection) throws -> BooleanCapability
     func setVolume(device: AudioObjectID, direction: AudioDirection, value: Double) throws
     func setMute(device: AudioObjectID, direction: AudioDirection, value: Bool) throws
+}
+
+private func scalarCapability(raw: Float32, settable: Bool) throws -> ScalarCapability {
+    let value = Double(raw)
+    guard value.isFinite, value >= 0, value <= 1 else {
+        throw SafeError(70, "audio_read_failed", "Audio volume is malformed")
+    }
+    return ScalarCapability(available: true, settable: settable, value: value * 100.0)
+}
+
+private func booleanCapability(raw: UInt32, settable: Bool) throws -> BooleanCapability {
+    guard raw == 0 || raw == 1 else {
+        throw SafeError(70, "audio_read_failed", "Audio mute is malformed")
+    }
+    return BooleanCapability(available: true, settable: settable, value: raw == 1)
+}
+
+private func validatedScalarState(_ capability: ScalarCapability) throws -> ScalarCapability {
+    let valid = capability.available
+        ? (capability.value?.isFinite == true && capability.value! >= 0 && capability.value! <= 100)
+        : (!capability.settable && capability.value == nil)
+    guard valid, !capability.settable || capability.available else {
+        throw SafeError(70, "audio_read_failed", "Audio volume capability is malformed")
+    }
+    return capability
+}
+
+private func validatedBooleanState(_ capability: BooleanCapability) throws -> BooleanCapability {
+    let valid = capability.available ? capability.value != nil : (!capability.settable && capability.value == nil)
+    guard valid, !capability.settable || capability.available else {
+        throw SafeError(70, "audio_read_failed", "Audio mute capability is malformed")
+    }
+    return capability
 }
 
 private final class CoreAudioBackend: AudioBackend {
@@ -422,16 +462,14 @@ private final class CoreAudioBackend: AudioBackend {
         var property = address(kAudioDevicePropertyVolumeScalar, scope(direction))
         guard AudioObjectHasProperty(device, &property) else { return ScalarCapability(available: false, settable: false, value: nil) }
         let canSet = try settable(device, &property)
-        let value = Double(try getFloat32(device, property))
-        return ScalarCapability(available: true, settable: canSet, value: value.isFinite && value >= 0 && value <= 1 ? value * 100.0 : nil)
+        return try scalarCapability(raw: getFloat32(device, property), settable: canSet)
     }
 
     func mute(device: AudioObjectID, direction: AudioDirection) throws -> BooleanCapability {
         var property = address(kAudioDevicePropertyMute, scope(direction))
         guard AudioObjectHasProperty(device, &property) else { return BooleanCapability(available: false, settable: false, value: nil) }
         let canSet = try settable(device, &property)
-        let value = try getUInt32(device, property)
-        return BooleanCapability(available: true, settable: canSet, value: value == 0 ? false : value == 1 ? true : nil)
+        return try booleanCapability(raw: getUInt32(device, property), settable: canSet)
     }
 
     func setVolume(device: AudioObjectID, direction: AudioDirection, value: Double) throws {
@@ -485,6 +523,15 @@ private final class AudioService {
         for role in roles { if let value = try? backend.defaultDevice(role: role), value != kAudioObjectUnknown { defaultsBefore[role] = value } }
         let identifiers = try backend.deviceIDs()
         var warningCount = 0
+        var defaultSettable: [AudioRole: Bool] = [:]
+        for role in roles {
+            do {
+                defaultSettable[role] = try backend.defaultSettable(role: role)
+            } catch {
+                defaultSettable[role] = false
+                warningCount += 1
+            }
+        }
         var preliminary: [(AudioObjectID, String, String, Bool, Bool)] = []
         for id in identifiers {
             do {
@@ -517,6 +564,7 @@ private final class AudioService {
             }
         }
         var devices: [AudioDeviceState] = []
+        var includedIDs: Set<AudioObjectID> = []
         for (id, uid, name, hasInput, hasOutput) in preliminary where !duplicateUIDs.contains(uid) {
             do {
                 let device = AudioDeviceState(
@@ -524,21 +572,31 @@ private final class AudioService {
                     name: name,
                     directions: AudioDirection.allCases.filter { $0 == .input ? hasInput : hasOutput },
                     roles: (rolesByID[id] ?? []).sorted { $0.rawValue < $1.rawValue },
-                    input: hasInput ? DirectionState(volume: try backend.volume(device: id, direction: .input), mute: try backend.mute(device: id, direction: .input)) : nil,
-                    output: hasOutput ? DirectionState(volume: try backend.volume(device: id, direction: .output), mute: try backend.mute(device: id, direction: .output)) : nil
+                    input: hasInput ? DirectionState(volume: try validatedScalarState(backend.volume(device: id, direction: .input)), mute: try validatedBooleanState(backend.mute(device: id, direction: .input))) : nil,
+                    output: hasOutput ? DirectionState(volume: try validatedScalarState(backend.volume(device: id, direction: .output)), mute: try validatedBooleanState(backend.mute(device: id, direction: .output))) : nil
                 )
                 devices.append(device)
+                includedIDs.insert(id)
             } catch {
                 warningCount += 1
             }
         }
         devices.sort { left, right in left.uid == right.uid ? left.name < right.name : left.uid < right.uid }
         func stableUID(_ role: AudioRole) -> String? {
-            guard let id = stableDefaults[role], let match = preliminary.first(where: { $0.0 == id }), !duplicateUIDs.contains(match.1) else { return nil }
+            guard let id = stableDefaults[role], includedIDs.contains(id), let match = preliminary.first(where: { $0.0 == id }), !duplicateUIDs.contains(match.1) else { return nil }
             let supportsRole = role == .input ? match.3 : match.4
             return supportsRole ? match.1 : nil
         }
-        return AudioStateDocument(defaults: AudioDefaults(input: stableUID(.input), output: stableUID(.output), system_output: stableUID(.system_output)), devices: devices, warning_count: warningCount)
+        return AudioStateDocument(
+            defaults: AudioDefaults(input: stableUID(.input), output: stableUID(.output), system_output: stableUID(.system_output)),
+            default_settable: AudioDefaultSettable(
+                input: defaultSettable[.input] == true,
+                output: defaultSettable[.output] == true,
+                system_output: defaultSettable[.system_output] == true
+            ),
+            devices: devices,
+            warning_count: warningCount
+        )
     }
 
     func setDefault(role: AudioRole, uid: String) throws -> AudioWriteDocument {
@@ -605,12 +663,15 @@ private final class AudioService {
         for _ in 0..<50 {
             guard try backend.defaultDevice(role: role) == device else { throw SafeError(75, "external_race", "The default audio device changed externally") }
             guard let actual = try backend.volume(device: device, direction: role.direction).value else { throw SafeError(75, "device_changed", "The audio device became unavailable") }
+            if abs(actual - old) <= 0.001 {
+                sleeper(10_000)
+                continue
+            }
             if abs(actual - value) <= 2.0 {
                 guard try validatedUID(backend.uid(for: device)) == uid else { throw SafeError(75, "external_race", "The audio device identity changed externally") }
                 return AudioWriteDocument(action: "set_volume", role: role.rawValue, uid: uid, volume: actual, mute: nil)
             }
-            if abs(actual - old) > 0.001 { throw SafeError(75, "external_race", "The audio volume changed externally") }
-            sleeper(10_000)
+            throw SafeError(75, "external_race", "The audio volume changed externally")
         }
         throw SafeError(75, "readback_timeout", "The audio volume change was not confirmed")
     }
@@ -1314,6 +1375,8 @@ private final class FakeAudioBackend: AudioBackend {
     var externalDefaultAfterControl: AudioObjectID?
     var disappear = false
     var defaultSetError: SafeError?
+    var defaultSettableByRole: [AudioRole: Bool] = [.input: true, .output: true, .system_output: true]
+    var defaultSettableReadErrors: Set<AudioRole> = []
     var defaultSetCalls = 0
     var volumeSetError: SafeError?
     var muteSetError: SafeError?
@@ -1328,7 +1391,10 @@ private final class FakeAudioBackend: AudioBackend {
         if !defaultReadQueue.isEmpty { return defaultReadQueue.removeFirst() }
         return raceDefault ?? defaults[role]!
     }
-    func defaultSettable(role: AudioRole) throws -> Bool { true }
+    func defaultSettable(role: AudioRole) throws -> Bool {
+        if defaultSettableReadErrors.contains(role) { throw SafeError(70, "fixture_default_capability_unreadable", "fixture") }
+        return defaultSettableByRole[role] == true
+    }
     func resolve(uid: String) throws -> AudioObjectID { guard let match = uids.first(where: { $0.value == uid }) else { throw SafeError(69, "missing", "missing") }; return match.key }
     func setDefault(role: AudioRole, device: AudioObjectID) throws {
         defaultSetCalls += 1
@@ -1439,7 +1505,29 @@ private func selfTest() throws {
     try check(boundedText.count == 64 && boundedText.utf8.count <= 256 && !boundedText.contains("\u{202e}"), "audio hostile text budget")
     try check(sanitizedOptionalText("\u{202e}\u{e0001}") == nil, "wifi hostile text empty")
     try check(sanitizedText(String(repeating: "e\u{301}", count: 70)).count == 64, "grapheme budget")
+    let validScalarCapability = try scalarCapability(raw: 0.5, settable: true)
+    let validBooleanCapability = try booleanCapability(raw: 0, settable: true)
+    try check(validScalarCapability.value == 50, "audio scalar capability")
+    try check(validBooleanCapability.value == false, "audio false mute capability")
+    try expect(70, "nonfinite scalar capability") { _ = try scalarCapability(raw: .nan, settable: true) }
+    try expect(70, "out of range scalar capability") { _ = try scalarCapability(raw: 1.1, settable: true) }
+    try expect(70, "nonboolean mute capability") { _ = try booleanCapability(raw: 2, settable: true) }
     try check(state.devices.first(where: { $0.uid == "output-uid" })?.roles == [.output, .system_output], "audio role merge")
+    try check(state.default_settable == AudioDefaultSettable(input: true, output: true, system_output: true), "audio default capability state")
+    let restrictedDefaults = FakeAudioBackend()
+    restrictedDefaults.defaultSettableByRole[.output] = false
+    restrictedDefaults.defaultSettableReadErrors.insert(.input)
+    let restrictedDocument = try AudioService(backend: restrictedDefaults, sleeper: { _ in }).state()
+    try check(restrictedDocument.default_settable == AudioDefaultSettable(input: false, output: false, system_output: true), "audio default capability fail closed")
+    try check(restrictedDocument.warning_count == 1, "audio default capability warning")
+    let malformedVolumeState = FakeAudioBackend()
+    malformedVolumeState.volumes["1-input"] = ScalarCapability(available: true, settable: true, value: nil)
+    let malformedVolumeDocument = try AudioService(backend: malformedVolumeState, sleeper: { _ in }).state()
+    try check(malformedVolumeDocument.defaults.input == nil && !malformedVolumeDocument.devices.contains(where: { $0.uid == "input-uid" }) && malformedVolumeDocument.warning_count == 1, "malformed volume device omitted")
+    let malformedMuteState = FakeAudioBackend()
+    malformedMuteState.mutes["1-input"] = BooleanCapability(available: true, settable: true, value: nil)
+    let malformedMuteDocument = try AudioService(backend: malformedMuteState, sleeper: { _ in }).state()
+    try check(malformedMuteDocument.defaults.input == nil && !malformedMuteDocument.devices.contains(where: { $0.uid == "input-uid" }) && malformedMuteDocument.warning_count == 1, "malformed mute device omitted")
     backend.quantizedVolume = 49
     let changed = try audio.setVolume(role: .input, value: 48)
     try check(changed.volume == 49, "quantized volume")
@@ -1506,6 +1594,8 @@ private func selfTest() throws {
     try expect(70, "set error old readback") { _ = try AudioService(backend: volumeErrorOld, sleeper: { _ in }).setVolume(role: .input, value: 10) }
     let volumeErrorNearOld = FakeAudioBackend(); volumeErrorNearOld.timeout = true; volumeErrorNearOld.volumeSetError = SafeError(70, "fixture_set_failure", "fixture")
     try expect(70, "set error near old readback") { _ = try AudioService(backend: volumeErrorNearOld, sleeper: { _ in }).setVolume(role: .input, value: 51) }
+    let volumeOverlapUnchanged = FakeAudioBackend(); volumeOverlapUnchanged.timeout = true
+    try expect(75, "unchanged old value inside target tolerance") { _ = try AudioService(backend: volumeOverlapUnchanged, sleeper: { _ in }).setVolume(role: .input, value: 51) }
     let volumeErrorThird = FakeAudioBackend(); volumeErrorThird.quantizedVolume = 90; volumeErrorThird.volumeSetError = SafeError(70, "fixture_set_failure", "fixture")
     try expect(75, "set error third readback") { _ = try AudioService(backend: volumeErrorThird, sleeper: { _ in }).setVolume(role: .input, value: 10) }
     let volumeTimeout = FakeAudioBackend(); volumeTimeout.timeout = true

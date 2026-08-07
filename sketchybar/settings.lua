@@ -19,7 +19,6 @@ local M = {
     media = "/opt/homebrew/bin/media-control",
     stats = "/opt/homebrew/bin/stats_provider",
     system_controls = os.getenv("HOME") .. "/.local/share/sketchybar-controls/system-controls",
-    switch_audio = "/opt/homebrew/bin/SwitchAudioSource",
     yabai = "/opt/homebrew/bin/yabai",
   },
 }

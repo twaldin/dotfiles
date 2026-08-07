@@ -12,7 +12,7 @@ CALENDAR_SOURCE_SHA256=7fd04dc9e2d3fb4556dda41cd2aa5da38c2e2b622e74efc6be9a58cb0
 CALENDAR_SOURCE="$CONFIG_DIR/scripts/calendar-panel.swift"
 SYSTEM_CONTROLS_HELPER_DIR="$HOME/.local/share/sketchybar-controls"
 SYSTEM_CONTROLS_SOURCE="$CONFIG_DIR/scripts/system-controls.swift"
-SYSTEM_CONTROLS_SOURCE_SHA256=e3fe28434189fba29ba037dd37cd247b952d3c5ec61f76ed485f370dc4b80db6
+SYSTEM_CONTROLS_SOURCE_SHA256=ebdca705586046f967eff2832abe683536badc5c74e8c206e8914a1e7b9220d1
 
 command -v /opt/homebrew/bin/brew >/dev/null 2>&1 || { echo "Homebrew is required at /opt/homebrew/bin/brew" >&2; exit 69; }
 STATS_FORMULA="$CONFIG_DIR/deps/sketchybar-system-stats.rb"
@@ -25,7 +25,7 @@ host_macos_version=$(/usr/bin/sw_vers -productVersion)
 calendar_target=arm64-apple-macosx15.0
 stats_expected_sha256=60c6e2c4af882ed656d1f8a81f3c8e4879a93d8d8e5c6d4039515d5b092e1b41
 [ "$(/usr/bin/shasum -a 256 "$STATS_FORMULA" | /usr/bin/awk '{print $1}')" = "$STATS_FORMULA_SHA256" ] || { echo "Pinned stats_provider formula checksum failed" >&2; exit 1; }
-/opt/homebrew/bin/brew install lua switchaudio-osx ical-buddy blueutil media-control
+/opt/homebrew/bin/brew install lua ical-buddy blueutil media-control
 
 if ! /opt/homebrew/bin/brew tap | /usr/bin/grep -Fx 'twaldin/sketchybar-frozen' >/dev/null; then
   /opt/homebrew/bin/brew tap-new --no-git twaldin/sketchybar-frozen

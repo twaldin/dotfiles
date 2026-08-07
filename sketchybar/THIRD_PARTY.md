@@ -12,7 +12,6 @@ APIs.
 | SbarLua | commit `dba9cc421b868c918d5c23c408544a28aadf2f2f` | GPL-3.0 | Installed binary module: <https://github.com/FelixKratz/SbarLua> |
 | sketchybar-system-stats | `0.8.2`; vendored arm64-only formula derived from tap commit `57f2b989bddd3f365d51db84cdd806c948cef8e8` with formula SHA-256 `639b236a164c049a98eab97265b8a3c333c5c5f39e7a95544302c89247715d55` | GPL-3.0-only | Installed provider: <https://github.com/joncrangle/sketchybar-system-stats> |
 | Lua | live Homebrew formula input; must remain 5.5.x and pass the post-install smoke gate | MIT | Runtime and SbarLua ABI: <https://www.lua.org/license.html> |
-| switchaudio-osx | live Homebrew formula input; post-install smoke required | MIT | Public audio device selection: <https://github.com/deweller/switchaudio-osx> |
 | icalBuddy | live Homebrew formula input; post-install smoke required | MIT | Calendar command API: <https://hasseg.org/icalBuddy/> |
 | blueutil | live Homebrew formula input; post-install smoke required | MIT | Bluetooth controller and connection state: <https://github.com/toy/blueutil> |
 | media-control | live Homebrew formula input; post-install smoke required | BSD-3-Clause | Tahoe-compatible media metadata/control: <https://github.com/ungive/media-control> |
@@ -36,8 +35,7 @@ This release supports Apple-silicon Tahoe hosts only and requires Homebrew at
 `arm64-apple-macosx15.0`, and its thin architecture is checked before self-test.
 
 Only SbarLua, stats provider 0.8.2, and the checksum-pinned font assets are
-reproducibly frozen by this installer. Lua, switchaudio-osx, icalBuddy,
-blueutil, and media-control intentionally resolve from live Homebrew formulae.
+reproducibly frozen by this installer. Lua, icalBuddy, blueutil, and media-control intentionally resolve from live Homebrew formulae.
 A Homebrew update invalidates the prior runtime proof. `install-deps.sh` accepts
 those live inputs only after the complete offline smoke gate passes; Lua and
 luac must also remain in the supported 5.5.x line.
