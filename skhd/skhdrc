@@ -1,0 +1,53 @@
+# Window management only. skhd owns the exact chords below. Raycast keeps
+# non-conflicting Hyper application shortcuts.
+
+# Hyper focuses an adjacent window. H/J/K/L and the arrow keys are equivalent.
+cmd + ctrl + alt + shift - h : /opt/homebrew/bin/yabai -m window --focus west
+cmd + ctrl + alt + shift - j : /opt/homebrew/bin/yabai -m window --focus south
+cmd + ctrl + alt + shift - k : /opt/homebrew/bin/yabai -m window --focus north
+cmd + ctrl + alt + shift - l : /opt/homebrew/bin/yabai -m window --focus east
+cmd + ctrl + alt + shift - left : /opt/homebrew/bin/yabai -m window --focus west
+cmd + ctrl + alt + shift - down : /opt/homebrew/bin/yabai -m window --focus south
+cmd + ctrl + alt + shift - up : /opt/homebrew/bin/yabai -m window --focus north
+cmd + ctrl + alt + shift - right : /opt/homebrew/bin/yabai -m window --focus east
+alt - tab : /opt/homebrew/bin/yabai -m window --focus recent
+
+# Option-Shift moves the focused BSP node. H/J/K/L and arrows are equivalent.
+shift + alt - h : /opt/homebrew/bin/yabai -m window --warp west
+shift + alt - j : /opt/homebrew/bin/yabai -m window --warp south
+shift + alt - k : /opt/homebrew/bin/yabai -m window --warp north
+shift + alt - l : /opt/homebrew/bin/yabai -m window --warp east
+shift + alt - left : /opt/homebrew/bin/yabai -m window --warp west
+shift + alt - down : /opt/homebrew/bin/yabai -m window --warp south
+shift + alt - up : /opt/homebrew/bin/yabai -m window --warp north
+shift + alt - right : /opt/homebrew/bin/yabai -m window --warp east
+
+# Layout controls.
+alt - return : /opt/homebrew/bin/yabai -m window --toggle zoom-fullscreen
+alt - 0x32 : /opt/homebrew/bin/yabai -m window --toggle float
+alt - 0 : /opt/homebrew/bin/yabai -m space --balance
+alt - 0x1B : child=$(/opt/homebrew/bin/yabai -m query --windows --window | /usr/bin/jq -r '."split-child"'); if [ "$child" = first_child ]; then delta=-0.05; elif [ "$child" = second_child ]; then delta=0.05; else exit 1; fi; /opt/homebrew/bin/yabai -m window --ratio rel:$delta
+alt - 0x18 : child=$(/opt/homebrew/bin/yabai -m query --windows --window | /usr/bin/jq -r '."split-child"'); if [ "$child" = first_child ]; then delta=0.05; elif [ "$child" = second_child ]; then delta=-0.05; else exit 1; fi; /opt/homebrew/bin/yabai -m window --ratio rel:$delta
+
+
+# Hyper plus a number focuses an existing native Space.
+cmd + ctrl + alt + shift - 1 : /opt/homebrew/bin/yabai -m space --focus 1
+cmd + ctrl + alt + shift - 2 : /opt/homebrew/bin/yabai -m space --focus 2
+cmd + ctrl + alt + shift - 3 : /opt/homebrew/bin/yabai -m space --focus 3
+cmd + ctrl + alt + shift - 4 : /opt/homebrew/bin/yabai -m space --focus 4
+cmd + ctrl + alt + shift - 5 : /opt/homebrew/bin/yabai -m space --focus 5
+cmd + ctrl + alt + shift - 6 : /opt/homebrew/bin/yabai -m space --focus 6
+cmd + ctrl + alt + shift - 7 : /opt/homebrew/bin/yabai -m space --focus 7
+cmd + ctrl + alt + shift - 8 : /opt/homebrew/bin/yabai -m space --focus 8
+cmd + ctrl + alt + shift - 9 : /opt/homebrew/bin/yabai -m space --focus 9
+
+# Send the focused window to an existing native Space, then follow it.
+shift + alt - 1 : /opt/homebrew/bin/yabai -m window --space 1 && /opt/homebrew/bin/yabai -m space --focus 1
+shift + alt - 2 : /opt/homebrew/bin/yabai -m window --space 2 && /opt/homebrew/bin/yabai -m space --focus 2
+shift + alt - 3 : /opt/homebrew/bin/yabai -m window --space 3 && /opt/homebrew/bin/yabai -m space --focus 3
+shift + alt - 4 : /opt/homebrew/bin/yabai -m window --space 4 && /opt/homebrew/bin/yabai -m space --focus 4
+shift + alt - 5 : /opt/homebrew/bin/yabai -m window --space 5 && /opt/homebrew/bin/yabai -m space --focus 5
+shift + alt - 6 : /opt/homebrew/bin/yabai -m window --space 6 && /opt/homebrew/bin/yabai -m space --focus 6
+shift + alt - 7 : /opt/homebrew/bin/yabai -m window --space 7 && /opt/homebrew/bin/yabai -m space --focus 7
+shift + alt - 8 : /opt/homebrew/bin/yabai -m window --space 8 && /opt/homebrew/bin/yabai -m space --focus 8
+shift + alt - 9 : /opt/homebrew/bin/yabai -m window --space 9 && /opt/homebrew/bin/yabai -m space --focus 9

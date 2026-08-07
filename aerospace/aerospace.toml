@@ -1,0 +1,115 @@
+# AeroSpace workspaces are independent of macOS Spaces. See OPERATIONS.md.
+config-version = 2
+
+start-at-login = false
+auto-reload-config = true
+
+# AeroSpace's startup smart layout selects accordion when many windows are
+# already open. Keep every persistent workspace tiled instead.
+after-startup-command = [
+  'layout --workspace 1 --root tiles',
+  'layout --workspace 2 --root tiles',
+  'layout --workspace 3 --root tiles',
+  'layout --workspace 4 --root tiles',
+  'layout --workspace 5 --root tiles',
+  'layout --workspace 6 --root tiles',
+  'layout --workspace 7 --root tiles',
+  'layout --workspace 8 --root tiles',
+  'layout --workspace 9 --root tiles',
+]
+
+exec-on-workspace-change = [
+  '/bin/bash',
+  '-c',
+  '/opt/homebrew/bin/sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE="$AEROSPACE_FOCUSED_WORKSPACE"',
+]
+
+enable-normalization-flatten-containers = true
+enable-normalization-opposite-orientation-for-nested-containers = true
+default-root-container-layout = 'tiles'
+default-root-container-orientation = 'auto'
+accordion-padding = 28
+automatically-unhide-macos-hidden-apps = false
+on-focused-monitor-changed = ['move-mouse monitor-lazy-center']
+focus-follows-mouse.enabled = false
+persistent-workspaces = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
+
+[exec]
+inherit-env-vars = true
+
+[exec.env-vars]
+PATH = '/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin'
+
+[gaps]
+inner.horizontal = 8
+inner.vertical = 8
+outer.left = 10
+outer.bottom = 10
+# The built-in usable frame already starts below the 32-point bar. Other
+# displays use an explicit 32-point bar reservation plus 10-point padding.
+outer.top = [{ monitor."built-in" = 10 }, 42]
+outer.right = 10
+
+[mode.main.binding]
+# Match the primary yabai/skhd ownership if this fallback is activated.
+# Hyper focuses. Option-Shift moves. H/J/K/L and arrows are equivalent.
+cmd-ctrl-alt-shift-h = 'focus left'
+cmd-ctrl-alt-shift-j = 'focus down'
+cmd-ctrl-alt-shift-k = 'focus up'
+cmd-ctrl-alt-shift-l = 'focus right'
+cmd-ctrl-alt-shift-left = 'focus left'
+cmd-ctrl-alt-shift-down = 'focus down'
+cmd-ctrl-alt-shift-up = 'focus up'
+cmd-ctrl-alt-shift-right = 'focus right'
+alt-shift-h = 'move left'
+alt-shift-j = 'move down'
+alt-shift-k = 'move up'
+alt-shift-l = 'move right'
+alt-shift-left = 'move left'
+alt-shift-down = 'move down'
+alt-shift-up = 'move up'
+alt-shift-right = 'move right'
+
+# Layout, AeroSpace fullscreen, floating, resize, and balancing.
+# Accordion is intentionally not bound because it stacks windows.
+alt-slash = 'layout tiles horizontal vertical'
+alt-enter = 'fullscreen'
+alt-backtick = 'layout floating tiling'
+alt-minus = 'resize smart -50'
+alt-equal = 'resize smart +50'
+alt-0 = 'balance-sizes'
+
+# Keep Option-Left/Right available to macOS word movement.
+alt-tab = 'workspace-back-and-forth'
+
+# Hyper (Command+Control+Option+Shift) goes directly to AeroSpace workspaces.
+# Clear any duplicate Raycast Window Management hotkeys before rollback.
+cmd-ctrl-alt-shift-1 = 'workspace 1'
+cmd-ctrl-alt-shift-2 = 'workspace 2'
+cmd-ctrl-alt-shift-3 = 'workspace 3'
+cmd-ctrl-alt-shift-4 = 'workspace 4'
+cmd-ctrl-alt-shift-5 = 'workspace 5'
+cmd-ctrl-alt-shift-6 = 'workspace 6'
+cmd-ctrl-alt-shift-7 = 'workspace 7'
+cmd-ctrl-alt-shift-8 = 'workspace 8'
+cmd-ctrl-alt-shift-9 = 'workspace 9'
+
+# Move the focused window to an AeroSpace workspace and follow it.
+alt-shift-1 = ['move-node-to-workspace 1', 'workspace 1']
+alt-shift-2 = ['move-node-to-workspace 2', 'workspace 2']
+alt-shift-3 = ['move-node-to-workspace 3', 'workspace 3']
+alt-shift-4 = ['move-node-to-workspace 4', 'workspace 4']
+alt-shift-5 = ['move-node-to-workspace 5', 'workspace 5']
+alt-shift-6 = ['move-node-to-workspace 6', 'workspace 6']
+alt-shift-7 = ['move-node-to-workspace 7', 'workspace 7']
+alt-shift-8 = ['move-node-to-workspace 8', 'workspace 8']
+alt-shift-9 = ['move-node-to-workspace 9', 'workspace 9']
+
+alt-shift-semicolon = 'mode service'
+
+[mode.service.binding]
+esc = ['reload-config', 'mode main']
+r = ['flatten-workspace-tree', 'layout --root tiles', 'balance-sizes', 'mode main']
+f = ['layout floating tiling', 'mode main']
+b = ['balance-sizes', 'mode main']
+m = ['move-workspace-to-monitor --wrap-around next', 'mode main']
