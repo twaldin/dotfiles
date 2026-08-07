@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+import fcntl
 import hashlib
 import os
 import pathlib
@@ -154,15 +155,84 @@ def sync_file(path, mode):
     os.close(descriptor)
 
 
-def write_calendar_state(path, value):
-    validate_directory(path.parent)
-    file_info(path, {0o600}, optional=True)
-    match = re.fullmatch(r"(preparing|backups|binary-published|pair-published)\|(true|false)\|(-|[0-9]{1,20})\|(-|[0-9]{1,20})\|(true|false)\|(-|[0-9]{1,20})\|(-|[0-9]{1,20})", value)
-    if not match:
-        fail("Invalid calendar transaction state", 64)
-    _, had_binary, binary_device, binary_inode, had_marker, marker_device, marker_inode = match.groups()
-    if (had_binary == "true") != (binary_device != "-" and binary_inode != "-") or (had_marker == "true") != (marker_device != "-" and marker_inode != "-"):
-        fail("Invalid calendar transaction identity state", 64)
+def open_system_controls_lock(guard):
+    lock_directory = guard.parent
+    destination = lock_directory.parent
+    validate_directory(destination)
+    created_directory = False
+    try:
+        os.mkdir(lock_directory, 0o700)
+        created_directory = True
+    except FileExistsError:
+        pass
+    validate_directory(lock_directory)
+    if stat.S_IMODE(lock_directory.lstat().st_mode) != 0o700:
+        fail("System controls transaction lock directory is unsafe", 75)
+    entries = list(lock_directory.iterdir())
+    if any(entry.name != guard.name for entry in entries):
+        fail("System controls transaction lock directory has an unknown entry", 75)
+    try:
+        descriptor = os.open(guard, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        os.fchmod(descriptor, 0o600)
+        created_guard = True
+    except FileExistsError:
+        descriptor = os.open(guard, os.O_RDWR | os.O_NOFOLLOW)
+        created_guard = False
+    guard_info = os.fstat(descriptor)
+    path_info = guard.lstat()
+    if not stat.S_ISREG(guard_info.st_mode) or guard_info.st_uid != os.getuid() or stat.S_IMODE(guard_info.st_mode) != 0o600 or guard_info.st_nlink != 1 or (guard_info.st_dev, guard_info.st_ino) != (path_info.st_dev, path_info.st_ino):
+        os.close(descriptor)
+        fail("System controls transaction lock guard is unsafe", 75)
+    if created_directory:
+        sync_directory(destination)
+    if created_guard:
+        os.fsync(descriptor)
+        sync_directory(lock_directory)
+    return descriptor
+
+
+def run_system_controls_locked(guard, arguments):
+    expected_script = pathlib.Path(__file__).resolve().parent / "system-controls-helper-install-transaction.sh"
+    fixture_arguments = len(arguments) == 6 and arguments[-1] == "--test-fixtures"
+    if (len(arguments) != 5 and not fixture_arguments) or pathlib.Path(arguments[0]).resolve() != expected_script:
+        fail("Invalid system controls locked transaction arguments", 64)
+    directory = pathlib.Path(os.path.realpath(arguments[3]))
+    if pathlib.Path(arguments[3]).absolute() != directory or guard != directory / ".system-controls-install.lock" / "guard":
+        fail("System controls transaction lock path is invalid", 64)
+    descriptor = open_system_controls_lock(guard)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(descriptor)
+        fail("System controls transaction is busy", 75)
+    os.set_inheritable(descriptor, True)
+    environment = dict(os.environ)
+    environment["SKETCHYBAR_SYSTEM_CONTROLS_LOCK_FD"] = str(descriptor)
+    os.execve("/bin/sh", ["/bin/sh", str(expected_script), *arguments[1:]], environment)
+    fail("Could not execute the locked system controls transaction", 75)
+
+
+def verify_system_controls_lock(guard, descriptor_text):
+    lock_directory = guard.parent
+    destination = lock_directory.parent
+    validate_directory(destination)
+    validate_directory(lock_directory)
+    if guard != destination / ".system-controls-install.lock" / "guard" or stat.S_IMODE(lock_directory.lstat().st_mode) != 0o700 or any(entry.name != guard.name for entry in lock_directory.iterdir()):
+        fail("System controls transaction lock directory changed", 75)
+    if not re.fullmatch(r"[0-9]{1,10}", descriptor_text):
+        fail("System controls transaction lock descriptor is invalid", 75)
+    descriptor = int(descriptor_text)
+    try:
+        descriptor_info = os.fstat(descriptor)
+        path_info = guard.lstat()
+        if not stat.S_ISREG(descriptor_info.st_mode) or descriptor_info.st_uid != os.getuid() or stat.S_IMODE(descriptor_info.st_mode) != 0o600 or descriptor_info.st_nlink != 1 or (descriptor_info.st_dev, descriptor_info.st_ino) != (path_info.st_dev, path_info.st_ino):
+            fail("System controls transaction lock identity changed", 75)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fail("System controls transaction lock is not held", 75)
+
+
+def write_state_file(path, value, label):
     temporary = path.parent / (".state." + secrets.token_hex(8))
     descriptor = -1
     try:
@@ -173,11 +243,11 @@ def write_calendar_state(path, value):
         staged = os.fstat(descriptor)
         staged_path = temporary.lstat()
         if staged.st_dev != staged_path.st_dev or staged.st_ino != staged_path.st_ino or staged.st_nlink != 1 or staged.st_uid != os.getuid() or stat.S_IMODE(staged.st_mode) != 0o600:
-            raise OSError("calendar state staging changed")
+            raise OSError("transaction state staging changed")
         os.replace(temporary, path)
         published = path.lstat()
         if published.st_dev != staged.st_dev or published.st_ino != staged.st_ino or published.st_nlink != 1:
-            raise OSError("calendar state publication changed")
+            raise OSError("transaction state publication changed")
         os.fsync(descriptor)
         sync_directory(path.parent)
     except OSError:
@@ -187,8 +257,34 @@ def write_calendar_state(path, value):
             temporary.unlink()
         except OSError:
             pass
-        fail("Calendar transaction state publication failed")
+        fail(label + " transaction state publication failed")
     os.close(descriptor)
+
+
+def write_calendar_state(path, value):
+    validate_directory(path.parent)
+    file_info(path, {0o600}, optional=True)
+    match = re.fullmatch(r"(preparing|backups|binary-published|pair-published|cleanup)\|(true|false)\|(-|[0-9]{1,20})\|(-|[0-9]{1,20})\|(true|false)\|(-|[0-9]{1,20})\|(-|[0-9]{1,20})", value)
+    if not match:
+        fail("Invalid calendar transaction state", 64)
+    _, had_binary, binary_device, binary_inode, had_marker, marker_device, marker_inode = match.groups()
+    if (had_binary == "true") != (binary_device != "-" and binary_inode != "-") or (had_marker == "true") != (marker_device != "-" and marker_inode != "-"):
+        fail("Invalid calendar transaction identity state", 64)
+    write_state_file(path, value, "Calendar")
+
+
+def write_system_controls_state(path, value):
+    validate_directory(path.parent)
+    file_info(path, {0o600}, optional=True)
+    number = r"[0-9]{1,20}"
+    match = re.fullmatch(rf"(preparing|backups|binary-published|pair-published|cleanup)\|(true|false)\|(-|{number})\|(-|{number})\|(true|false)\|(-|{number})\|(-|{number})\|({number})\|({number})\|({number})\|({number})", value)
+    if not match:
+        fail("Invalid system controls transaction state", 64)
+    _, had_binary, binary_device, binary_inode, had_marker, marker_device, marker_inode, _, _, _, _ = match.groups()
+    if (had_binary == "true") != (binary_device != "-" and binary_inode != "-") or (had_marker == "true") != (marker_device != "-" and marker_inode != "-"):
+        fail("Invalid system controls transaction identity state", 64)
+    write_state_file(path, value, "System controls")
+
 
 def validate_host_contract(architecture, version):
     if architecture != "arm64":
@@ -200,11 +296,13 @@ def validate_host_contract(architecture, version):
         fail("This release requires macOS Tahoe", 69)
 
 
-def validate_calendar_provenance(binary, marker, source_hash):
-    if binary.name != "calendar-panel" or marker.name != "SOURCE_SHA256" or binary.parent != marker.parent:
-        fail("Invalid calendar provenance paths", 64)
+def validate_native_provenance(binary, marker, source_hash, binary_name=None):
+    if binary.parent != marker.parent or binary == marker:
+        fail("Invalid native provenance paths", 64)
+    if binary_name is not None and (binary.name != binary_name or marker.name != "SOURCE_SHA256"):
+        fail("Invalid native provenance paths", 64)
     if len(source_hash) != 64 or any(character not in "0123456789abcdef" for character in source_hash):
-        fail("Invalid calendar source hash", 64)
+        fail("Invalid native helper source hash", 64)
     validate_directory(binary.parent)
     binary_expected = file_info(binary, {0o755}, optional=False)
     marker_expected = file_info(marker, {0o644}, optional=False)
@@ -215,13 +313,13 @@ def validate_calendar_provenance(binary, marker, source_hash):
         marker_opened = os.fstat(marker_descriptor)
         marker_current = marker.lstat()
         if marker_opened.st_dev != marker_expected.st_dev or marker_opened.st_ino != marker_expected.st_ino or marker_opened.st_nlink != 1 or marker_current.st_dev != marker_expected.st_dev or marker_current.st_ino != marker_expected.st_ino:
-            raise OSError("calendar marker identity changed")
+            raise OSError("native helper marker identity changed")
         marker_content = os.read(marker_descriptor, 256)
         binary_descriptor = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         binary_opened = os.fstat(binary_descriptor)
         binary_current = binary.lstat()
         if binary_opened.st_dev != binary_expected.st_dev or binary_opened.st_ino != binary_expected.st_ino or binary_opened.st_nlink != 1 or binary_current.st_dev != binary_expected.st_dev or binary_current.st_ino != binary_expected.st_ino:
-            raise OSError("calendar binary identity changed")
+            raise OSError("native helper binary identity changed")
         digest = hashlib.sha256()
         while True:
             chunk = os.read(binary_descriptor, 1024 * 1024)
@@ -237,18 +335,18 @@ def validate_calendar_provenance(binary, marker, source_hash):
             "binary_sha256=" + binary_hash + "\n"
         ).encode("ascii")
         if marker_content != expected_content:
-            fail("Installed calendar provenance does not match", 75)
+            fail("Installed native helper provenance does not match", 75)
         architecture = subprocess.run(["/usr/bin/lipo", "-archs", str(binary)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
         binary_after = binary.lstat()
         marker_after = marker.lstat()
         if architecture.returncode != 0 or architecture.stdout.strip() != "arm64" or binary_after.st_dev != binary_expected.st_dev or binary_after.st_ino != binary_expected.st_ino or marker_after.st_dev != marker_expected.st_dev or marker_after.st_ino != marker_expected.st_ino:
-            fail("Installed calendar provenance does not match", 75)
+            fail("Installed native helper provenance does not match", 75)
     except OSError:
         if binary_descriptor >= 0:
             os.close(binary_descriptor)
         if marker_descriptor >= 0:
             os.close(marker_descriptor)
-        fail("Installed calendar provenance validation failed")
+        fail("Installed native helper provenance validation failed")
     os.close(binary_descriptor)
     os.close(marker_descriptor)
 
@@ -449,6 +547,12 @@ def main():
         validate_host_contract(sys.argv[2], sys.argv[3])
     elif mode == "calendar-state" and len(sys.argv) == 4:
         write_calendar_state(pathlib.Path(sys.argv[2]), sys.argv[3])
+    elif mode == "system-controls-state" and len(sys.argv) == 4:
+        write_system_controls_state(pathlib.Path(sys.argv[2]), sys.argv[3])
+    elif mode == "system-controls-lock-run" and len(sys.argv) in {8, 9}:
+        run_system_controls_locked(pathlib.Path(sys.argv[2]), sys.argv[3:])
+    elif mode == "system-controls-lock-verify" and len(sys.argv) == 4:
+        verify_system_controls_lock(pathlib.Path(sys.argv[2]), sys.argv[3])
     elif mode == "sync-directory" and len(sys.argv) == 3:
         directory = pathlib.Path(sys.argv[2])
         validate_directory(directory)
@@ -462,7 +566,11 @@ def main():
             fail("Invalid sync file mode", 64)
         sync_file(pathlib.Path(sys.argv[2]), expected_mode)
     elif mode == "calendar-provenance" and len(sys.argv) == 5:
-        validate_calendar_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4])
+        validate_native_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4], "calendar-panel")
+    elif mode == "system-controls-provenance" and len(sys.argv) == 5:
+        validate_native_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4], "system-controls")
+    elif mode == "system-controls-candidate-provenance" and len(sys.argv) == 5:
+        validate_native_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4])
     elif mode == "prepare-sbarlua" and len(sys.argv) == 5:
         prepare_sbarlua_runtime(pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4])
     elif mode == "prepare-asset" and len(sys.argv) == 3:

@@ -10,6 +10,9 @@ SECURE_INSTALLER="$CONFIG_DIR/scripts/secure-file-install.py"
 CALENDAR_HELPER_DIR="$HOME/.local/share/sketchybar-calendar"
 CALENDAR_SOURCE_SHA256=7fd04dc9e2d3fb4556dda41cd2aa5da38c2e2b622e74efc6be9a58cb0f812a72
 CALENDAR_SOURCE="$CONFIG_DIR/scripts/calendar-panel.swift"
+SYSTEM_CONTROLS_HELPER_DIR="$HOME/.local/share/sketchybar-controls"
+SYSTEM_CONTROLS_SOURCE="$CONFIG_DIR/scripts/system-controls.swift"
+SYSTEM_CONTROLS_SOURCE_SHA256=e3fe28434189fba29ba037dd37cd247b952d3c5ec61f76ed485f370dc4b80db6
 
 command -v /opt/homebrew/bin/brew >/dev/null 2>&1 || { echo "Homebrew is required at /opt/homebrew/bin/brew" >&2; exit 69; }
 STATS_FORMULA="$CONFIG_DIR/deps/sketchybar-system-stats.rb"
@@ -18,6 +21,7 @@ host_arch=$(/usr/bin/uname -m)
 host_macos_version=$(/usr/bin/sw_vers -productVersion)
 "$SECURE_INSTALLER" host-contract "$host_arch" "$host_macos_version"
 [ "$(/usr/bin/shasum -a 256 "$CALENDAR_SOURCE" | /usr/bin/awk '{print $1}')" = "$CALENDAR_SOURCE_SHA256" ] || { echo "Immutable calendar source checksum failed" >&2; exit 1; }
+[ "$(/usr/bin/shasum -a 256 "$SYSTEM_CONTROLS_SOURCE" | /usr/bin/awk '{print $1}')" = "$SYSTEM_CONTROLS_SOURCE_SHA256" ] || { echo "Immutable system controls source checksum failed" >&2; exit 1; }
 calendar_target=arm64-apple-macosx15.0
 stats_expected_sha256=60c6e2c4af882ed656d1f8a81f3c8e4879a93d8d8e5c6d4039515d5b092e1b41
 [ "$(/usr/bin/shasum -a 256 "$STATS_FORMULA" | /usr/bin/awk '{print $1}')" = "$STATS_FORMULA_SHA256" ] || { echo "Pinned stats_provider formula checksum failed" >&2; exit 1; }
@@ -130,6 +134,57 @@ if [ "$calendar_install_valid" != true ]; then
   [ "$(/usr/bin/lipo -archs "$calendar_binary")" = arm64 ]
   "$calendar_binary" --self-test
   trap - EXIT HUP INT TERM
+fi
+
+/bin/mkdir -p "$SYSTEM_CONTROLS_HELPER_DIR"
+[ -d "$SYSTEM_CONTROLS_HELPER_DIR" ] && [ ! -L "$SYSTEM_CONTROLS_HELPER_DIR" ] && [ "$(/usr/bin/stat -f %u "$SYSTEM_CONTROLS_HELPER_DIR")" = "$(/usr/bin/id -u)" ] && [ "$(/usr/bin/stat -f %Lp "$SYSTEM_CONTROLS_HELPER_DIR")" = 700 ] || { echo "System controls helper directory is not an owned mode-0700 real directory" >&2; exit 1; }
+controls_directory_logical=$(CDPATH='' cd -L -- "$SYSTEM_CONTROLS_HELPER_DIR" && pwd -L)
+controls_directory_physical=$(CDPATH='' cd -P -- "$SYSTEM_CONTROLS_HELPER_DIR" && pwd -P)
+[ "$controls_directory_logical" = "$controls_directory_physical" ] || { echo "System controls helper directory is not canonical" >&2; exit 1; }
+controls_binary="$SYSTEM_CONTROLS_HELPER_DIR/system-controls"
+controls_marker="$SYSTEM_CONTROLS_HELPER_DIR/SOURCE_SHA256"
+if [ -e "$controls_binary" ] || [ -L "$controls_binary" ]; then
+  [ -f "$controls_binary" ] && [ ! -L "$controls_binary" ] && [ "$(/usr/bin/stat -f %u "$controls_binary")" = "$(/usr/bin/id -u)" ] && [ "$(/usr/bin/stat -f %l "$controls_binary")" = 1 ] && [ "$(/usr/bin/stat -f %Lp "$controls_binary")" = 755 ] || { echo "Existing system controls helper is unsafe" >&2; exit 1; }
+fi
+if [ -e "$controls_marker" ] || [ -L "$controls_marker" ]; then
+  [ -f "$controls_marker" ] && [ ! -L "$controls_marker" ] && [ "$(/usr/bin/stat -f %u "$controls_marker")" = "$(/usr/bin/id -u)" ] && [ "$(/usr/bin/stat -f %l "$controls_marker")" = 1 ] && [ "$(/usr/bin/stat -f %Lp "$controls_marker")" = 644 ] || { echo "Existing system controls marker is unsafe" >&2; exit 1; }
+fi
+controls_install_valid=false
+if [ -f "$controls_binary" ] && [ -f "$controls_marker" ]; then
+  if "$SECURE_INSTALLER" system-controls-provenance "$controls_binary" "$controls_marker" "$SYSTEM_CONTROLS_SOURCE_SHA256"; then controls_install_valid=true
+  else controls_provenance_status=$?; [ "$controls_provenance_status" -eq 75 ] || exit "$controls_provenance_status"
+  fi
+fi
+if [ "$controls_install_valid" != true ]; then
+  controls_candidate=$(/usr/bin/mktemp "$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.binary.XXXXXX")
+  controls_marker_candidate=$(/usr/bin/mktemp "$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.hash.XXXXXX")
+  controls_fixture_debug=$(/usr/bin/mktemp "$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.fixture-debug.XXXXXX")
+  controls_fixture_optimized=$(/usr/bin/mktemp "$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.fixture-optimized.XXXXXX")
+  controls_install_cleanup() { /bin/rm -f "$controls_candidate" "$controls_marker_candidate" "$controls_fixture_debug" "$controls_fixture_optimized"; }
+  trap controls_install_cleanup EXIT HUP INT TERM
+  /usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -warnings-as-errors -D SYSTEM_CONTROLS_TESTING "$SYSTEM_CONTROLS_SOURCE" -o "$controls_fixture_debug"
+  "$controls_fixture_debug" --self-test >/dev/null
+  /usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -O -warnings-as-errors -D SYSTEM_CONTROLS_TESTING "$SYSTEM_CONTROLS_SOURCE" -o "$controls_fixture_optimized"
+  "$controls_fixture_optimized" --self-test >/dev/null
+  /usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -O -warnings-as-errors "$SYSTEM_CONTROLS_SOURCE" -o "$controls_candidate"
+  /bin/chmod 0755 "$controls_candidate"
+  [ "$(/usr/bin/lipo -archs "$controls_candidate")" = arm64 ] || { echo "System controls helper architecture mismatch" >&2; exit 1; }
+  if "$controls_candidate" --self-test >/dev/null 2>&1; then echo "Release system controls helper exposes the private fixture backend" >&2; exit 1
+  else controls_private_status=$?; [ "$controls_private_status" -eq 64 ] || { echo "Release system controls helper private-boundary check failed" >&2; exit 1; }
+  fi
+  controls_binary_hash=$(/usr/bin/shasum -a 256 "$controls_candidate" | /usr/bin/awk '{print $1}')
+  {
+    printf '%s\n' 'version=2'
+    printf 'source_sha256=%s\n' "$SYSTEM_CONTROLS_SOURCE_SHA256"
+    printf '%s\n' 'target=arm64-apple-macosx15.0' 'build_mode=-O'
+    printf 'binary_sha256=%s\n' "$controls_binary_hash"
+  } >"$controls_marker_candidate"
+  /bin/chmod 0644 "$controls_marker_candidate"
+  "$SECURE_INSTALLER" system-controls-candidate-provenance "$controls_candidate" "$controls_marker_candidate" "$SYSTEM_CONTROLS_SOURCE_SHA256"
+  "$CONFIG_DIR/scripts/system-controls-helper-install-transaction.sh" "$controls_candidate" "$controls_marker_candidate" "$SYSTEM_CONTROLS_HELPER_DIR" "$SYSTEM_CONTROLS_SOURCE_SHA256"
+  "$SECURE_INSTALLER" system-controls-provenance "$controls_binary" "$controls_marker" "$SYSTEM_CONTROLS_SOURCE_SHA256"
+  trap - EXIT HUP INT TERM
+  /bin/rm -f "$controls_fixture_debug" "$controls_fixture_optimized"
 fi
 
 if ! "$SECURE_INSTALLER" prepare-sbarlua "$SBARLUA_DIR" "$SBARLUA_COMMIT" "$SBARLUA_LEGACY_SHA256"; then
