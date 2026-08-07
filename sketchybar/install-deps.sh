@@ -1,0 +1,150 @@
+#!/bin/sh
+set -eu
+umask 077
+
+SBARLUA_COMMIT=dba9cc421b868c918d5c23c408544a28aadf2f2f
+SBARLUA_LEGACY_SHA256=53d7169806ba874f36b0f2f8128f3ad7c929ce969d40ef65ee23eb5cf0206c60
+SBARLUA_DIR="$HOME/.local/share/sketchybar_lua"
+CONFIG_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+SECURE_INSTALLER="$CONFIG_DIR/scripts/secure-file-install.py"
+CALENDAR_HELPER_DIR="$HOME/.local/share/sketchybar-calendar"
+CALENDAR_SOURCE_SHA256=7fd04dc9e2d3fb4556dda41cd2aa5da38c2e2b622e74efc6be9a58cb0f812a72
+CALENDAR_SOURCE="$CONFIG_DIR/scripts/calendar-panel.swift"
+
+command -v /opt/homebrew/bin/brew >/dev/null 2>&1 || { echo "Homebrew is required at /opt/homebrew/bin/brew" >&2; exit 69; }
+STATS_FORMULA="$CONFIG_DIR/deps/sketchybar-system-stats.rb"
+STATS_FORMULA_SHA256=639b236a164c049a98eab97265b8a3c333c5c5f39e7a95544302c89247715d55
+host_arch=$(/usr/bin/uname -m)
+host_macos_version=$(/usr/bin/sw_vers -productVersion)
+"$SECURE_INSTALLER" host-contract "$host_arch" "$host_macos_version"
+[ "$(/usr/bin/shasum -a 256 "$CALENDAR_SOURCE" | /usr/bin/awk '{print $1}')" = "$CALENDAR_SOURCE_SHA256" ] || { echo "Immutable calendar source checksum failed" >&2; exit 1; }
+calendar_target=arm64-apple-macosx15.0
+stats_expected_sha256=60c6e2c4af882ed656d1f8a81f3c8e4879a93d8d8e5c6d4039515d5b092e1b41
+[ "$(/usr/bin/shasum -a 256 "$STATS_FORMULA" | /usr/bin/awk '{print $1}')" = "$STATS_FORMULA_SHA256" ] || { echo "Pinned stats_provider formula checksum failed" >&2; exit 1; }
+/opt/homebrew/bin/brew install lua switchaudio-osx ical-buddy blueutil media-control
+
+if ! /opt/homebrew/bin/brew tap | /usr/bin/grep -Fx 'twaldin/sketchybar-frozen' >/dev/null; then
+  /opt/homebrew/bin/brew tap-new --no-git twaldin/sketchybar-frozen
+fi
+stats_tap=$(/opt/homebrew/bin/brew --repo twaldin/sketchybar-frozen)
+[ -d "$stats_tap/Formula" ] && [ ! -L "$stats_tap/Formula" ] || { echo "Local frozen Homebrew tap is unsafe" >&2; exit 1; }
+stats_formula_destination="$stats_tap/Formula/sketchybar-system-stats.rb"
+"$SECURE_INSTALLER" asset "$STATS_FORMULA" "$stats_formula_destination"
+stats_formula_installed_sha256=$(/usr/bin/shasum -a 256 "$stats_formula_destination" | /usr/bin/awk '{print $1}')
+[ "$stats_formula_installed_sha256" = "$STATS_FORMULA_SHA256" ] || { echo "Installed frozen stats_provider formula checksum failed" >&2; exit 1; }
+/opt/homebrew/bin/brew unpin sketchybar-system-stats >/dev/null 2>&1 || true
+if /opt/homebrew/bin/brew list --versions sketchybar-system-stats >/dev/null 2>&1; then
+  /opt/homebrew/bin/brew reinstall twaldin/sketchybar-frozen/sketchybar-system-stats
+else
+  /opt/homebrew/bin/brew install twaldin/sketchybar-frozen/sketchybar-system-stats
+fi
+
+lua_version=$(/opt/homebrew/bin/lua -v 2>&1)
+case "$lua_version" in "Lua 5.5"*) ;; *) echo "Lua 5.5 is required; found: $lua_version" >&2; exit 1 ;; esac
+stats_version=$(/opt/homebrew/bin/stats_provider --version 2>&1 | /usr/bin/awk '{print $2}')
+stats_prefix=$(/opt/homebrew/bin/brew --prefix twaldin/sketchybar-frozen/sketchybar-system-stats)
+stats_binary=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' /opt/homebrew/bin/stats_provider)
+stats_expected=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$stats_prefix/bin/stats_provider")
+[ "$stats_binary" = "$stats_expected" ] || { echo "stats_provider does not resolve to the frozen Homebrew formula" >&2; exit 1; }
+stats_actual_sha256=$(/usr/bin/shasum -a 256 "$stats_binary" | /usr/bin/awk '{print $1}')
+[ "$stats_actual_sha256" = "$stats_expected_sha256" ] || { echo "Frozen stats_provider binary checksum failed" >&2; exit 1; }
+# The vendored formula pins the upstream 0.8.2 release URLs and SHA-256 values.
+[ "$stats_version" = 0.8.2 ] || { echo "Expected released tap stats_provider 0.8.2; found $stats_version" >&2; exit 1; }
+/opt/homebrew/bin/brew pin twaldin/sketchybar-frozen/sketchybar-system-stats >/dev/null
+/opt/homebrew/bin/brew list --pinned | /usr/bin/awk '{print $1}' | /usr/bin/grep -Fx 'sketchybar-system-stats' >/dev/null || { echo "stats_provider formula is not pinned" >&2; exit 1; }
+
+install_asset() {
+  url=$1
+  expected=$2
+  destination=$3
+  "$SECURE_INSTALLER" prepare-asset "$destination"
+  actual=""
+  if [ -r "$destination" ]; then actual=$(/usr/bin/shasum -a 256 "$destination" | /usr/bin/awk '{print $1}'); fi
+  [ "$actual" = "$expected" ] && return 0
+  temporary=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/sketchybar-asset.XXXXXX")
+  /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 --output "$temporary" "$url"
+  downloaded=$(/usr/bin/shasum -a 256 "$temporary" | /usr/bin/awk '{print $1}')
+  [ "$downloaded" = "$expected" ] || { /bin/rm -f "$temporary"; echo "Checksum failed for $url" >&2; exit 1; }
+  "$SECURE_INSTALLER" asset "$temporary" "$destination"
+  /bin/rm -f "$temporary"
+}
+
+install_asset \
+  "https://github.com/kvndrsslr/sketchybar-app-font/releases/download/v2.0.71/icon_map.lua" \
+  "adbdd97d5137846babb2584de701f341541402bb2e1478d1ae031e07cc5e060c" \
+  "$HOME/.local/share/sketchybar-app-font/icon_map.lua"
+install_asset \
+  "https://github.com/kvndrsslr/sketchybar-app-font/releases/download/v2.0.71/sketchybar-app-font.ttf" \
+  "e015c40fbe95d85763b633eae54f7b8e1ded83cffbc15aff40b8b8f89717a0b1" \
+  "$HOME/Library/Fonts/sketchybar-app-font.ttf"
+
+calendar_source="$CALENDAR_SOURCE"
+/bin/mkdir -p "$CALENDAR_HELPER_DIR"
+[ -d "$CALENDAR_HELPER_DIR" ] && [ ! -L "$CALENDAR_HELPER_DIR" ] && [ "$(/usr/bin/stat -f %u "$CALENDAR_HELPER_DIR")" = "$(/usr/bin/id -u)" ] || { echo "Calendar helper directory is not an owned real directory" >&2; exit 1; }
+calendar_directory_mode=$(/usr/bin/stat -f %Lp "$CALENDAR_HELPER_DIR")
+case "$calendar_directory_mode" in 7[0145][0145]) ;; *) echo "Calendar helper directory is group/other writable" >&2; exit 1 ;; esac
+calendar_directory_logical=$(CDPATH='' cd -L -- "$CALENDAR_HELPER_DIR" && pwd -L)
+calendar_directory_physical=$(CDPATH='' cd -P -- "$CALENDAR_HELPER_DIR" && pwd -P)
+[ "$calendar_directory_logical" = "$calendar_directory_physical" ] || { echo "Calendar helper directory is not canonical" >&2; exit 1; }
+calendar_binary="$CALENDAR_HELPER_DIR/calendar-panel"
+calendar_marker="$CALENDAR_HELPER_DIR/SOURCE_SHA256"
+if [ -e "$calendar_binary" ] || [ -L "$calendar_binary" ]; then
+  [ -f "$calendar_binary" ] && [ ! -L "$calendar_binary" ] && [ "$(/usr/bin/stat -f %u "$calendar_binary")" = "$(/usr/bin/id -u)" ] && [ "$(/usr/bin/stat -f %l "$calendar_binary")" = 1 ] && [ "$(/usr/bin/stat -f %Lp "$calendar_binary")" = 755 ] || { echo "Existing calendar helper is not an owned single-link 0755 regular file" >&2; exit 1; }
+fi
+if [ -e "$calendar_marker" ] || [ -L "$calendar_marker" ]; then
+  [ -f "$calendar_marker" ] && [ ! -L "$calendar_marker" ] && [ "$(/usr/bin/stat -f %u "$calendar_marker")" = "$(/usr/bin/id -u)" ] && [ "$(/usr/bin/stat -f %l "$calendar_marker")" = 1 ] && [ "$(/usr/bin/stat -f %Lp "$calendar_marker")" = 644 ] || { echo "Existing calendar marker is not an owned single-link 0644 regular file" >&2; exit 1; }
+fi
+calendar_hash="$CALENDAR_SOURCE_SHA256"
+calendar_install_valid=false
+if [ -f "$calendar_binary" ] && [ -f "$calendar_marker" ]; then
+  if "$SECURE_INSTALLER" calendar-provenance "$calendar_binary" "$calendar_marker" "$calendar_hash"; then
+    if [ "$(/usr/bin/lipo -archs "$calendar_binary" 2>/dev/null || true)" = arm64 ] && "$calendar_binary" --self-test; then
+      calendar_install_valid=true
+    fi
+  else
+    calendar_provenance_status=$?
+    [ "$calendar_provenance_status" -eq 75 ] || exit "$calendar_provenance_status"
+  fi
+fi
+if [ "$calendar_install_valid" != true ]; then
+  calendar_temporary=$(/usr/bin/mktemp "$CALENDAR_HELPER_DIR/.calendar-panel.binary.XXXXXX")
+  calendar_hash_temporary=$(/usr/bin/mktemp "$CALENDAR_HELPER_DIR/.calendar-panel.hash.XXXXXX")
+  calendar_install_cleanup() { /bin/rm -f "$calendar_temporary" "$calendar_hash_temporary"; }
+  trap calendar_install_cleanup EXIT HUP INT TERM
+  [ "$(/usr/bin/stat -f %u "$calendar_temporary")" = "$(/usr/bin/id -u)" ]
+  [ "$(/usr/bin/stat -f %u "$calendar_hash_temporary")" = "$(/usr/bin/id -u)" ]
+  /usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -O "$calendar_source" -o "$calendar_temporary"
+  /bin/chmod 0755 "$calendar_temporary"
+  [ "$(/usr/bin/lipo -archs "$calendar_temporary")" = "$host_arch" ] || { echo "Calendar helper architecture mismatch" >&2; exit 1; }
+  "$calendar_temporary" --self-test
+  calendar_binary_hash=$(/usr/bin/shasum -a 256 "$calendar_temporary" | /usr/bin/awk '{print $1}')
+  {
+    printf '%s\n' 'version=2'
+    printf 'source_sha256=%s\n' "$calendar_hash"
+    printf '%s\n' 'target=arm64-apple-macosx15.0' 'build_mode=-O'
+    printf 'binary_sha256=%s\n' "$calendar_binary_hash"
+  } >"$calendar_hash_temporary"
+  /bin/chmod 0644 "$calendar_hash_temporary"
+  "$CONFIG_DIR/scripts/calendar-helper-install-transaction.sh" "$calendar_temporary" "$calendar_hash_temporary" "$CALENDAR_HELPER_DIR"
+  "$SECURE_INSTALLER" calendar-provenance "$calendar_binary" "$calendar_marker" "$calendar_hash"
+  [ "$(/usr/bin/lipo -archs "$calendar_binary")" = arm64 ]
+  "$calendar_binary" --self-test
+  trap - EXIT HUP INT TERM
+fi
+
+if ! "$SECURE_INSTALLER" prepare-sbarlua "$SBARLUA_DIR" "$SBARLUA_COMMIT" "$SBARLUA_LEGACY_SHA256"; then
+  work=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/SbarLua.XXXXXX")
+  trap 'rm -rf "$work"' EXIT HUP INT TERM
+  stage_home="$work/stage-home"
+  /bin/mkdir -m 0700 "$stage_home"
+  /usr/bin/git clone --filter=blob:none https://github.com/FelixKratz/SbarLua.git "$work/SbarLua"
+  /usr/bin/git -C "$work/SbarLua" checkout --detach "$SBARLUA_COMMIT"
+  [ "$(/usr/bin/git -C "$work/SbarLua" rev-parse HEAD)" = "$SBARLUA_COMMIT" ]
+  HOME="$stage_home" /usr/bin/make -C "$work/SbarLua" install
+  "$SECURE_INSTALLER" sbarlua "$stage_home/.local/share/sketchybar_lua/sketchybar.so" "$SBARLUA_COMMIT" "$SBARLUA_DIR"
+  /bin/rm -rf "$work"
+  trap - EXIT HUP INT TERM
+fi
+
+"$CONFIG_DIR/scripts/smoke-config.sh"
+echo "Dependencies are installed and the full offline smoke gate passed. Reload with: /opt/homebrew/bin/sketchybar --reload"

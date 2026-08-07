@@ -50,7 +50,9 @@ yabai_config_equals() {
 
 yabai_spaces_ready() {
   spaces=$(/opt/homebrew/bin/yabai -m query --spaces 2>/dev/null) || return 1
-  [ "$(printf '%s' "$spaces" | /usr/bin/jq 'length')" -eq 9 ]
+  printf '%s' "$spaces" | /usr/bin/jq -e '
+    ([.[] | select(.display == 1) | .index] | sort) == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+  ' >/dev/null
 }
 
 yabai_rules_ready() {
@@ -95,6 +97,22 @@ trap 'cleanup 129' HUP
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
 
+plist_value_equals() {
+  plist=$1
+  key=$2
+  expected=$3
+  actual=$(/usr/libexec/PlistBuddy -c "Print :$key" "$plist" 2>/dev/null) || return 1
+  [ "$actual" = "$expected" ]
+}
+
+for required_tool in /opt/homebrew/bin/yabai /usr/bin/jq /usr/libexec/PlistBuddy; do
+  if [ ! -x "$required_tool" ]; then
+    printf 'Required Apple-silicon Tahoe tool is unavailable: %s
+' "$required_tool" >&2
+    exit 69
+  fi
+done
+
 assert_process_absent AeroSpace
 assert_process_absent yabai
 assert_process_absent skhd
@@ -104,6 +122,19 @@ assert_job_absent "$SKHD_LABEL"
 /usr/bin/codesign --verify --deep --strict "$HOME/Applications/skhd.app"
 /usr/bin/plutil -lint "$YABAI_PLIST" >/dev/null
 /usr/bin/plutil -lint "$SKHD_PLIST" >/dev/null
+account_name=$(/usr/bin/id -un)
+if ! plist_value_equals "$YABAI_PLIST" "Label" "$YABAI_LABEL" ||
+   ! plist_value_equals "$SKHD_PLIST" "Label" "$SKHD_LABEL" ||
+   ! plist_value_equals "$YABAI_PLIST" "ProgramArguments:0" "$HOME/Applications/Yabai.app/Contents/MacOS/yabai" ||
+   ! plist_value_equals "$YABAI_PLIST" "StandardOutPath" "/tmp/yabai_${account_name}.out.log" ||
+   ! plist_value_equals "$YABAI_PLIST" "StandardErrorPath" "/tmp/yabai_${account_name}.err.log" ||
+   ! plist_value_equals "$SKHD_PLIST" "ProgramArguments:0" "$HOME/Applications/skhd.app/Contents/MacOS/skhd" ||
+   ! plist_value_equals "$SKHD_PLIST" "StandardOutPath" "/tmp/skhd_${account_name}.out.log" ||
+   ! plist_value_equals "$SKHD_PLIST" "StandardErrorPath" "/tmp/skhd_${account_name}.err.log"; then
+  printf 'Launch-agent paths do not match the current account. Update both repository plists before activation.
+' >&2
+  exit 1
+fi
 
 CUTOVER_STARTED=1
 /bin/launchctl enable "$DOMAIN/$YABAI_LABEL"
@@ -121,6 +152,7 @@ while [ "$attempt" -lt 30 ]; do
      yabai_config_equals window_placement second_child &&
      yabai_config_equals window_insertion_point last &&
      yabai_config_equals mouse_follows_focus off &&
+     # yabai accepts `off` in yabairc and reports the normalized value `disabled`.
      yabai_config_equals focus_follows_mouse disabled &&
      yabai_config_equals display_arrangement_order default &&
      yabai_config_equals window_origin_display default &&

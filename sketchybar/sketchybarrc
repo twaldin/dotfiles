@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+umask 077
+
+# SketchyBar starts this wrapper. Dependency installation is intentionally separate.
+CONFIG_DIR=${SKETCHYBAR_CONFIG_DIR:-$HOME/.config/sketchybar}
+export SKETCHYBAR_CONFIG_DIR="$CONFIG_DIR"
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+uid=$(/usr/bin/id -u)
+sbarlua_commit=dba9cc421b868c918d5c23c408544a28aadf2f2f
+sbarlua_legacy_sha256=53d7169806ba874f36b0f2f8128f3ad7c929ce969d40ef65ee23eb5cf0206c60
+runtime_base=${TMPDIR:-/tmp}
+case "$runtime_base" in /*) ;; *) exit 64 ;; esac
+runtime="$runtime_base/sketchybar-lua-$uid"
+if [ ! -e "$runtime" ] && [ ! -L "$runtime" ]; then /bin/mkdir -m 0700 "$runtime"; fi
+[ -d "$runtime" ] && [ ! -L "$runtime" ] && [ "$(/usr/bin/stat -f %u "$runtime")" = "$uid" ] && [ "$(/usr/bin/stat -f %Lp "$runtime")" = 700 ] || exit 73
+"$CONFIG_DIR/scripts/secure-file-install.py" prepare-sbarlua "$HOME/.local/share/sketchybar_lua" "$sbarlua_commit" "$sbarlua_legacy_sha256"
+exec "$CONFIG_DIR/scripts/provider-log.py" exec "$runtime/lua.log" /opt/homebrew/bin/lua "$CONFIG_DIR/bootstrap.lua"

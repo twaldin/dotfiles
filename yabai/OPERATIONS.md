@@ -2,7 +2,10 @@
 
 This setup uses yabai 7.1.25 and skhd 0.3.9 from `asmvik/formulae`.
 System Integrity Protection stays fully enabled. Do not install or load the
-scripting addition.
+scripting addition. This configuration targets Apple-silicon macOS Tahoe. The
+activation path requires Homebrew yabai at `/opt/homebrew/bin/yabai`, the Tahoe
+system `jq` at `/usr/bin/jq`, and `/usr/libexec/PlistBuddy`; it fails before
+cutover when one is absent.
 
 ## Ownership
 
@@ -38,10 +41,13 @@ perform native word selection.
 
 ## Native Spaces
 
-The built-in display has nine native Spaces. Create missing Spaces with the
+The primary yabai display (`display == 1`, the built-in display on the current
+hosts) owns global Space indices 1 through 9. Create missing Spaces with the
 Mission Control `add desktop` button. Basic-mode yabai cannot create or destroy
 Spaces. It can focus an existing Space with its gesture fallback and can move a
-window to an existing Space on this macOS version.
+window to an existing Space on this macOS version. External displays can own
+additional Spaces, but activation fails unless the primary display still owns
+exactly indices 1 through 9 because the keyboard map addresses those indices.
 
 Check the live set:
 
@@ -95,7 +101,11 @@ ln -sfn "$PWD/yabai/launch-agents/com.koekeishiya.skhd.plist"   "$HOME/Library/L
 ```
 
 They use a fixed system PATH. They restart a crash, but they do not restart a
-normal permission failure.
+normal permission failure. The checked-in wrapper and log paths use the macOS
+short name `twaldin`. For another account, replace those absolute values in
+both plists before linking them, then run `plutil -lint` on both files. The
+activation script rejects wrapper or log paths that do not match the current
+account.
 
 Use the fail-closed activation script for a controlled start:
 
@@ -166,14 +176,31 @@ and direct switching need the scripting addition. Forced shadows, opacity,
 sticky windows, custom layers, and nonzero yabai animations are also outside
 this setup.
 
-## Live validation status (2026-08-06)
+## Validation status
 
-The wrapper workaround is live-proven. AeroSpace is stopped. Wrapper-backed
-yabai and skhd are active, and the yabai socket answers queries. End-to-end
-synthetic key tests proved Hyper directional focus and Hyper Space navigation.
-Nine native Spaces exist. Option-Shift-number has distributed live windows
+On the Work host, the wrapper workaround and the window-manager runtime were
+live-proven on 2026-08-06 before the account-path guard was added. AeroSpace is
+stopped. Wrapper-backed yabai and skhd are active, and the yabai socket answers
+queries. Historical key automation supplied smoke coverage for Hyper focus and Space
+navigation before the current no-synthetic-HID rule. It is not acceptance
+proof. Nine native Spaces exist. Option-Shift-number distributed live windows
 across native Spaces. The live config reports BSP layout, split ratio 0.55,
 10-point padding, 8-point gaps, a 32-point external bar, and zero animation.
+Each host still needs attended physical-key verification before skhd or its
+hotkeys are accepted.
+
+The account-path guard has passed ShellCheck, shell syntax checks, plist lint,
+and exact read-only comparisons against the current Work plists. It was not
+invoked because the active services must not be disturbed. When it is actually
+run on a new host, a successful guarded activation is expected to verify the
+account-specific plist values, wrapper signatures, yabai socket, final yabai
+configuration, and process survival. It does not prove skhd Accessibility
+approval or hotkey registration:
+`skhd` can remain alive when those controls do not work. After activation, use
+physical keys to verify directional focus, Space focus, and send-and-follow.
+Exercise rollback separately under attended conditions; do not use synthetic
+HID or treat process presence as keyboard proof.
 
 Remaining manual checks are physical-key feel, Raycast Window Management
-shortcut cleanup, and final SketchyBar visual and interaction acceptance.
+shortcut cleanup, guarded rollback on the Home host, and final SketchyBar
+visual and interaction acceptance.
