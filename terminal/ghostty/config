@@ -1,6 +1,13 @@
 theme = Hardcore
+background-opacity = 0.5
 font-size = 24
+background-blur = true
 font-family = JetBrains Nerd Font
+# Disable native macOS tabs. Command-T opens a top-level yabai window.
+window-decoration = none
+keybind = super+t=new_window
+macos-dock-drop-behavior = new-window
 keybind = shift+enter=text:\n
+keybind = alt+backspace=text:\x1b\x7f
 window-padding-y = 10
 window-padding-x = 10
