@@ -67,6 +67,7 @@ path = pathlib.Path(sys.argv[1])
 if not path.is_file() or path.stat().st_size <= 8 or path.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
     raise SystemExit("Calendar bar synthetic renderer did not produce a PNG")
 PY
+/usr/bin/python3 "$root/tests/native-approved-artifacts-test.py"
 if [ "$require_live_shape" = 1 ]; then
   if /opt/homebrew/bin/sketchybar --query calendar.event.bracket >/dev/null 2>&1 \
     && /opt/homebrew/bin/sketchybar --query calendar.date.bracket >/dev/null 2>&1 \
