@@ -3,10 +3,8 @@ local settings = require("settings")
 local shell = require("lib.shell")
 local popup = require("lib.popup")
 local hover = require("lib.hover")
-local network = require("lib.network")
 local latest = { cpu = 0, ram = 0, disk = 0, battery = 0, uptime = "—" }
 local active = nil
-local slow_in_flight = nil
 local disk_in_flight = false
 
 local item = sbar.add("item", "status", {
@@ -28,7 +26,7 @@ local function update_popup()
   if not active or not popup.is_current(item, active.token) then return end
   active.resources:set({ label = { string = string.format("CPU %5.1f%%    RAM %5.1f%%", latest.cpu, latest.ram), color = latest.cpu >= 90 and colors.warning or colors.primary } })
   active.capacity:set({ label = { string = string.format("DISK %4.1f%%    BAT %3.0f%%", latest.disk, latest.battery) } })
-  active.network:set({ label = { string = "↓ " .. network.format_rate(network.current.rx_rate) .. "    ↑ " .. network.format_rate(network.current.tx_rate) } })
+  active.network:set({ label = { string = "NET  Unavailable until public provider", color = colors.muted } })
   active.uptime:set({ label = { string = "UP  " .. latest.uptime, color = colors.muted } })
 end
 
@@ -62,38 +60,6 @@ sample_data_disk()
 
 hover.bind(item, { idle_color = function() return latest.cpu >= 90 and colors.warning or colors.muted end })
 
-local function refresh_slow(token)
-  if slow_in_flight ~= nil or not active or active.token ~= token or not popup.is_current(item, token) then return end
-  slow_in_flight = token
-  local pending = 2
-  local function done()
-    if slow_in_flight ~= token then return end
-    pending = pending - 1
-    if pending > 0 then return end
-    slow_in_flight = nil
-    if active and popup.is_current(item, active.token) then
-      local next_token = active.token
-      sbar.delay(next_token == token and 8 or 0.1, function() refresh_slow(next_token) end)
-    end
-  end
-  shell.exec({ settings.config_dir .. "/scripts/top-processes.sh" }, function(output, exit_code)
-    if active and active.token == token and popup.is_current(item, token) and exit_code == 0 then
-      local lines = shell.lines(output)
-      for index, row in ipairs(active.processes) do
-        row:set({ label = { string = shell.ellipsis(lines[index] or "—", 29), color = colors.muted } })
-      end
-    end
-    done()
-  end)
-  shell.exec({ settings.config_dir .. "/scripts/vpn-state.sh" }, function(output, exit_code)
-    if active and active.token == token and popup.is_current(item, token) then
-      local value = exit_code == 0 and shell.display(output) or "—"
-      active.vpn:set({ label = { string = "VPN  " .. value, color = (value == "—" or value:lower() == "off") and colors.muted or colors.primary } })
-    end
-    done()
-  end)
-end
-
 popup.bind(item, {
   align = "right",
   on_close = function() active = nil end,
@@ -105,16 +71,11 @@ popup.bind(item, {
       capacity = popup.row(item, token, "capacity", {}),
       network = popup.row(item, token, "network", {}),
       uptime = popup.row(item, token, "uptime", {}),
-      processes = {},
     }
-    popup.row(item, token, "process_heading", { label = { string = "TOP PROCESSES", color = colors.primary } })
-    for index = 1, 4 do
-      active.processes[index] = popup.row(item, token, "process" .. index, { label = { string = "…", color = colors.muted, max_chars = 38 } })
-    end
-    popup.row(item, token, "connection_heading", { label = { string = "CONNECTION", color = colors.primary } })
-    active.vpn = popup.row(item, token, "vpn", { label = { string = "VPN        …", color = colors.muted } })
+    popup.row(item, token, "process_heading", { label = { string = "PROCESS DATA", color = colors.primary } })
+    popup.row(item, token, "process_unavailable", { label = { string = "Unavailable — no approved public units", color = colors.muted } })
+    popup.row(item, token, "vpn_unavailable", { label = { string = "VPN identity  Native privacy view", color = colors.muted } })
     update_popup()
-    refresh_slow(token)
   end,
 })
 return item
