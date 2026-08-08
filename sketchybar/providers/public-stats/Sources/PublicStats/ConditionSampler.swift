@@ -18,13 +18,17 @@ func mapPressure(_ event: DispatchSource.MemoryPressureEvent) -> PressureValue? 
     return nil
 }
 
+func mapLowPower(_ enabled: Bool) -> LowPowerValue {
+    enabled ? .on : .offOrUnsupported
+}
+
 struct ConditionReading: Equatable, Sendable {
     let thermal: ThermalValue
-    let lowPower: Bool
+    let lowPower: LowPowerValue
 }
 
 func readConditions() -> ConditionReading {
     let info = ProcessInfo.processInfo
     return ConditionReading(thermal: mapThermalState(info.thermalState),
-                            lowPower: info.isLowPowerModeEnabled)
+                            lowPower: mapLowPower(info.isLowPowerModeEnabled))
 }

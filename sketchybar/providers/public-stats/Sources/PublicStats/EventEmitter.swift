@@ -3,41 +3,33 @@ import Foundation
 
 
 struct PendingEvents: Sendable {
-    private struct Entry: Sendable {
-        let order: UInt64
-        let payload: SerializedEvent
-    }
-
-    private var order: UInt64 = 0
-    private var metrics: Entry?
-    private var battery: Entry?
+    private var metrics: SerializedEvent?
+    private var battery: SerializedEvent?
+    private var order: [FixedEvent] = []
 
     mutating func replace(with payload: SerializedEvent) {
-        order &+= 1
-        let entry = Entry(order: order, payload: payload)
+        order.removeAll { $0 == payload.event }
+        order.append(payload.event)
         switch payload.event {
-        case .metrics: metrics = entry
-        case .battery: battery = entry
+        case .metrics: metrics = payload
+        case .battery: battery = payload
         }
     }
 
     mutating func popNext() -> SerializedEvent? {
-        let entry: Entry?
-        switch (metrics, battery) {
-        case let (metrics?, battery?): entry = metrics.order <= battery.order ? metrics : battery
-        case let (metrics?, nil): entry = metrics
-        case let (nil, battery?): entry = battery
-        case (nil, nil): entry = nil
+        guard !order.isEmpty else { return nil }
+        let event = order.removeFirst()
+        switch event {
+        case .metrics:
+            defer { metrics = nil }
+            return metrics
+        case .battery:
+            defer { battery = nil }
+            return battery
         }
-        guard let entry else { return nil }
-        switch entry.payload.event {
-        case .metrics: metrics = nil
-        case .battery: battery = nil
-        }
-        return entry.payload
     }
 
-    var isEmpty: Bool { metrics == nil && battery == nil }
+    var isEmpty: Bool { order.isEmpty }
 }
 
 // Process and pending payload state are confined to queue.

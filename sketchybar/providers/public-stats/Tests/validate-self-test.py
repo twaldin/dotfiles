@@ -8,7 +8,7 @@ except Exception:
     raise SystemExit(1)
 if set(document) != {"checks", "ok", "schema"}:
     raise SystemExit(1)
-if document["ok"] is not True or document["schema"] != 1:
+if document["ok"] is not True or document["schema"] != 2:
     raise SystemExit(1)
 checks = document["checks"]
 expected = {
@@ -18,10 +18,10 @@ expected = {
 if set(checks) != expected:
     raise SystemExit(1)
 allowed = {
-    "battery": {"ok", "absent", "unavailable"},
-    "conditions": {"ok"},
+    "battery": {"present", "absent"},
+    "conditions": {"closed_read"},
     "cpu": {"ok"},
-    "memory_pressure": {"ok"},
+    "memory_pressure": {"source_created"},
     "metal": {"ok", "absent"},
     "network_counters": {"ok", "unavailable"},
     "network_path": {"ok"},

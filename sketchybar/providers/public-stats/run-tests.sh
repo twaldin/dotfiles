@@ -25,10 +25,10 @@ run_suite() {
   xcrun swiftc     "$@"     -warnings-as-errors     -parse-as-library     -swift-version 6     -target arm64-apple-macosx15.0     "${sources[@]}"     "${test_sources[@]}"     -framework AppKit     -framework IOKit     -framework Metal     -framework Network     -o "$output"
   local result
   result=$("$output")
-  [[ "$result" == '29 TESTS PASSED' ]] || { echo E_TEST_RESULT >&2; exit 1; }
+  [[ "$result" == '46 TESTS PASSED' ]] || { echo E_TEST_RESULT >&2; exit 1; }
 }
 
 run_suite "$scratch/public-stats-tests-normal"
 run_suite "$scratch/public-stats-tests-optimized" -O
 printf '%s
-' '29 TESTS PASSED'
+' '46 TESTS PASSED'

@@ -130,6 +130,22 @@ struct DeltaTests {
                                        selection: names, timeNanoseconds: 2_000_000_000))
     }
 
+    func testLegacyNetworkCounterRolloverIsTruthfullyUnavailable() {
+        let names: Set<String> = ["internal-test-a"]
+        let old = LinkCounterSample(
+            totals: LinkTotals(receive: UInt64(UInt32.max - 5), transmit: 100),
+            lanes: [LinkTotals(receive: UInt64(UInt32.max - 5), transmit: 100)]
+        )
+        let wrapped = LinkCounterSample(
+            totals: LinkTotals(receive: 4, transmit: 200),
+            lanes: [LinkTotals(receive: 4, transmit: 200)]
+        )
+        let baseline = LinkRateBaseline(sample: old, timeNanoseconds: 1_000_000_000,
+                                        selection: names)
+        XCTAssertNil(calculateLinkRate(previous: baseline, current: wrapped,
+                                       selection: names, timeNanoseconds: 2_000_000_000))
+    }
+
     func testReviewedLinkCounterABI() {
         XCTAssertTrue(linkCounterABICompatible())
     }

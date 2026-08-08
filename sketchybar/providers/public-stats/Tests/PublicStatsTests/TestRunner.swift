@@ -8,14 +8,21 @@ enum PrototypeTestRunner {
         let delta = DeltaTests()
         let policy = SamplerPolicyTests()
         let tests: [(String, () throws -> Void)] = [
-            ("contract.initial", contract.testInitialMetricsHasExactRequiredKeysAndFixedValues),
-            ("contract.optional", contract.testImportantAvailabilityIsOnlyOptionalKey),
-            ("contract.battery", contract.testBatteryHasExactFixedSchema),
+            ("contract.metrics-v2", contract.testInitialMetricsHasExactV2KeysAndFixedValues),
+            ("contract.ssd-explicit", contract.testImportantAvailabilityHasExplicitRequiredFields),
+            ("contract.battery-v2", contract.testBatteryHasExactUnavailableV2Schema),
+            ("contract.battery-status", contract.testBatterySerializerAcceptsEveryExactStatusShape),
             ("contract.decimal", contract.testDecimalIsPOSIXBoundedAndNonExponent),
-            ("contract.invalid", contract.testSerializerRejectsInvalidRelationsAndActivity),
-            ("contract.closed", contract.testClosedFieldValidatorRejectsMissingDuplicateUnexpectedAndNonASCII),
-            ("contract.argv", contract.testEmitterArgumentsUseFixedGrammar),
-            ("contract.pending", contract.testPendingEventsCoalesceAndPreserveCrossStreamOrder),
+            ("contract.metrics-invalid", contract.testSerializerRejectsInvalidMetricsRelationsAndEnvelope),
+            ("contract.metrics-valid", contract.testMetricsSerializerAcceptsEveryValidDomainShape),
+            ("contract.battery-invalid", contract.testSerializerRejectsInvalidBatteryRelationsAndRanges),
+            ("contract.closed", contract.testClosedFieldValidatorRejectsOrderMissingDuplicateUnexpectedAndNonASCII),
+            ("contract.argv", contract.testEmitterArgumentsUseFixedV2Grammar),
+            ("contract.pending", contract.testPendingEventsCoalesceAndPreserveIndependentStreamOrder),
+            ("contract.instance", contract.testProducerInstanceGrammarIsStrictAndGeneratedValueConforms),
+            ("contract.freshness", contract.testProducerCursorCoordinatesLossyRestartReplayFreshnessAndIndependentDomains),
+            ("contract.sequence", contract.testSequenceExhaustionNeverWrapsWithinOneInstance),
+            ("contract.lua-fields", contract.testLuaCompatibleSequenceAndFreshnessFieldGrammar),
             ("delta.cpu-reset", delta.testCPUFirstSampleAndResetAreInvalid),
             ("delta.cpu-normal", delta.testCPUNormalSplit),
             ("delta.cpu-invalid", delta.testCPUZeroDeltaGapAndImplausibleResetAreInvalid),
@@ -25,16 +32,26 @@ enum PrototypeTestRunner {
             ("delta.volume", delta.testVolumeValidation),
             ("delta.network", delta.testNetworkRateFirstEqualDecreaseGapAndOverflow),
             ("delta.network-selection", delta.testNetworkSelectionChangeAndMaskedLaneResetRejectDelta),
+            ("delta.network-rollover", delta.testLegacyNetworkCounterRolloverIsTruthfullyUnavailable),
             ("delta.network-abi", delta.testReviewedLinkCounterABI),
             ("policy.path", policy.testAllPathTypes),
             ("policy.pressure", policy.testPressurePrecedence),
-            ("policy.thermal", policy.testThermalStates),
-            ("policy.battery-bridge", policy.testStrictBatteryNumberAndBooleanBridges),
-            ("policy.battery-state", policy.testBatteryValidationAndStateTable),
-            ("policy.battery-time", policy.testBatteryTimesAndCandidateCardinality),
-            ("policy.battery-types", policy.testBadBatteryValueTypesAreRejected),
-            ("policy.startup-order", policy.testStartupTransactionPrecedesCallbackRegistration),
-            ("policy.sequence-wrap", policy.testSequenceWrapRequestsBaselineReset),
+            ("policy.conditions", policy.testThermalAndLowPowerStates),
+            ("policy.battery-bridge", policy.testStrictBatteryCFTypeBridges),
+            ("policy.inventory-empty", policy.testInventoryEmptyAbsentAndInvalidInventoryUnavailable),
+            ("policy.inventory-strict", policy.testInventoryUsesStrictTypeAndPresenceBeforeSelection),
+            ("policy.ups-separate", policy.testUPSIsClassifiedSeparatelyAndNeverSelectedAsBattery),
+            ("policy.inventory-cardinality", policy.testInventoryReportsAmbiguousBatteryAndUPSCardinality),
+            ("policy.inventory-future", policy.testFutureTypeIsNotBatteryWhenInventoryFieldsAreStrictlyValid),
+            ("policy.battery-states", policy.testEveryValidChargeStateUsesExactBooleansAndSource),
+            ("policy.battery-contradictions", policy.testEveryChargeStateContradictionIsRejected),
+            ("policy.battery-empty-time", policy.testEstimateSentinelsRangesAndDischargeApplicability),
+            ("policy.battery-full-time", policy.testEstimateChargingAndStableStateApplicability),
+            ("policy.battery-types", policy.testCapacityAndBooleanValueTypesAndRangesAreRejected),
+            ("policy.providing-source", policy.testGlobalProvidingSourceIsClosed),
+            ("policy.parser-reachability", policy.testEveryParsedBatteryStateIsSerializerReachable),
+            ("policy.self-test-policy", policy.testSelfTestUsesBoundedCPUSamplingAndFailsUnprovedBattery),
+            ("policy.startup-order", policy.testStartupTransactionPrecedesCallbackConsumption),
             ("policy.battery-watch", policy.testBatteryWatcherFailureHasFixedDegradedDiagnostic),
             ("policy.metal", policy.testStaticMetalContractCannotRepresentActivityValue),
         ]
@@ -43,7 +60,7 @@ enum PrototypeTestRunner {
             catch { PrototypeTestState.shared.record(name + " threw") }
         }
         let failures = PrototypeTestState.shared.failures
-        let line = failures == 0 ? "29 TESTS PASSED\n" : "TESTS FAILED\n"
+        let line = failures == 0 ? "\(tests.count) TESTS PASSED\n" : "TESTS FAILED\n"
         FileHandle.standardOutput.write(Data(line.utf8))
         exit(failures == 0 ? 0 : 1)
     }

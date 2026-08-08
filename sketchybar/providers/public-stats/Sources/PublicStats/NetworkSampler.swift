@@ -109,6 +109,9 @@ func calculateLinkRate(previous: LinkRateBaseline,
     var receiveDelta: UInt64 = 0
     var transmitDelta: UInt64 = 0
     for (old, new) in zip(previous.sample.lanes, current.lanes) {
+        // if_data exposes legacy 32-bit counters. A decrease can be a wrap or an interface
+        // reset; the public sample cannot distinguish them. Fail this interval closed as
+        // NET_VALID=0, replace the baseline, and never invent a modulo throughput value.
         guard new.receive >= old.receive, new.transmit >= old.transmit else { return nil }
         let (nextReceive, receiveOverflow) = receiveDelta.addingReportingOverflow(new.receive - old.receive)
         let (nextTransmit, transmitOverflow) = transmitDelta.addingReportingOverflow(new.transmit - old.transmit)

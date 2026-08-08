@@ -4,18 +4,19 @@ import Foundation
 import Network
 
 
-struct SequenceAdvance: Equatable, Sendable {
-    let next: UInt64
-    let resetBaselines: Bool
-}
-
-func advanceMetricsSequence(_ current: UInt64) -> SequenceAdvance {
-    let next = current &+ 1
-    return SequenceAdvance(next: next, resetBaselines: next == 0)
+func nextSequence(after current: UInt64) -> UInt64? {
+    current == UInt64.max ? nil : current + 1
 }
 
 func batteryWatcherDiagnostic(installed: Bool) -> String? {
     installed ? nil : "E_BATTERY_WATCH"
+}
+
+func contractDiagnostic(for event: FixedEvent) -> String {
+    switch event {
+    case .metrics: return "E_METRICS_CONTRACT"
+    case .battery: return "E_BATTERY_CONTRACT"
+    }
 }
 
 // All mutable sampling state is confined to stateQueue. Main-thread setup only installs retained sources.
@@ -31,14 +32,27 @@ final class PublicStatsDaemon: @unchecked Sendable {
     private var wakeToken: (any NSObjectProtocol)?
     private var batteryWatcher: BatteryWatcher?
 
-    private var metrics = MetricsSnapshot()
+    private let producerInstance: String
+    private var metrics: MetricsSnapshot
     private var cpuSampler = CPUSampler()
     private var networkSampler = NetworkSampler()
-    private var battery = BatterySnapshot()
+    private var battery: BatterySnapshot
+    private var metricsSequenceExhausted = false
+    private var batterySequenceExhausted = false
     private var bootstrapped = false
     private var conditionPendingDuringStartup = false
     private var wakePendingDuringStartup = false
     private var batteryPendingDuringStartup = false
+
+    init() {
+        let instance = makeProducerInstance()
+        precondition(isValidProducerInstance(instance))
+        producerInstance = instance
+        metrics = MetricsSnapshot(producerInstance: instance)
+        var initialBattery = BatterySnapshot()
+        initialBattery.producerInstance = instance
+        battery = initialBattery
+    }
 
     func start() -> Bool {
         installNotifications()
@@ -124,8 +138,10 @@ final class PublicStatsDaemon: @unchecked Sendable {
     }
 
     private func startupSample() {
-        metrics = MetricsSnapshot()
+        metrics = MetricsSnapshot(producerInstance: producerInstance)
         metrics.metricsSequence = 0
+        metricsSequenceExhausted = false
+        batterySequenceExhausted = false
         sampleCPU()
         sampleMemory()
         sampleVolume()
@@ -290,9 +306,8 @@ final class PublicStatsDaemon: @unchecked Sendable {
         metrics.conditionSampled = true
         let value = readConditions()
         metrics.thermalValid = true
-        metrics.lowPowerValid = true
         metrics.thermalState = value.thermal
-        metrics.lowPower = value.lowPower
+        metrics.lowPowerState = value.lowPower
     }
 
     private func sampleMetal() {
@@ -319,7 +334,11 @@ final class PublicStatsDaemon: @unchecked Sendable {
     }
 
     private func sampleAndStoreBattery() {
-        battery = readBattery().snapshot
+        let sequence = battery.batterySequence
+        battery = readBattery()
+        battery.producerInstance = producerInstance
+        battery.batterySequence = sequence
+        battery.batterySampleEpochSeconds = epochSeconds(Date()) ?? 0
     }
 
     private func sampleAndEmitBattery() {
@@ -359,28 +378,34 @@ final class PublicStatsDaemon: @unchecked Sendable {
     }
 
     private func emitMetrics() {
-        guard let payload = try? ContractSerializer.metrics(metrics) else { return }
-        emitter.submit(payload)
-        let advance = advanceMetricsSequence(metrics.metricsSequence)
-        metrics.metricsSequence = advance.next
-        if advance.resetBaselines {
-            cpuSampler.reset()
-            _ = networkSampler.replacePathAfterReset(monitor.currentPath)
-            metrics.cpuValid = false
-            metrics.cpuBusyPercent = 0
-            metrics.cpuUserPercent = 0
-            metrics.cpuNicePercent = 0
-            metrics.cpuSystemPercent = 0
-            metrics.cpuIdlePercent = 0
-            metrics.networkValid = false
-            metrics.networkReceiveBytesPerSecond = 0
-            metrics.networkTransmitBytesPerSecond = 0
+        guard !metricsSequenceExhausted else { return }
+        metrics.metricsSampleEpochSeconds = epochSeconds(Date()) ?? 0
+        guard let payload = try? ContractSerializer.metrics(metrics) else {
+            Self.diagnostic(contractDiagnostic(for: .metrics))
+            return
         }
+        emitter.submit(payload)
+        guard let next = nextSequence(after: metrics.metricsSequence) else {
+            metricsSequenceExhausted = true
+            Self.diagnostic("E_METRICS_SEQUENCE_EXHAUSTED")
+            return
+        }
+        metrics.metricsSequence = next
     }
 
     private func emitBattery() {
-        guard let payload = try? ContractSerializer.battery(battery) else { return }
+        guard !batterySequenceExhausted else { return }
+        guard let payload = try? ContractSerializer.battery(battery) else {
+            Self.diagnostic(contractDiagnostic(for: .battery))
+            return
+        }
         emitter.submit(payload)
+        guard let next = nextSequence(after: battery.batterySequence) else {
+            batterySequenceExhausted = true
+            Self.diagnostic("E_BATTERY_SEQUENCE_EXHAUSTED")
+            return
+        }
+        battery.batterySequence = next
     }
 
     private static func diagnostic(_ code: String) {

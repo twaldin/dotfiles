@@ -1,0 +1,1 @@
+let forbidden = "system_profiler SPPowerDataType sppower_battery_health_info"

@@ -65,24 +65,25 @@ enum SelfTest {
         }
         let pathOK = testPath()
         let countersState = hasReadableLinkCounter() ? "ok" : "unavailable"
-        _ = readConditions()
+        let conditions = readConditions()
+        let conditionsClosed = ThermalValue.allCases.contains(conditions.thermal) &&
+            LowPowerValue.allCases.contains(conditions.lowPower)
         let pressureOK = testPressureSource()
         let metalReading = readMetalCapabilities()
         let metalState = metalReading.present ? "ok" : "absent"
-        let batteryState: String
-        switch readBattery() {
-        case .valid: batteryState = "ok"
-        case .absent: batteryState = "absent"
-        case .unavailable: batteryState = "unavailable"
-        }
+        let batteryReading = readBattery()
+        let batteryState = batteryReading.batteryStatus.rawValue
+        let batteryOK = batteryReading.batteryStatus == .present ||
+            batteryReading.batteryStatus == .absent
         let contractOK = testContract()
-        let ok = cpuOK && vmOK && volumeOK && pathOK && pressureOK && contractOK
+        let ok = cpuOK && vmOK && volumeOK && pathOK && conditionsClosed &&
+            pressureOK && batteryOK && contractOK
         let document = SelfTestDocument(
             checks: SelfTestChecks(
                 battery: batteryState,
-                conditions: "ok",
+                conditions: conditionsClosed ? "closed_read" : "unavailable",
                 cpu: cpuOK ? "ok" : "unavailable",
-                memoryPressure: pressureOK ? "ok" : "unavailable",
+                memoryPressure: pressureOK ? "source_created" : "unavailable",
                 metal: metalState,
                 networkCounters: countersState,
                 networkPath: pathOK ? "ok" : "unavailable",
@@ -91,7 +92,7 @@ enum SelfTest {
                 volume: volumeOK ? "ok" : "unavailable"
             ),
             ok: ok,
-            schema: 1
+            schema: 2
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -113,15 +114,20 @@ enum SelfTest {
                             logical: logical,
                             active: active,
                             clockTicksPerSecond: clockTicks)
-        Thread.sleep(forTimeInterval: 0.1)
-        guard case .success(let second) = readCPUTicks(),
-              let secondLoads = readLoadAverages() else { return false }
-        return sampler.consume(ticks: second,
-                               timeNanoseconds: DispatchTime.now().uptimeNanoseconds,
-                               loads: secondLoads,
-                               logical: logical,
-                               active: active,
-                               clockTicksPerSecond: clockTicks).valid
+        let deadline = DispatchTime.now() + .seconds(3)
+        repeat {
+            Thread.sleep(forTimeInterval: 0.1)
+            guard case .success(let next) = readCPUTicks(),
+                  let loads = readLoadAverages() else { return false }
+            let sample = sampler.consume(ticks: next,
+                                         timeNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                                         loads: loads,
+                                         logical: logical,
+                                         active: active,
+                                         clockTicksPerSecond: clockTicks)
+            if sample.valid { return true }
+        } while DispatchTime.now() < deadline
+        return false
     }
 
     private static func testPath() -> Bool {
@@ -143,13 +149,18 @@ enum SelfTest {
         source.setEventHandler {}
         source.resume()
         source.cancel()
-        return true
+        return mapPressure([.normal]) == .normal &&
+            mapPressure([.normal, .warning]) == .warning &&
+            mapPressure([.critical]) == .critical
     }
 
     private static func testContract() -> Bool {
-        let initial = MetricsSnapshot()
+        let instance = "0123456789abcdef0123456789abcdef"
+        let initial = MetricsSnapshot(producerInstance: instance)
+        var batterySnapshot = BatterySnapshot()
+        batterySnapshot.producerInstance = instance
         guard let metrics = try? ContractSerializer.metrics(initial),
-              let battery = try? ContractSerializer.battery(BatterySnapshot()),
+              let battery = try? ContractSerializer.battery(batterySnapshot),
               metrics.event == .metrics, battery.event == .battery,
               Set(metrics.fields.map(\.0)) == Set(ContractSerializer.metricsRequiredKeys),
               Set(battery.fields.map(\.0)) == Set(ContractSerializer.batteryRequiredKeys),
