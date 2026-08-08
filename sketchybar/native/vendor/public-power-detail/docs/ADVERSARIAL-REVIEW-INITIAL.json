@@ -1,0 +1,36 @@
+{
+  "base": null,
+  "intent": "Review this source-only Swift public power detail reader against /tmp/battery-power-full-functionality-gap-audit.md SHA-256 76274bc15a50f2e86673ea8bafc7145753f391117a8f9c60de7daf977816090b, especially Slice B and the supported public surface matrix. Keep Awake is intentionally excluded. Hunt for public-API mistakes, CF bridging/coercion, incomplete state/sentinel/cardinality/notification semantics, privacy or identity leaks, accidental live execution/writes/actions, generation/cache lifecycle flaws, insufficient synthetic and audit gates, and false claims.",
+  "overall": "request_changes",
+  "reviewers": [
+    {
+      "error": null,
+      "failed": false,
+      "findings": [
+        {
+          "file": "../../../tmp/public-power-detail-prototype/Sources/PublicPowerDetail/ObservationDriver.swift",
+          "issue": "The notification driver treats `IOPSNotificationCreateRunLoopSource` failure as a hard start failure. That contradicts the referenced audit\u2019s public-surface row, which requires source-notification creation failure to degrade to polling-only with the 60-second heartbeat/backstop still active. In the current code, that failure prevents all other invalidations and the heartbeat from starting.",
+          "line": 38,
+          "severity": "medium",
+          "suggestion": "Start the heartbeat and other independent observers even when the IOPS run-loop source cannot be created; report a fixed `observationUnavailable` error through the sink or a degraded-state path, but keep polling/backstop refresh alive. Add a synthetic injectable registration test for this failure path."
+        },
+        {
+          "file": "../../../tmp/public-power-detail-prototype/scripts/verify.sh",
+          "issue": "The claimed source-only gate only rejects build directories and a short suffix list (`.o`, `.dylib`, `.a`, `.so`, `.xctest`). A compiled Mach-O executable with no extension, a framework bundle, or other compiled artifact can remain in the prototype tree while the gate still prints `source-only: pass`, making the README\u2019s verification claim false.",
+          "line": 55,
+          "severity": "medium",
+          "suggestion": "Detect compiled artifacts by content and bundle shape, not just suffix: inspect file magic for Mach-O/fat archives, reject executable binaries without extensions, and add framework/app/bundle/build-output directory names to the deny list."
+        }
+      ],
+      "focus": null,
+      "harness": "codex",
+      "model": "(default)",
+      "summary": "The core reader contract is mostly conservative and privacy-aware, but the implementation misses an explicit notification degradation requirement from the audit and the offline gate overstates its source-only guarantee. Both are concrete, fixable gaps in the public surface and release-audit story.",
+      "suppressedFindings": [],
+      "suppressedLowCount": 0,
+      "tag": "codex",
+      "verdict": "request_changes"
+    }
+  ],
+  "source": "paths"
+}

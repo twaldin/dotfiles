@@ -1,0 +1,4 @@
+module CDarwinNotify [system] {
+    header "shim.h"
+    export *
+}

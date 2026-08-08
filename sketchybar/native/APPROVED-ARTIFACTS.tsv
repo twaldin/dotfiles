@@ -1,0 +1,3 @@
+# approved-native-artifacts-v1
+# artifact	destination	record_kind	relative_path	sha256	same_byte_review_sha256	external_tree_sha256
+public-power-detail	vendor/public-power-detail	manifest	MANIFEST.sha256	ba85e0a9b5084c1e317dc9636ffdfbb815fcbbc9135a902be061915e23bb5d8b	5b918a625d2c61ef142b29dba69cc3b84970cd0e5002b61971e795b054093059	-

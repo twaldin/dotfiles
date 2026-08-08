@@ -1,0 +1,29 @@
+{
+  "base": null,
+  "intent": "Re-review the repaired source-only Swift public power detail reader against /tmp/battery-power-full-functionality-gap-audit.md SHA-256 76274bc15a50f2e86673ea8bafc7145753f391117a8f9c60de7daf977816090b. Confirm the prior source-only content/bundle finding and polling-only notification-degradation finding are fully repaired with synthetic proof. Also find any remaining Slice B, public surface, privacy, strict CF, generation, disabled-action, no-live-execution, audit, or false-claim issue. Keep Awake is intentionally excluded.",
+  "overall": "request_changes",
+  "reviewers": [
+    {
+      "error": null,
+      "failed": false,
+      "findings": [
+        {
+          "file": "../../../tmp/public-power-detail-prototype/Sources/PublicPowerDetail/PowerDetailAgent.swift",
+          "issue": "System and session transition state is updated before checking for an active popup generation, and begin/close do not reset those fields. A sleep, wake, or session event received while the popup is closed can be carried into the next generation with sample/invalidation reset to 1/0, which violates the one-generation/no-last-known-detail story and can surface stale user/session activity in a later popup. The existing synthetic tests cover stale document cache rejection, but not this cross-generation transition leakage.",
+          "line": 121,
+          "severity": "medium",
+          "suggestion": "Make transition state generation-scoped: either guard for an active generation before mutating `systemTransition`/`sessionTransition`, or reset both fields to `.unknown` in `beginPopup()` and `closePopup()`. Add a synthetic test where an event is received with no active generation, then a new popup begins and reports `.unknown` transitions."
+        }
+      ],
+      "focus": null,
+      "harness": "codex",
+      "model": "(default)",
+      "summary": "The two prior findings appear repaired: the source-only gate now checks compiled file magic and bundle/build shapes, and the observation driver installs independent invalidations before degrading source notifications to `polling_only` with synthetic heartbeat proof. I still found one material generation/privacy gap: transition state can leak across closed popups, so the repaired tree should not ship until that lifecycle edge is fixed and tested.",
+      "suppressedFindings": [],
+      "suppressedLowCount": 0,
+      "tag": "codex",
+      "verdict": "request_changes"
+    }
+  ],
+  "source": "paths"
+}
