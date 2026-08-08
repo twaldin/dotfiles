@@ -32,16 +32,25 @@ offline = root / 'tests/calendar-panel-offline.sh'
 source = install.read_text()
 smoke_source = smoke.read_text()
 offline_source = offline.read_text()
-native_hash = '7fd04dc9e2d3fb4556dda41cd2aa5da38c2e2b622e74efc6be9a58cb0f812a72'
+native_hash = 'e695b4a98f69436fbcc22f83750ca683a98fc1d5057e7858bb92b4417603afb3'
+navigation_fixture_hash = '3b7119c0d6d7bf98ccdeac7bfc8ea7e22fc78892c0f8b661d095cff0cb12bc04'
+navigation_fixture = root / 'tests/fixtures/calendar-navigation-sf-symbols.json'
+check(navigation_fixture.is_file() and hashlib.sha256(navigation_fixture.read_bytes()).hexdigest() == navigation_fixture_hash, 'navigation SF Symbol fixture must match its reviewed checksum')
 check(native_hash in smoke_source and smoke_source.index(native_hash) < smoke_source.index('/usr/bin/xcrun swiftc'), 'standalone smoke must verify the immutable native source before Swift compilation')
 check(native_hash in offline_source and offline_source.index(native_hash) < offline_source.index('/usr/bin/xcrun swiftc'), 'direct offline native gate must verify the immutable source before Swift compilation')
+check(navigation_fixture_hash in smoke_source and smoke_source.index(navigation_fixture_hash) < smoke_source.index('/usr/bin/xcrun swiftc'), 'standalone smoke must verify the navigation fixture before Swift compilation')
+check(navigation_fixture_hash in offline_source and offline_source.index(navigation_fixture_hash) < offline_source.index('/usr/bin/xcrun swiftc'), 'direct offline gate must verify the navigation fixture before Swift compilation')
+smoke_calendar_compiles = [line for line in smoke_source.splitlines() if '/usr/bin/xcrun swiftc' in line and 'calendar-panel.swift' in line]
+offline_calendar_compiles = [line for line in offline_source.splitlines() if '/usr/bin/xcrun swiftc' in line and 'calendar-panel.swift' in line]
+check(len(smoke_calendar_compiles) == 2 and all('-warnings-as-errors' in line for line in smoke_calendar_compiles), 'standalone calendar Swift checks must reject all warnings')
+check(len(offline_calendar_compiles) == 3 and all('-warnings-as-errors' in line for line in offline_calendar_compiles), 'direct offline calendar Swift checks must reject all warnings')
 prevalidate = source.index('calendar_directory_mode=')
-check(source.index('host_macos_version=$(/usr/bin/sw_vers -productVersion)') < source.index('host-contract "$host_arch" "$host_macos_version"') < source.index('Immutable calendar source checksum failed') < source.index('/opt/homebrew/bin/brew install lua') and 'CALENDAR_SOURCE_SHA256=7fd04dc9e2d3fb4556dda41cd2aa5da38c2e2b622e74efc6be9a58cb0f812a72' in source and 'calendar_target=arm64-apple-macosx15.0' in source and 'x86_64-apple-macosx15.0' not in source, 'release host and calendar target must be exactly Apple-silicon arm64 before dependency mutation')
+check(source.index('host_macos_version=$(/usr/bin/sw_vers -productVersion)') < source.index('host-contract "$host_arch" "$host_macos_version"') < source.index('Immutable calendar source checksum failed') < source.index('/opt/homebrew/bin/brew install lua') and 'CALENDAR_SOURCE_SHA256=e695b4a98f69436fbcc22f83750ca683a98fc1d5057e7858bb92b4417603afb3' in source and 'calendar_target=arm64-apple-macosx15.0' in source and 'x86_64-apple-macosx15.0' not in source, 'release host and calendar target must be exactly Apple-silicon arm64 before dependency mutation')
 installed_provenance = source.index('calendar-provenance "$calendar_binary" "$calendar_marker" "$calendar_hash"')
 installed_architecture = source.index('/usr/bin/lipo -archs "$calendar_binary"', installed_provenance)
 installed_exercise = source.index('"$calendar_binary" --self-test', installed_architecture)
 check(prevalidate < installed_provenance < installed_architecture < installed_exercise, 'existing helper must pass exact v2 provenance and arm64 checks before self-test or skip')
-build = source.index('/usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -O')
+build = source.index('/usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -O -warnings-as-errors')
 architecture = source.index('/usr/bin/lipo -archs "$calendar_temporary"', build)
 exercise = source.index('"$calendar_temporary" --self-test', architecture)
 commit = source.index('calendar-helper-install-transaction.sh', exercise)
@@ -54,6 +63,12 @@ check(build < architecture < exercise < manifest < commit < post_provenance, 'ca
 check('/usr/bin/install -m 0755 "$calendar_temporary"' not in source, 'calendar installation must not copy over the live binary')
 check(transaction.is_file(), 'calendar rollback transaction is missing')
 transaction_source = transaction.read_text()
+lock_wrap = transaction_source.index('/usr/bin/lockf -s -t 0 9')
+recovery_inspection = transaction_source.index('if [ -e "$recovery_dir" ]')
+check(transaction_source.index('exec 9>"$lock_file"') < lock_wrap < recovery_inspection
+      and "stat -f %i /dev/fd/9" in transaction_source
+      and transaction_source.count('validate_lock ||') >= 5,
+      'every calendar transaction must hold and revalidate an identity-checked crash-released descriptor lock around recovery and publication')
 check(transaction_source.count('sync-directory') >= 5 and transaction_source.count('sync-file') >= 2, 'calendar candidates, recovery normalization, backups, publication, rollback, and cleanup must be fsynced')
 marker_backup_link = transaction_source.index('/bin/ln "$destination_marker" "$marker_backup"')
 first_live_rename = transaction_source.index('/bin/mv -f "$candidate" "$destination"')
@@ -83,6 +98,87 @@ with tempfile.TemporaryDirectory(prefix='calendar-install-contract.') as raw:
     check(fingerprint(binary) == previous_binary and fingerprint(marker) == previous_marker,
           'detected post-binary failure must restore exact previous bytes and modes')
     check(not list(destination.glob('.calendar-install.previous-*')), 'rollback backups must not remain after successful restoration')
+
+    candidate = destination / '.calendar-panel.binary.rollback-lock-replaced'
+    candidate_marker = destination / '.calendar-panel.hash.rollback-lock-replaced'
+    write(candidate, b'rollback-lock-replaced-binary', 0o755)
+    write(candidate_marker, b'rollback-lock-replaced-hash\n', 0o644)
+    rollback_lock_ready = work / 'calendar-rollback-lock-ready'
+    rollback_lock_process = subprocess.Popen(
+        ['/bin/sh', str(transaction), str(candidate), str(candidate_marker), str(destination)],
+        env={**os.environ,
+             'SKETCHYBAR_TEST_FAIL_CALENDAR_MARKER_RENAME': '1',
+             'SKETCHYBAR_TEST_CALENDAR_ROLLBACK_READY': str(rollback_lock_ready)},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for _ in range(500):
+        if rollback_lock_ready.exists() or rollback_lock_process.poll() is not None:
+            break
+        time.sleep(0.01)
+    check(rollback_lock_ready.read_text() == 'ready\n' and rollback_lock_process.poll() is None,
+          'rollback lock replacement fixture must pause before destructive restoration')
+    transaction_lock = destination / '.calendar-install.lock'
+    transaction_lock.unlink()
+    write(transaction_lock, b'', 0o600)
+    rollback_lock_process.communicate(timeout=5)
+    check(rollback_lock_process.returncode != 0
+          and (destination / '.calendar-install-transaction').exists(),
+          'rollback must abort without consuming recovery state after lock identity replacement')
+    lock_resume_candidate = destination / '.calendar-panel.binary.lock-resume'
+    lock_resume_marker = destination / '.calendar-panel.hash.lock-resume'
+    write(lock_resume_candidate, b'lock-resume-binary', 0o755)
+    write(lock_resume_marker, b'lock-resume-hash\n', 0o644)
+    lock_resumed = subprocess.run(
+        ['/bin/sh', str(transaction), str(lock_resume_candidate), str(lock_resume_marker), str(destination)],
+        env={**os.environ, 'SKETCHYBAR_TEST_ABORT_AFTER_CALENDAR_RECOVERY': '1'},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    lock_resumed_identities = ((binary.stat().st_dev, binary.stat().st_ino), (marker.stat().st_dev, marker.stat().st_ino))
+    check(lock_resumed.returncode != 0 and fingerprint(binary) == previous_binary
+          and fingerprint(marker) == previous_marker and lock_resumed_identities == previous_identities
+          and not (destination / '.calendar-install-transaction').exists(),
+          'next lock owner must restore exact prior pair after rollback lock replacement')
+    lock_resume_candidate.unlink()
+    lock_resume_marker.unlink()
+
+    candidate = destination / '.calendar-panel.binary.rollback-kill'
+    candidate_marker = destination / '.calendar-panel.hash.rollback-kill'
+    write(candidate, b'rollback-kill-binary', 0o755)
+    write(candidate_marker, b'rollback-kill-hash\n', 0o644)
+    rollback_binary_ready = work / 'calendar-rollback-binary-ready'
+    rollback_kill = subprocess.Popen(
+        ['/bin/sh', str(transaction), str(candidate), str(candidate_marker), str(destination)],
+        env={**os.environ,
+             'SKETCHYBAR_TEST_FAIL_CALENDAR_MARKER_RENAME': '1',
+             'SKETCHYBAR_TEST_CALENDAR_ROLLBACK_BINARY_READY': str(rollback_binary_ready)},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for _ in range(500):
+        if rollback_binary_ready.exists() or rollback_kill.poll() is not None:
+            break
+        time.sleep(0.01)
+    check(rollback_binary_ready.read_text() == 'ready\n' and rollback_kill.poll() is None,
+          'rollback crash fixture must pause after idempotent binary restoration')
+    rollback_kill.kill()
+    rollback_kill.wait(timeout=5)
+    rollback_kill.stdout.close()
+    rollback_kill.stderr.close()
+    check(rollback_kill.returncode != 0 and fingerprint(binary) == previous_binary
+          and fingerprint(marker) == previous_marker
+          and (destination / '.calendar-install-transaction').exists(),
+          'SIGKILL during rollback must leave the exact prior pair and durable recovery state')
+    resumed_candidate = destination / '.calendar-panel.binary.rollback-resume'
+    resumed_marker = destination / '.calendar-panel.hash.rollback-resume'
+    write(resumed_candidate, b'rollback-resume-binary', 0o755)
+    write(resumed_marker, b'rollback-resume-hash\n', 0o644)
+    resumed = subprocess.run(
+        ['/bin/sh', str(transaction), str(resumed_candidate), str(resumed_marker), str(destination)],
+        env={**os.environ, 'SKETCHYBAR_TEST_ABORT_AFTER_CALENDAR_RECOVERY': '1'},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    resumed_identities = ((binary.stat().st_dev, binary.stat().st_ino), (marker.stat().st_dev, marker.stat().st_ino))
+    check(resumed.returncode != 0 and fingerprint(binary) == previous_binary
+          and fingerprint(marker) == previous_marker and resumed_identities == previous_identities
+          and not (destination / '.calendar-install-transaction').exists(),
+          'next transaction must finish rollback cleanup without consuming recovery links early')
+    resumed_candidate.unlink()
+    resumed_marker.unlink()
 
     candidate = destination / '.calendar-panel.binary.abort'
     candidate_marker = destination / '.calendar-panel.hash.abort'
@@ -126,7 +222,208 @@ with tempfile.TemporaryDirectory(prefix='calendar-install-contract.') as raw:
     installed_binary = fingerprint(binary)
     installed_marker = fingerprint(marker)
 
+    replaced_candidate = destination / '.calendar-panel.binary.replaced-stage'
+    replaced_candidate_marker = destination / '.calendar-panel.hash.replaced-stage'
+    write(replaced_candidate, b'original-stage-binary', 0o755)
+    write(replaced_candidate_marker, b'original-stage-hash\n', 0o644)
+    publish_ready = work / 'calendar-publish-ready'
+    publish_release = work / 'calendar-publish-release'
+    publish_process = subprocess.Popen(
+        ['/bin/sh', str(transaction), str(replaced_candidate), str(replaced_candidate_marker), str(destination)],
+        env={**os.environ,
+             'SKETCHYBAR_TEST_CALENDAR_BINARY_PUBLISH_READY': str(publish_ready),
+             'SKETCHYBAR_TEST_CALENDAR_BINARY_PUBLISH_RELEASE': str(publish_release)},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for _ in range(500):
+        if publish_ready.exists() or publish_process.poll() is not None:
+            break
+        time.sleep(0.01)
+    check(publish_ready.read_text() == 'ready\n' and publish_process.poll() is None,
+          'candidate replacement fixture must pause after durable backups and before publication')
+    replacement_stage = destination / '.calendar-panel.binary.replacement-source'
+    write(replacement_stage, b'unrelated-replacement-stage', 0o755)
+    os.replace(replacement_stage, replaced_candidate)
+    publish_release.touch()
+    publish_process.communicate(timeout=5)
+    check(publish_process.returncode != 0 and replaced_candidate.read_bytes() == b'unrelated-replacement-stage'
+          and fingerprint(binary) == installed_binary and fingerprint(marker) == installed_marker
+          and not (destination / '.calendar-install-transaction').exists(),
+          'changed candidate identity must reject publication and cleanup must preserve the replacement path')
+    replaced_candidate.unlink()
+
+    lock_file = destination / '.calendar-install.lock'
+    lock_stat = lock_file.stat()
+    check(lock_file.is_file() and not lock_file.is_symlink() and lock_stat.st_uid == os.getuid()
+          and lock_stat.st_nlink == 1 and stat.S_IMODE(lock_stat.st_mode) == 0o600,
+          'calendar transaction lock must be a stable owned single-link mode-0600 file')
+    first_candidate = destination / '.calendar-panel.binary.concurrent-first'
+    first_marker = destination / '.calendar-panel.hash.concurrent-first'
+    write(first_candidate, b'concurrent-first-binary', 0o755)
+    write(first_marker, b'concurrent-first-hash\n', 0o644)
+    lock_ready = work / 'calendar-lock-ready'
+    lock_release = work / 'calendar-lock-release'
+    first_environment = {
+        **os.environ,
+        'SKETCHYBAR_TEST_CALENDAR_LOCK_READY': str(lock_ready),
+        'SKETCHYBAR_TEST_CALENDAR_LOCK_RELEASE': str(lock_release),
+    }
+    first_process = subprocess.Popen(
+        ['/bin/sh', str(transaction), str(first_candidate), str(first_marker), str(destination)],
+        env=first_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for _ in range(500):
+        if lock_ready.exists() or first_process.poll() is not None:
+            break
+        time.sleep(0.01)
+    check(lock_ready.read_text() == 'ready\n' and first_process.poll() is None,
+          'first calendar writer must hold the transaction lock before recovery inspection')
+    second_candidate = destination / '.calendar-panel.binary.concurrent-second'
+    second_marker = destination / '.calendar-panel.hash.concurrent-second'
+    write(second_candidate, b'concurrent-second-binary', 0o755)
+    write(second_marker, b'concurrent-second-hash\n', 0o644)
+    second_result = subprocess.run(
+        ['/bin/sh', str(transaction), str(second_candidate), str(second_marker), str(destination)],
+        env={**os.environ, 'SKETCHYBAR_CALENDAR_TRANSACTION_LOCKED': '1'},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+    check(second_result.returncode == 75 and second_candidate.exists() and second_marker.exists()
+          and fingerprint(binary) == installed_binary and fingerprint(marker) == installed_marker,
+          'a hostile-environment concurrent writer must fail before recovery inspection or installed mutation')
+    second_candidate.unlink()
+    second_marker.unlink()
+    lock_release.touch()
+    first_process.communicate(timeout=5)
+    check(first_process.returncode == 0 and binary.read_bytes() == b'concurrent-first-binary'
+          and marker.read_bytes() == b'concurrent-first-hash\n',
+          'the lock owner must publish the exact pair after the competing writer fails')
+    installed_binary = fingerprint(binary)
+    installed_marker = fingerprint(marker)
+
+    replaced_lock_candidate = destination / '.calendar-panel.binary.replaced-lock'
+    replaced_lock_marker = destination / '.calendar-panel.hash.replaced-lock'
+    write(replaced_lock_candidate, b'replaced-lock-binary', 0o755)
+    write(replaced_lock_marker, b'replaced-lock-hash\n', 0o644)
+    replaced_ready = work / 'calendar-replaced-lock-ready'
+    replaced_release = work / 'calendar-replaced-lock-release'
+    replaced_process = subprocess.Popen(
+        ['/bin/sh', str(transaction), str(replaced_lock_candidate), str(replaced_lock_marker), str(destination)],
+        env={**os.environ,
+             'SKETCHYBAR_TEST_CALENDAR_LOCK_READY': str(replaced_ready),
+             'SKETCHYBAR_TEST_CALENDAR_LOCK_RELEASE': str(replaced_release)},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for _ in range(500):
+        if replaced_ready.exists() or replaced_process.poll() is not None:
+            break
+        time.sleep(0.01)
+    check(replaced_ready.read_text() == 'ready\n' and replaced_process.poll() is None,
+          'lock replacement fixture must hold the original lock descriptor')
+    lock_file.unlink()
+    write(lock_file, b'', 0o600)
+    replaced_release.touch()
+    replaced_process.communicate(timeout=5)
+    check(replaced_process.returncode == 73 and replaced_lock_candidate.exists()
+          and replaced_lock_marker.exists() and fingerprint(binary) == installed_binary
+          and fingerprint(marker) == installed_marker,
+          'lock path replacement must abort before recovery inspection or installed mutation')
+    replaced_lock_candidate.unlink()
+    replaced_lock_marker.unlink()
+
     recovery_namespace = destination / '.calendar-install-transaction'
+    recovery_namespace.mkdir(mode=0o700)
+    rollback_binary = recovery_namespace / 'calendar-panel.previous'
+    rollback_marker = recovery_namespace / 'SOURCE_SHA256.previous'
+    rollback_state = recovery_namespace / 'state'
+    os.link(binary, rollback_binary)
+    os.link(marker, rollback_marker)
+    rollback_binary_identity = rollback_binary.stat()
+    rollback_marker_identity = rollback_marker.stat()
+    torn_binary = destination / '.calendar-panel.binary.torn-live'
+    write(torn_binary, b'torn-new-binary', 0o755)
+    os.replace(torn_binary, binary)
+    recovery_candidate = destination / '.calendar-panel.binary.recovery-abort'
+    recovery_marker = destination / '.calendar-panel.hash.recovery-abort'
+    write(recovery_candidate, b'next-binary', 0o755)
+    write(recovery_marker, b'next-hash\n', 0o644)
+    torn_live_identity = binary.stat()
+    recovery_marker_identity = recovery_marker.stat()
+    write(rollback_state, ('binary-published|true|%d|%d|true|%d|%d|%d|%d|%d|%d\n' % (
+        rollback_binary_identity.st_dev, rollback_binary_identity.st_ino,
+        rollback_marker_identity.st_dev, rollback_marker_identity.st_ino,
+        torn_live_identity.st_dev, torn_live_identity.st_ino,
+        recovery_marker_identity.st_dev, recovery_marker_identity.st_ino)).encode(), 0o600)
+    recovery_abort = subprocess.run(
+        ['/bin/sh', str(transaction), str(recovery_candidate), str(recovery_marker), str(destination)],
+        env={**os.environ, 'SKETCHYBAR_TEST_ABORT_AFTER_CALENDAR_RECOVERY': '1'},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    check(recovery_abort.returncode != 0 and fingerprint(binary) == installed_binary
+          and fingerprint(marker) == installed_marker and not recovery_namespace.exists()
+          and recovery_candidate.exists() and recovery_marker.exists(),
+          'crash recovery must restore and durably retain the exact prior pair before fresh transaction state')
+    recovery_candidate.unlink()
+    recovery_marker.unlink()
+
+    original_binary_bytes = binary.read_bytes()
+    original_marker_bytes = marker.read_bytes()
+    ambiguous_binary_identity = binary.stat()
+    ambiguous_marker_identity = marker.stat()
+    recovery_namespace.mkdir(mode=0o700)
+    ambiguous_state = recovery_namespace / 'state'
+    write(ambiguous_state, ('pair-published|true|1|1|true|2|2|%d|%d|%d|%d\n' % (
+        ambiguous_binary_identity.st_dev, ambiguous_binary_identity.st_ino,
+        ambiguous_marker_identity.st_dev, ambiguous_marker_identity.st_ino)).encode(), 0o600)
+    unknown_live = destination / '.calendar-panel.binary.unknown-live'
+    write(unknown_live, b'unknown-live-binary', 0o755)
+    os.replace(unknown_live, binary)
+    ambiguous_candidate = destination / '.calendar-panel.binary.ambiguous'
+    ambiguous_marker = destination / '.calendar-panel.hash.ambiguous'
+    write(ambiguous_candidate, b'ambiguous-next-binary', 0o755)
+    write(ambiguous_marker, b'ambiguous-next-hash\n', 0o644)
+    ambiguous_result = subprocess.run(
+        ['/bin/sh', str(transaction), str(ambiguous_candidate), str(ambiguous_marker), str(destination)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    check(ambiguous_result.returncode == 73 and binary.read_bytes() == b'unknown-live-binary'
+          and ambiguous_state.exists() and ambiguous_candidate.exists() and ambiguous_marker.exists(),
+          'recovery must fail unchanged when a committed live identity is not the recorded candidate')
+    ambiguous_state.unlink()
+    recovery_namespace.rmdir()
+    ambiguous_candidate.unlink()
+    ambiguous_marker.unlink()
+    write(binary, original_binary_bytes, 0o755)
+    write(marker, original_marker_bytes, 0o644)
+    installed_binary = fingerprint(binary)
+    installed_marker = fingerprint(marker)
+
+    recovery_namespace.mkdir(mode=0o700)
+    committed_state = recovery_namespace / 'state'
+    committed_binary_identity = binary.stat()
+    committed_marker_identity = marker.stat()
+    write(committed_state, ('pair-published|true|%d|%d|true|%d|%d|%d|%d|%d|%d\n' % (
+        rollback_binary_identity.st_dev, rollback_binary_identity.st_ino,
+        rollback_marker_identity.st_dev, rollback_marker_identity.st_ino,
+        committed_binary_identity.st_dev, committed_binary_identity.st_ino,
+        committed_marker_identity.st_dev, committed_marker_identity.st_ino)).encode(), 0o600)
+    committed_candidate = destination / '.calendar-panel.binary.committed-cleanup'
+    committed_marker = destination / '.calendar-panel.hash.committed-cleanup'
+    write(committed_candidate, b'after-committed-binary', 0o755)
+    write(committed_marker, b'after-committed-hash\n', 0o644)
+    committed_abort = subprocess.run(
+        ['/bin/sh', str(transaction), str(committed_candidate), str(committed_marker), str(destination)],
+        env={**os.environ, 'SKETCHYBAR_TEST_ABORT_WITH_EMPTY_CALENDAR_RECOVERY': '1'},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    check(committed_abort.returncode != 0 and fingerprint(binary) == installed_binary
+          and fingerprint(marker) == installed_marker and recovery_namespace.is_dir()
+          and not any(recovery_namespace.iterdir())
+          and committed_candidate.exists() and committed_marker.exists(),
+          'crash between recovery entry removal and rmdir must leave only a safe empty namespace')
+    empty_resume = subprocess.run(
+        ['/bin/sh', str(transaction), str(committed_candidate), str(committed_marker), str(destination)],
+        env={**os.environ, 'SKETCHYBAR_TEST_ABORT_AFTER_CALENDAR_RECOVERY': '1'},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    check(empty_resume.returncode != 0 and fingerprint(binary) == installed_binary
+          and fingerprint(marker) == installed_marker and not recovery_namespace.exists()
+          and committed_candidate.exists() and committed_marker.exists(),
+          'next transaction must remove empty cleanup residue before fresh transaction state')
+    committed_candidate.unlink()
+    committed_marker.unlink()
+
     recovery_namespace.mkdir(mode=0o700)
     binary_residue = recovery_namespace / 'calendar-panel.previous'
     marker_residue = recovery_namespace / 'SOURCE_SHA256.previous'
@@ -135,13 +432,18 @@ with tempfile.TemporaryDirectory(prefix='calendar-install-contract.') as raw:
     os.link(marker, marker_residue)
     binary_identity = binary_residue.stat()
     marker_identity = marker_residue.stat()
-    write(recovery_state, ('binary-published|true|%d|%d|true|%d|%d\n' % (binary_identity.st_dev, binary_identity.st_ino, marker_identity.st_dev, marker_identity.st_ino)).encode(), 0o600)
     unrelated_lookalike = destination / '.calendar-panel.previous.unrelated'
     write(unrelated_lookalike, b'unrelated', 0o600)
     residue_candidate = destination / '.calendar-panel.binary.residue'
     residue_marker = destination / '.calendar-panel.hash.residue'
     write(residue_candidate, b'residue-new-binary', 0o755)
     write(residue_marker, b'residue-new-hash\n', 0o644)
+    residue_candidate_identity = residue_candidate.stat()
+    residue_marker_identity = residue_marker.stat()
+    write(recovery_state, ('binary-published|true|%d|%d|true|%d|%d|%d|%d|%d|%d\n' % (
+        binary_identity.st_dev, binary_identity.st_ino, marker_identity.st_dev, marker_identity.st_ino,
+        residue_candidate_identity.st_dev, residue_candidate_identity.st_ino,
+        residue_marker_identity.st_dev, residue_marker_identity.st_ino)).encode(), 0o600)
     residue_result = subprocess.run(['/bin/sh', str(transaction), str(residue_candidate), str(residue_marker), str(destination)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     check(residue_result.returncode == 0 and binary.read_bytes() == b'residue-new-binary' and marker.read_bytes() == b'residue-new-hash\n' and not recovery_namespace.exists() and unrelated_lookalike.read_bytes() == b'unrelated', 'next validated transaction must forward-publish a complete pair and preserve unrelated lookalikes: ' + residue_result.stderr)
     unrelated_lookalike.unlink()
@@ -154,9 +456,14 @@ with tempfile.TemporaryDirectory(prefix='calendar-install-contract.') as raw:
     missing_marker = destination / '.calendar-panel.hash.missing-state'
     write(missing_candidate, b'missing-state-binary', 0o755)
     write(missing_marker, b'missing-state-hash\n', 0o644)
-    missing_result = subprocess.run(['/bin/sh', str(transaction), str(missing_candidate), str(missing_marker), str(destination)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    check(missing_result.returncode != 0 and missing_namespace.exists() and missing_candidate.exists() and missing_marker.exists() and fingerprint(binary) == installed_binary and fingerprint(marker) == installed_marker, 'missing recovery manifest must fail unchanged')
-    missing_namespace.rmdir()
+    missing_result = subprocess.run(
+        ['/bin/sh', str(transaction), str(missing_candidate), str(missing_marker), str(destination)],
+        env={**os.environ, 'SKETCHYBAR_TEST_ABORT_AFTER_CALENDAR_RECOVERY': '1'},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    check(missing_result.returncode != 0 and not missing_namespace.exists()
+          and missing_candidate.exists() and missing_marker.exists()
+          and fingerprint(binary) == installed_binary and fingerprint(marker) == installed_marker,
+          'owned empty recovery namespace must normalize durably before fresh transaction state')
     missing_candidate.unlink()
     missing_marker.unlink()
 
@@ -166,7 +473,7 @@ with tempfile.TemporaryDirectory(prefix='calendar-install-contract.') as raw:
     mismatched_state = mismatched_namespace / 'state'
     write(mismatched_backup, b'not-the-recorded-inode', 0o755)
     live_identity = binary.stat()
-    write(mismatched_state, ('backups|true|%d|%d|false|-|-\n' % (live_identity.st_dev, live_identity.st_ino)).encode(), 0o600)
+    write(mismatched_state, ('backups|true|%d|%d|false|-|-|1|1|2|2\n' % (live_identity.st_dev, live_identity.st_ino)).encode(), 0o600)
     mismatch_candidate = destination / '.calendar-panel.binary.mismatch'
     mismatch_marker = destination / '.calendar-panel.hash.mismatch'
     write(mismatch_candidate, b'mismatch-binary', 0o755)

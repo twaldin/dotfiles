@@ -15,13 +15,13 @@ local item = sbar.add("item", "audio", {
   update_freq = 30,
   width = settings.control_width,
   icon = {
-    string = "󰕾", color = colors.muted, width = settings.icon_width,
+    string = "󰕾", color = colors.muted, width = settings.control_width,
     align = "center", padding_left = 0, padding_right = 0,
     font = { family = settings.font, style = "Regular", size = 15.0 },
   },
   label = { drawing = false, string = "Audio, state unavailable" },
   background = {
-    drawing = false, color = colors.surface2, height = 26, corner_radius = 9,
+    drawing = false, color = colors.surface2, height = 26, corner_radius = 0,
   },
 })
 
@@ -95,7 +95,7 @@ local function action_row(token, suffix, label, selected, callback)
   })
   if not row or selected or state.busy then return row end
   popup.action(row, { selected = false, idle_color = colors.muted })
-  row:subscribe("mouse.clicked", function(env)
+  popup.on_click(row, function(env)
     if left_click(env) and popup.is_current(item, token) then callback() end
   end)
   return row
@@ -222,7 +222,8 @@ local function render(view)
   local _, direction = role_state(view, "output")
   local level = direction and percentage(direction.volume) or nil
   local muted = direction and boolean_value(direction.mute)
-  local active_color = view.confirmed and (muted == true and colors.muted or colors.primary) or colors.muted
+  local idle_color = view.confirmed and (muted == true and colors.muted or colors.primary) or colors.muted
+  local active_color = hover.foreground(item, idle_color)
   item:set({
     width = settings.control_width,
     icon = { string = output_icon(level, muted), color = active_color },

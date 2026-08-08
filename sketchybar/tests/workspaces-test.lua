@@ -124,4 +124,9 @@ refresh_spaces()
 for index = 1, 9 do check(objects["space." .. index].properties.associated_space == index and objects["space." .. index].properties.label.drawing == false, "non-1-based Yabai data must use content-free static fallback") end
 check(window_query_count == 7, "non-1-based Yabai data must not query windows")
 check(not action_routes_focus(), "non-1-based Yabai data must not enable workspace actions")
+local hovered_space = objects["space.1"]
+for _, callback in ipairs(hovered_space.subscriptions["mouse.entered"] or {}) do callback({}) end
+for _, callback in ipairs(hovered_space.subscriptions.space_change or {}) do callback({ SELECTED = "true" }) end
+check(hovered_space.properties.background.color == require("colors").hover, "space update preserves active hover fill")
+check(hovered_space.properties.icon.color == require("colors").primary, "space update preserves active hover foreground")
 print("Workspace exact-Yabai and static no-Yabai fallback tests passed")

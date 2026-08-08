@@ -182,8 +182,10 @@ complete(before, unavailable, 0)
 local unsupported = objects["popup.microphone.mute_unavailable"]
 check(unsupported and unsupported.properties.label.string == "Microphone mute is not supported by this device",
       "unsupported microphone mute has exact text")
-check(not unsupported.subscriptions["mouse.clicked"],
-      "unsupported microphone mute has no action handler")
+local unsupported_before = #exec_calls
+fire(unsupported, "mouse.clicked", { BUTTON = "left" })
+check(#exec_calls == unsupported_before,
+      "unsupported microphone mute has no active action metadata")
 
 before = #exec_calls
 audio.refresh()
@@ -204,10 +206,13 @@ unsettableOutput.default_settable.system_output = false
 complete(before, unsettableOutput, 0)
 local outputUnsettable = objects["popup.audio.output_unsettable"]
 local alertsUnsettable = objects["popup.audio.alerts_unsettable"]
-check(outputUnsettable and not outputUnsettable.subscriptions["mouse.clicked"],
-      "unsettable output role is a passive row")
-check(alertsUnsettable and not alertsUnsettable.subscriptions["mouse.clicked"],
-      "unsettable system alert role is a passive row")
+local unsettable_before = #exec_calls
+fire(outputUnsettable, "mouse.clicked", { BUTTON = "left" })
+fire(alertsUnsettable, "mouse.clicked", { BUTTON = "left" })
+check(outputUnsettable and #exec_calls == unsettable_before,
+      "unsettable output role has no active action metadata")
+check(alertsUnsettable and #exec_calls == unsettable_before,
+      "unsettable system alert role has no active action metadata")
 check(objects["popup.audio.output_choice_1"] == priorOutputChoice
       and objects["popup.audio.alert_choice_1"] == priorAlertChoice,
       "unsettable output roles do not create choice rows")
@@ -219,8 +224,10 @@ local unsettableInput = selected_second(80)
 unsettableInput.default_settable.input = false
 complete(before, unsettableInput, 0)
 local inputUnsettable = objects["popup.microphone.input_unsettable"]
-check(inputUnsettable and not inputUnsettable.subscriptions["mouse.clicked"],
-      "unsettable input role is a passive row")
+local input_unsettable_before = #exec_calls
+fire(inputUnsettable, "mouse.clicked", { BUTTON = "left" })
+check(inputUnsettable and #exec_calls == input_unsettable_before,
+      "unsettable input role has no active action metadata")
 check(objects["popup.microphone.input_choice_1"] == priorInputChoice,
       "unsettable input role does not create a choice row")
 

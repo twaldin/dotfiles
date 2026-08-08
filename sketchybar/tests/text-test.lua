@@ -24,6 +24,12 @@ check(shell.display([[Allowed 🎉 \"quoted"]]) == "Allowed 🎉 /’quoted’",
 check(text.clean("abcdef", 3, 32) == "abc", "character limit must be exact")
 check(text.clean("éé", 8, 2) == "é", "UTF-8 byte limit must preserve whole scalars")
 check(text.clean("ok", 2, 2) == "ok" and text.clean("ok", 1, 2) == "o", "size boundaries must be preserved")
+local family = "👩" .. utf8.char(0x200d) .. "💻" .. utf8.char(0x200d) .. "👩"
+check(text.clean(family, 32, 128) == family, "valid chained GB11 emoji must preserve contextual ZWJ")
+check(text.clean("A" .. utf8.char(0x200d) .. "💻", 32, 128) == "A 💻", "non-EP ZWJ must remain sanitized")
+local emoji_with_vs = "👩" .. utf8.char(0xfe0f) .. utf8.char(0x200d) .. "💻"
+check(text.clean(emoji_with_vs, 32, 128) == "👩" .. utf8.char(0x200d) .. "💻", "removed variation selector must not break valid GB11 context")
+check(text.clean(family, 2, 128) == "👩", "character limit cannot emit a dangling contextual ZWJ")
 local bounded_display = shell.display(string.rep('"', 1024))
 check(utf8.len(bounded_display) == 512 and #bounded_display == 1536, "post-normalization display text must remain within scalar and byte budgets")
 local hostile_prefix = string.rep(utf8.char(0x200b), 1024)

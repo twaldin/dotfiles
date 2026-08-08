@@ -41,11 +41,13 @@ with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     check(executed.returncode == 0 and log.read_text() == 'synthetic exec line\n', 'exec mode must safely truncate the owned log before synthetic provider output')
 
     pidfile = runtime / 'provider.pid'
-    published = subprocess.run([sys.executable, str(helper), 'pid', str(pidfile), '123'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    dead_pid = '2147483647'
+    replacement_dead_pid = '2147483646'
+    published = subprocess.run([sys.executable, str(helper), 'pid', str(pidfile), dead_pid], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     first_pid_inode = pidfile.stat().st_ino
-    check(published.returncode == 0 and pidfile.read_text() == '123\n' and stat.S_IMODE(pidfile.stat().st_mode) == 0o600 and not pathlib.Path(str(pidfile) + '.new').exists(), 'PID helper must publish a complete owned 0600 file and remove the fixed temp name')
-    replaced = subprocess.run([sys.executable, str(helper), 'pid', str(pidfile), '456'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    check(replaced.returncode == 0 and pidfile.read_text() == '456\n' and pidfile.stat().st_ino != first_pid_inode, 'PID helper must atomically replace an existing safe PID file')
+    check(published.returncode == 0 and pidfile.read_text() == dead_pid + '\n' and stat.S_IMODE(pidfile.stat().st_mode) == 0o600 and not pathlib.Path(str(pidfile) + '.new').exists(), 'PID helper must publish a complete owned 0600 file and remove the fixed temp name')
+    replaced = subprocess.run([sys.executable, str(helper), 'pid', str(pidfile), replacement_dead_pid], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    check(replaced.returncode == 0 and pidfile.read_text() == replacement_dead_pid + '\n' and pidfile.stat().st_ino != first_pid_inode, 'PID helper must atomically replace an existing safe dead PID file')
     live_pidfile = runtime / 'live-owner.pid'
     live_pidfile.write_text(str(os.getpid()) + '\n')
     live_pidfile.chmod(0o600)

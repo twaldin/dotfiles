@@ -170,6 +170,7 @@ with tempfile.TemporaryDirectory(prefix='system-controls-test.') as raw:
     check(relative.get('ok') is False and not (base / 'relative').exists(), 'relative runtime must reject')
     weak = base / 'weak-runtime'
     weak.mkdir(mode=0o755)
+    weak.chmod(0o755)
     weak_result = one_json(execute(production, ['caffeine', 'status'], dict(os.environ, TMPDIR=str(weak))), 73)
     check(weak_result.get('ok') is False, 'group/world accessible runtime must reject')
 

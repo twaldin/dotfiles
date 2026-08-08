@@ -12,9 +12,9 @@ local wifi = sbar.add("item", "wifi", {
   updates = true,
   update_freq = 5,
   width = settings.control_width,
-  icon = { string = "󰤨", color = colors.normal, width = settings.icon_width, align = "center", padding_left = 0, padding_right = 0, font = { family = settings.font, style = "Regular", size = 12.0 } },
+  icon = { string = "󰤨", color = colors.normal, width = settings.control_width, align = "center", padding_left = 0, padding_right = 0, font = { family = settings.font, style = "Regular", size = 12.0 } },
   label = { drawing = false, color = colors.muted, width = 94, max_chars = 15 },
-  background = { drawing = false, color = colors.surface2, height = 26, corner_radius = 9 },
+  background = { drawing = false, color = colors.surface2, height = 26, corner_radius = 0 },
 })
 
 local function update_wifi_popup(state)
@@ -29,9 +29,10 @@ end
 local function update_wifi()
   network.sample(function(state)
     local detail = state.state == "connected" and (state.ssid ~= "—" and state.ssid or "Connected") or "Offline"
+    local idle_color = state.state == "connected" and colors.primary or colors.warning
     wifi:set({
       width = settings.control_width,
-      icon = { string = state.state == "connected" and "󰤨" or "󰤭", color = state.state == "connected" and colors.primary or colors.warning },
+      icon = { string = state.state == "connected" and "󰤨" or "󰤭", color = hover.foreground(wifi, idle_color) },
       label = { string = detail, drawing = false },
     })
     update_wifi_popup(state)
@@ -87,9 +88,9 @@ local bluetooth = sbar.add("item", "bluetooth", {
   updates = true,
   update_freq = 30,
   width = settings.control_width,
-  icon = { string = "󰂯", color = colors.dim, width = settings.icon_width, align = "center", padding_left = 0, padding_right = 0 },
+  icon = { string = "󰂯", color = colors.dim, width = settings.control_width, align = "center", padding_left = 0, padding_right = 0 },
   label = { drawing = false },
-  background = { drawing = false, color = colors.surface2, height = 26, corner_radius = 9 },
+  background = { drawing = false, color = colors.surface2, height = 26, corner_radius = 0 },
 })
 
 local function update_bluetooth()
@@ -108,7 +109,8 @@ local function update_bluetooth()
       bluetooth_cache = { time = 0, data = nil, profile_fingerprint = "", connected_fingerprint = fingerprint }
     end
     bluetooth_connected = connected
-    bluetooth:set({ icon = { string = connected > 0 and "󰂱" or "󰂯", color = connected > 0 and colors.primary or colors.muted } })
+    local idle_color = connected > 0 and colors.primary or colors.muted
+    bluetooth:set({ icon = { string = connected > 0 and "󰂱" or "󰂯", color = hover.foreground(bluetooth, idle_color) } })
   end)
 end
 

@@ -7,6 +7,7 @@ local M = {
   popup_width = 280,
   icon_width = 24,
   control_width = 28,
+  release_fingerprint = "40d9beb1e8b0dc9e1d625488da2099b78d60e52067df59adfaf0ced1fc0fc3ab",
   calendar_show_titles = true,
   left_island_limit = 560,
   spaces_width_limit = 340,

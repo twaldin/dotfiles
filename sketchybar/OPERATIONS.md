@@ -14,18 +14,31 @@ Run dependency setup manually. It never runs during a bar reload.
 ~/.config/sketchybar/install-deps.sh
 ~/.config/sketchybar/scripts/smoke-config.sh
 sketchybar --reload
+SKETCHYBAR_REQUIRE_LIVE_SHAPE=1 ~/.config/sketchybar/scripts/smoke-config.sh
 ```
 
-The smoke command includes the complete optimized native calendar offline
-contract; it is a required release gate, not an optional fast-path check.
+The first smoke is the complete offline gate. Reload happens only after it is
+green. The required live invocation then repeats that gate and verifies the
+newly loaded source fingerprint plus content-redacted geometry; it cannot pass
+against the prior configuration. Hotload can satisfy the same fingerprint, but
+the final release procedure uses the explicit reload shown above. Offline
+installer validation leaves `SKETCHYBAR_REQUIRE_LIVE_SHAPE` unset because no
+live bar is required.
 
 The native source is immutable at SHA-256
-`7fd04dc9e2d3fb4556dda41cd2aa5da38c2e2b622e74efc6be9a58cb0f812a72`.
+`e695b4a98f69436fbcc22f83750ca683a98fc1d5057e7858bb92b4417603afb3`.
 The installer rejects a different repository source before any Homebrew
-mutation or compilation. Its separate exact implementation approval is
-`calendar-7fd04-affected-exact-adversarial.json`; non-native full-tree
-reviews do not claim to review the Swift body. The unchanged full offline native
-gate still builds, self-tests, and exercises that exact source on every smoke.
+mutation or compilation. The prior exact implementation approval applies only
+to its predecessor and is not reused for this interaction revision. Current
+source requires its own direct and cross-harness reviews, complete offline
+native gate, and attended physical interaction acceptance.
+
+The calendar SF Symbol navigation contract fixture is immutable at SHA-256
+`3b7119c0d6d7bf98ccdeac7bfc8ea7e22fc78892c0f8b661d095cff0cb12bc04`. The standalone smoke and direct offline gates verify it
+before Swift compilation. The offline gate compiles arm64 debug and optimized
+binaries and runs the same self-test in both. It also retains both anonymous
+same-host render pairs before it checks byte determinism, so a failure remains
+diagnosable. This check does not claim identical pixels across different hosts.
 
 `install-deps.sh` runs that full offline smoke gate after every dependency
 installation and fails the install if the gate fails. Lua, icalBuddy, blueutil, and media-control are intentionally live Homebrew formula
@@ -66,25 +79,34 @@ and installed binary SHA-256. An existing helper is executed for self-test only
 after no-follow marker/binary identity, hash, and exact arm64 `lipo` validation;
 legacy, wrong-binary, or wrong-architecture state rebuilds without execution. It
 is compiled into an owned same-directory temporary, must pass its native self-test,
-and is then installed with atomic binary and provenance-marker renames. Candidate files and rollback backup entries are fsynced before live mutation; the destination directory is fsynced after pair publication, rollback restoration, and backup/stage cleanup. SIGKILL or power loss can retain the owned 0700 `.calendar-install-transaction` namespace. Its fixed 0600 manifest records the publication phase, pair presence, and exact backup device/inode identities. After the next build and self-test, the transaction validates and fsync-removes only that complete namespace, makes and fsyncs a fresh manifested backup snapshot, then forward-publishes one complete pair. Missing, extra, unsafe, or identity-mismatched recovery state fails closed unchanged; unrelated main-directory lookalikes are never touched. Same-directory hard-link backups restore the exact prior binary and marker if a detected post-binary marker commit fails. Calendar rollback ignores additional handled signals until exact pair restoration and cleanup finish. A failed build or self-test does not overwrite the installed helper. Reloads do not download or compile anything.
+and is then installed with atomic binary and provenance-marker renames. Every
+transaction holds the stable owned single-link 0600 `lockf` lock before it
+inspects recovery state; a concurrent writer returns temporary failure without
+normalizing the active writer's namespace. Candidate files and rollback backup
+entries are fsynced before live mutation; the destination directory is fsynced after pair publication, rollback restoration, and backup/stage cleanup. SIGKILL or power loss can retain the owned 0700 `.calendar-install-transaction` namespace. Its fixed 0600 manifest records the publication phase, pair presence, and exact prior plus candidate device/inode identities. After the next build and self-test, the locked transaction validates the complete namespace. It idempotently restores the recorded prior pair for every incomplete phase, or retains the already durable new pair for `pair-published`, before it removes recovery state. Only then can it make and fsync a fresh manifested backup snapshot and publish another pair. Missing, extra, unsafe, or identity-mismatched recovery state fails closed unchanged; unrelated main-directory lookalikes are never touched. Same-directory hard-link backups restore the exact prior binary and marker if a detected post-binary marker commit fails. Startup and EXIT rollback create new hard links without consuming the recovery links; a crash at any restore or cleanup point remains idempotently recoverable. An owned canonical empty fixed namespace is normalized as cleanup residue before new state. The lock path is revalidated against the held descriptor before recovery, destructive rollback steps, and each publication phase. Candidate paths are revalidated by exact identity before and after publication and are removed on failure only if they still identify the recorded staging files. Calendar rollback ignores additional handled signals until exact pair restoration and cleanup finish. A failed build or self-test does not overwrite the installed helper. Reloads do not download or compile anything.
 
 ## Resting bar and controls
 
 The resting bar uses a fully transparent, non-topmost base. `_HIHideMenuBar=1`
-keeps native menu content out of that layer. Fixed graphite item surfaces remain
-above the base for selection, grouping, hover, and popups; all shadows and blur
-remain disabled.
+keeps native menu content out of that layer. Sharp graphite blocks remain above
+the base for selection, grouping, hover, and popups. Bar items and SketchyBar
+popups use zero corner radius; all shadows and blur remain disabled.
 
 - Left: every available primary-display native Space with case-insensitive app ligatures, then a
-  fixed 100-point focused-app capsule. A `front_app_switched` event invalidates
+  fixed 100-point focused-app block. A `front_app_switched` event invalidates
   stale state, then a topology-guarded Yabai query confirms the focused app and
   full window/app list before content is rendered. The center stays empty on every display.
-- Right: one fixed 376-point calendar bracket on every configured display. It
-  combines a 260-point next-event preview with a 116-point date/time item, then
-  a fixed six-cell bracket: system activity, battery, microphone, audio, Bluetooth, and
-  Wi-Fi. Every cell is 28 points, so
-  hover fills the full padded target without changing geometry. CPU/memory and
-  live graphs remain out of the resting bar.
+- Right: a touching sequence of square color levels on every configured display.
+  The intrinsic next-event block is bounded at 256 points and touches the fixed
+  116-point date/time anchor, which touches the fixed 168-point six-cell system
+  block: system activity, battery, microphone, audio, Bluetooth, and Wi-Fi.
+  Event/date/system use progressively lighter graphite-blue fills. Every system
+  cell remains 28 points and its Nerd Font glyph is centered in that full cell.
+  Hover changes only the local fill and foreground; it never changes geometry
+  or adds an outline. Amber/red warning states keep their semantic foreground.
+  An open popup host uses the same active fill instead of cutting a dark hole
+  through the continuous block. CPU/memory and live graphs remain out of this
+  release slice; the separate-domain stats redesign follows as its own slice.
 - Selection and normal data use graphite, neutral gray, and off-white. Amber and
   red are reserved for genuine warning/critical state.
 
@@ -134,7 +156,7 @@ Interactions:
   not look clickable. One bar hover exists globally and prior state resets before
   the next surface appears.
 - Right click opens Wi-Fi, Bluetooth, Sound, or Battery settings where
-  applicable. Calendar bracket right and middle clicks are no-ops.
+  applicable. Calendar event and date/time group right and middle clicks are no-ops.
 - Audio changes require explicit popup actions; scrolling the bar item does not
   mutate state. The Audio and Microphone panels expose true mute, capability-aware
   level sliders, and device selectors. A muted device keeps its confirmed stored
@@ -156,12 +178,28 @@ Refresh policy:
 - `system_stats` pushes CPU/RAM/disk/battery/uptime every three seconds. An open
   system panel updates on those events and refreshes only processes/VPN every
   eight seconds; its extra loop stops on close.
-- Calendar text updates every 30 seconds; the fixed next-event preview uses one
-  generation-guarded `icalBuddy` query every 60 seconds. The full 260+116
-  bracket stays fixed-width and visible on all configured displays.
-  `settings.calendar_show_titles` explicitly controls whether its title is
-  exposed; this user configuration opts in. The rich agenda and battery-health helpers run only
-  on intent. Data-volume capacity refreshes about every five minutes.
+- Calendar text updates every 30 seconds; the bounded next-event preview uses one
+  generation-guarded `icalBuddy` query every 60 seconds. The installed exact
+  JetBrains Mono Nerd Font faces and SketchyBar CoreText dynamic widths allocate
+  8-point outer edges and an 8-point internal gap. Only printable ASCII and the
+  trusted calendar glyph use the verified 5.4-point narrow advance. Each
+  non-ASCII scalar reserves 24 points, except a scan-verified 64-point outlier tier.
+  A complete sanitizer-reachable CoreText glyph-path and typographic-advance
+  scan must prove both tiers against the installed 9-point face and its public
+  fallback cascade. Generated,
+  checksum-pinned Unicode 17 properties ensure that the selector never cuts
+  combining, joined emoji, regional-pair, Hangul conjoining, or grouped
+  unknown-script sequences. A complete title remains unchanged when it fits; a
+  bounded title ends with a visible ellipsis. Native font-oracle fixtures cover
+  ASCII, CJK, emoji, decomposed marks, Hangul, Indic, Cyrillic, Greek, and
+  hostile fallback text including U+FDFD.
+  The actual event block never exceeds 256 points, and event plus the 116-point
+  date anchor never exceeds 372 points. The countdown remains left-aligned.
+  `settings.calendar_show_titles` defaults to `true` for this personal setup, so
+  the resting bar exposes event titles to anyone who can see the display or a
+  screen share. Set it to `false` for generic `Upcoming event` text. Rich agenda
+  and battery-health helpers run only on intent. Data-volume capacity refreshes
+  about every five minutes.
 
 ## Lifecycle and diagnostics
 
@@ -247,9 +285,12 @@ fixed logarithmic 100 MiB/s scale. The Data-volume sample uses
   mapped rect only while the pointer is still inside it; a moved-pointer abort
   does nothing and preserves focus. It does not use global Accessibility,
   state-report files, hard-coded production display geometry, or synthetic HID.
-  Pointer auto-dismiss pauses while the panel is key or its known AX hierarchy
-  has focus. Explicit application deactivation, including opening an event
-  action, intentionally closes the accessory panel.
+  A left-click toggle remains visible when the pointer moves. Escape, a second
+  date click, an outside physical mouse-down, screen change, wake, or an event
+  action closes it explicitly. Accessory-app deactivation alone never closes it.
+  Production validates its exact frame, four-point gap, display inset, and
+  one-window contract after ordering; a failed contract closes without opening
+  an unrelated Calendar window.
 - Pointer automation is currently blocked because `osascript` lacks Assistive
   Access (`-25211`). Before activation on a deployment host, a human must check
   VoiceOver, Full Keyboard Access, focus rings, Increase Contrast, pointer

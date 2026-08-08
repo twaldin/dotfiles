@@ -8,7 +8,7 @@ SBARLUA_DIR="$HOME/.local/share/sketchybar_lua"
 CONFIG_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 SECURE_INSTALLER="$CONFIG_DIR/scripts/secure-file-install.py"
 CALENDAR_HELPER_DIR="$HOME/.local/share/sketchybar-calendar"
-CALENDAR_SOURCE_SHA256=7fd04dc9e2d3fb4556dda41cd2aa5da38c2e2b622e74efc6be9a58cb0f812a72
+CALENDAR_SOURCE_SHA256=e695b4a98f69436fbcc22f83750ca683a98fc1d5057e7858bb92b4417603afb3
 CALENDAR_SOURCE="$CONFIG_DIR/scripts/calendar-panel.swift"
 SYSTEM_CONTROLS_HELPER_DIR="$HOME/.local/share/sketchybar-controls"
 SYSTEM_CONTROLS_SOURCE="$CONFIG_DIR/scripts/system-controls.swift"
@@ -117,7 +117,7 @@ if [ "$calendar_install_valid" != true ]; then
   trap calendar_install_cleanup EXIT HUP INT TERM
   [ "$(/usr/bin/stat -f %u "$calendar_temporary")" = "$(/usr/bin/id -u)" ]
   [ "$(/usr/bin/stat -f %u "$calendar_hash_temporary")" = "$(/usr/bin/id -u)" ]
-  /usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -O "$calendar_source" -o "$calendar_temporary"
+  /usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -O -warnings-as-errors "$calendar_source" -o "$calendar_temporary"
   /bin/chmod 0755 "$calendar_temporary"
   [ "$(/usr/bin/lipo -archs "$calendar_temporary")" = "$host_arch" ] || { echo "Calendar helper architecture mismatch" >&2; exit 1; }
   "$calendar_temporary" --self-test

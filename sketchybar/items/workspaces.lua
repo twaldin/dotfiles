@@ -190,7 +190,7 @@ for index = 1, 9 do
       padding_right = 0,
       font = { family = settings.app_font, style = "Regular", size = 13.0 },
     },
-    background = { drawing = false, color = colors.surface, height = 26, corner_radius = 9 },
+    background = { drawing = false, color = colors.surface, height = 26, corner_radius = 0 },
   })
   spaces[index] = item
   item:set({ background = { drawing = false } })
@@ -198,7 +198,7 @@ for index = 1, 9 do
     selected[index] = env.SELECTED == true or env.SELECTED == "true"
     if selected[index] then selected_space = index; render_apps(settings.space_count) end
     if hover.is_active(item) then
-      item:set({ icon = { color = colors.primary }, label = { color = colors.primary }, background = { color = colors.surface2 } })
+      item:set({ icon = { color = colors.primary }, label = { color = colors.primary }, background = { color = colors.hover } })
       item:set({ background = { drawing = true } })
     else
       item:set({ icon = { color = selected[index] and colors.accent or colors.muted }, label = { color = colors.primary }, background = { color = colors.surface } })

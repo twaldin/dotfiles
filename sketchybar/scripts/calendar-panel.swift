@@ -694,6 +694,11 @@ class FlatButton: NSButton {
 
   @objc private func invoke() { handler?() }
 
+  override func accessibilityPerformPress() -> Bool {
+    performClick(nil)
+    return true
+  }
+
   override func updateTrackingAreas() {
     if let tracking { removeTrackingArea(tracking) }
     let value = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
@@ -704,6 +709,28 @@ class FlatButton: NSButton {
 
   override func mouseEntered(with event: NSEvent) { layer?.backgroundColor = Palette.surface2.cgColor }
   override func mouseExited(with event: NSEvent) { layer?.backgroundColor = NSColor.clear.cgColor }
+}
+
+final class NavigationSymbolButton: FlatButton {
+  let symbolName: String
+
+  init(systemSymbolName: String) {
+    let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+    guard let symbol = NSImage(systemSymbolName: systemSymbolName, accessibilityDescription: nil),
+          let configured = symbol.withSymbolConfiguration(configuration) else {
+      fatalError("Required SF Symbol is unavailable: \(systemSymbolName)")
+    }
+    symbolName = systemSymbolName
+    super.init(title: "")
+    configured.isTemplate = true
+    image = configured
+    imagePosition = .imageOnly
+    imageScaling = .scaleNone
+    alignment = .center
+  }
+
+  required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
 }
 
 final class DateButton: FlatButton {
@@ -894,7 +921,7 @@ final class CalendarPanelController: NSObject, NSWindowDelegate {
   let weekdayLabels: [NSTextField]
   let scrollView = NSScrollView(frame: .zero)
   let eventDocument = FlippedView(frame: .zero)
-  var navButtons: [FlatButton] = []
+  var navButtons: [NavigationSymbolButton] = []
   var eventRows: [EventRowButton] = []
   var detailLabels: [NSTextField] = []
   let hostAnchor: CGRect
@@ -1031,14 +1058,17 @@ final class CalendarPanelController: NSObject, NSWindowDelegate {
     content.addSubview(value)
   }
 
-  private func navButton(_ title: String, identifier: String, action: @escaping () -> Void) {
-    let button = FlatButton(title: title)
+  private func navButton(_ symbolName: String, identifier: String, action: @escaping () -> Void) {
+    let button = NavigationSymbolButton(systemSymbolName: symbolName)
     button.setAccessibilityIdentifier(identifier)
     let accessibilityLabels = [
       "calendar.nav.previous-year": "Previous year", "calendar.nav.previous-month": "Previous month",
       "calendar.nav.next-month": "Next month", "calendar.nav.next-year": "Next year",
     ]
-    button.setAccessibilityLabel(accessibilityLabels[identifier] ?? title)
+    guard let accessibilityLabel = accessibilityLabels[identifier] else {
+      fatalError("Unknown calendar navigation identifier: \(identifier)")
+    }
+    button.setAccessibilityLabel(accessibilityLabel)
     button.setAccessibilityHelp("Change the displayed calendar month")
     button.handler = action
     navButtons.append(button)
@@ -1046,16 +1076,16 @@ final class CalendarPanelController: NSObject, NSWindowDelegate {
   }
 
   private func configureLayout() {
-    navButton("«", identifier: "calendar.nav.previous-year") { [weak self] in self?.changeYear(-1) }
-    navButton("‹", identifier: "calendar.nav.previous-month") { [weak self] in self?.changeMonth(-1) }
+    navButton("chevron.left.2", identifier: "calendar.nav.previous-year") { [weak self] in self?.changeYear(-1) }
+    navButton("chevron.left", identifier: "calendar.nav.previous-month") { [weak self] in self?.changeMonth(-1) }
     monthButton.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold)
     monthButton.contentTintColor = Palette.primary
     monthButton.alignment = .center
     monthButton.setAccessibilityIdentifier("calendar.nav.today")
     monthButton.handler = { [weak self] in self?.returnToToday() }
     content.addSubview(monthButton)
-    navButton("›", identifier: "calendar.nav.next-month") { [weak self] in self?.changeMonth(1) }
-    navButton("»", identifier: "calendar.nav.next-year") { [weak self] in self?.changeYear(1) }
+    navButton("chevron.right", identifier: "calendar.nav.next-month") { [weak self] in self?.changeMonth(1) }
+    navButton("chevron.right.2", identifier: "calendar.nav.next-year") { [weak self] in self?.changeYear(1) }
 
     weekdayGrid.rowSpacing = 0
     weekdayGrid.columnSpacing = 0
@@ -1225,6 +1255,7 @@ final class CalendarPanelController: NSObject, NSWindowDelegate {
     row.handler = { [weak self, weak row] in
       guard let self, let event = row?.occurrence else { return }
       EventActionRouter.perform(event, opener: self.opener)
+      self.panel.close()
     }
     eventDocument.addSubview(row)
     eventRows.append(row)
@@ -1468,7 +1499,20 @@ final class CalendarPanelController: NSObject, NSWindowDelegate {
     }
     let navigation = navButtons.map { button -> [String: Any] in
       let rect = button.convert(button.bounds, to: content)
-      return ["identifier": button.accessibilityIdentifier(), "accessibility_label": button.accessibilityLabel() ?? "", "x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
+      let tint = button.contentTintColor?.usingColorSpace(.sRGB)
+      let unignored = NSAccessibility.unignoredAncestor(of: button) as AnyObject
+      return ["identifier": button.accessibilityIdentifier(), "accessibility_label": button.accessibilityLabel() ?? "",
+              "accessibility_help": button.accessibilityHelp() ?? "",
+              "accessibility_element": button.isAccessibilityElement(),
+              "accessibility_role": button.accessibilityRole()?.rawValue ?? "", "unignored": unignored === button,
+              "accessibility_actions": [NSAccessibility.Action.press.rawValue],
+              "symbol_name": button.symbolName, "title": button.title, "alternate_title": button.alternateTitle,
+              "has_image": button.image != nil, "image_only": button.imagePosition == .imageOnly,
+              "image_is_template": button.image?.isTemplate ?? false,
+              "uses_normal_tint": button.contentTintColor?.isEqual(Palette.normal) ?? false,
+              "tint_red": tint?.redComponent ?? -1, "tint_green": tint?.greenComponent ?? -1,
+              "tint_blue": tint?.blueComponent ?? -1, "tint_alpha": tint?.alphaComponent ?? -1,
+              "x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
     }
     let rows = eventRows.map { row -> [String: Any] in
       let titlePoint = eventDocument.convert(CGPoint(x: row.titleLabel.bounds.midX, y: row.titleLabel.bounds.midY), from: row.titleLabel)
@@ -1517,8 +1561,16 @@ final class CalendarPanelController: NSObject, NSWindowDelegate {
     }
     let keyLoopClosed = keyCursor === navButtons[0]
     let gridUnignored = (NSAccessibility.unignoredAncestor(of: grid) as AnyObject) === grid
+    let surface = Palette.surface.usingColorSpace(.sRGB)
     return [
       "panel": ["x": panel.frame.minX, "y": panel.frame.minY, "width": panel.frame.width, "height": panel.frame.height],
+      "window_policy": ["nonactivating_panel": panel.styleMask.contains(.nonactivatingPanel),
+                         "borderless": panel.styleMask.contains(.borderless),
+                         "can_become_key": panel.canBecomeKey, "can_become_main": panel.canBecomeMain,
+                         "becomes_key_only_if_needed": panel.becomesKeyOnlyIfNeeded,
+                         "hides_on_deactivate": panel.hidesOnDeactivate],
+      "visual_tokens": ["surface_red": surface?.redComponent ?? -1, "surface_green": surface?.greenComponent ?? -1,
+                        "surface_blue": surface?.blueComponent ?? -1, "surface_alpha": surface?.alphaComponent ?? -1],
       "display": ["x": displayFrame.minX, "y": displayFrame.minY, "width": displayFrame.width, "height": displayFrame.height],
       "host": ["x": hostAnchor.minX, "y": hostAnchor.minY, "width": hostAnchor.width, "height": hostAnchor.height],
       "cells": cells, "headers": headers, "navigation": navigation,
@@ -2069,6 +2121,17 @@ func assertTest(_ condition: @autoclosure () -> Bool, _ message: String) {
   }
 }
 
+private func waitForSelfTestCondition(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+  let deadline = ProcessInfo.processInfo.systemUptime + timeout
+  repeat {
+    if condition() { return true }
+    let remaining = deadline - ProcessInfo.processInfo.systemUptime
+    if remaining <= 0 { break }
+    RunLoop.current.run(until: Date().addingTimeInterval(min(0.01, remaining)))
+  } while ProcessInfo.processInfo.systemUptime < deadline
+  return condition()
+}
+
 private func waitForRunning(_ provider: EventProvider, timeout: TimeInterval) -> pid_t? {
   let deadline = Date().addingTimeInterval(timeout)
   repeat {
@@ -2404,10 +2467,15 @@ private func selfTest() {
   let movedPointer = CGPoint(x: pointer.x + 100, y: pointer.y)
   assertTest(PanelApplication.shouldOrder(point: pointer, host: pointerGeometry!.host), "pre-order stationary pointer")
   assertTest(!PanelApplication.shouldOrder(point: movedPointer, host: pointerGeometry!.host), "pre-order moved pointer abort")
-  assertTest(!PanelApplication.shouldPauseDismissal(isKey: false, hasAccessibilityFocus: false), "ordinary pointer dismissal remains active")
-  assertTest(PanelApplication.shouldPauseDismissal(isKey: true, hasAccessibilityFocus: false), "key panel pauses pointer dismissal")
-  assertTest(PanelApplication.shouldPauseDismissal(isKey: false, hasAccessibilityFocus: true), "AX-focused descendant pauses pointer dismissal")
-  assertTest(PanelApplication.deactivationOverridesPointerPause(), "explicit application deactivation overrides pointer-only pause")
+  assertTest(!PanelApplication.shouldDismissMouseDown(point: pointer, host: pointerGeometry!.host, panel: pointerGeometry!.panel), "host click stays inside panel session")
+  assertTest(!PanelApplication.shouldDismissMouseDown(point: CGPoint(x: pointerGeometry!.panel.midX, y: pointerGeometry!.panel.midY), host: pointerGeometry!.host, panel: pointerGeometry!.panel), "panel click stays inside panel session")
+  assertTest(PanelApplication.shouldDismissMouseDown(point: CGPoint(x: 20, y: 20), host: pointerGeometry!.host, panel: pointerGeometry!.panel), "outside click dismisses panel session")
+  assertTest(PanelApplication.productionGeometryValid(host: pointerGeometry!.host, panel: pointerGeometry!.panel,
+                                                     expectedPanel: pointerGeometry!.panel, display: pointerDisplay,
+                                                     visibleWindows: 1), "production geometry contract")
+  assertTest(!PanelApplication.productionGeometryValid(host: pointerGeometry!.host, panel: CGRect(x: pointerGeometry!.panel.minX, y: pointerGeometry!.panel.minY - 8, width: pointerGeometry!.panel.width, height: pointerGeometry!.panel.height + 8),
+                                                      expectedPanel: pointerGeometry!.panel, display: pointerDisplay,
+                                                      visibleWindows: 1), "production geometry rejects wrong frame")
   let mixedSectionPadding = CalendarPanelController.alignedBottomPadding(documentHeight: 200, viewportHeight: 137.5, boundaries: [0, 18, 62, 106, 124, 168])
   assertTest(mixedSectionPadding == 43.5 && mixedSectionPadding < 44, "mixed-section alignment padding stays below one event row")
   assertTest(CalendarPanelController.alignedBottomPadding(documentHeight: 200, viewportHeight: 200, boundaries: [0, 18]) == 0, "non-scrolling alignment adds no padding")
@@ -2543,9 +2611,30 @@ emit 'Starts at next boundary' '\#(providerStartBoundaryRange)' 'provider-start-
   assertTest(headerCenters == cellCenters, "weekday and date centers")
   assertTest(controller.navButtons.count == 4, "four navigation controls")
   assertTest(Set(controller.navButtons.map { $0.accessibilityIdentifier() }).count == 4, "unique navigation identifiers")
+  let expectedNavigationSymbols = ["chevron.left.2", "chevron.left", "chevron.right", "chevron.right.2"]
+  let expectedNavigationLabels = ["Previous year", "Previous month", "Next month", "Next year"]
+  assertTest(controller.navButtons.map(\.symbolName) == expectedNavigationSymbols, "navigation uses ordered AppKit SF Symbols")
+  assertTest(controller.navButtons.map { $0.accessibilityLabel() ?? "" } == expectedNavigationLabels, "navigation keeps stable accessibility labels")
+  assertTest(controller.navButtons.allSatisfy { $0.title.isEmpty && $0.alternateTitle.isEmpty && $0.image != nil && $0.imagePosition == .imageOnly && ($0.image?.isTemplate ?? false) }, "navigation is image-only with no text glyph fallback")
+  assertTest(controller.navButtons.allSatisfy { $0.contentTintColor?.isEqual(Palette.normal) ?? false }, "navigation symbols keep the high-contrast normal tint")
+  assertTest(controller.navButtons.allSatisfy { $0.accessibilityHelp() == "Change the displayed calendar month" }, "navigation keeps descriptive accessibility help")
+  assertTest(controller.navButtons.allSatisfy { button in
+    button.isAccessibilityElement() && button.accessibilityRole() == .button && (NSAccessibility.unignoredAncestor(of: button) as AnyObject) === button
+  }, "navigation remains exposed as unignored accessibility buttons")
+  let accessibilityPressProbe = FlatButton(title: "")
+  var accessibilityPressCount = 0
+  accessibilityPressProbe.handler = { accessibilityPressCount += 1 }
+  assertTest(accessibilityPressProbe.accessibilityPerformPress(), "shared button accessibility press is supported")
+  assertTest(accessibilityPressCount == 1, "shared button accessibility press invokes the button action once")
+  let navigationFrames = controller.navButtons.map { $0.convert($0.bounds, to: controller.content) }
+  let monthFrame = controller.monthButton.convert(controller.monthButton.bounds, to: controller.content)
+  assertTest(navigationFrames.map { [$0.minX, $0.width] } == [[12, 34], [46, 32], [222, 32], [254, 34]], "navigation keeps exact horizontal arrow geometry")
+  assertTest(navigationFrames.allSatisfy { $0.minY == monthFrame.minY && $0.height == monthFrame.height && $0.height == 40 }, "navigation symbols stay aligned with the month control")
+  assertTest(navigationFrames[1].maxX == monthFrame.minX && monthFrame.maxX == navigationFrames[2].minX, "inner arrows remain flush with the month control")
   assertTest(Set(controller.dateButtons.map { $0.accessibilityIdentifier() }).count == 42, "unique date identifiers")
   assertTest(controller.today == future, "injected now controls today identity")
-  assertTest(controller.panel.canBecomeKey && !controller.panel.isKeyWindow, "panel can become key without becoming key on construction")
+  assertTest(controller.panel.canBecomeKey && !controller.panel.canBecomeMain && !controller.panel.isKeyWindow, "panel can become key without becoming main or key on construction")
+  assertTest(controller.panel.styleMask.contains(.nonactivatingPanel) && controller.panel.styleMask.contains(.borderless) && controller.panel.becomesKeyOnlyIfNeeded && !controller.panel.hidesOnDeactivate, "panel keeps the nonactivating focus policy")
   assertTest(controller.dateButtons.allSatisfy { $0.acceptsFirstResponder && $0.canBecomeKeyView && $0.needsPanelToBecomeKey }, "date controls support deterministic keyboard focus")
   assertTest((controller.navButtons + [controller.monthButton]).allSatisfy { $0.acceptsFirstResponder && $0.canBecomeKeyView && $0.needsPanelToBecomeKey }, "navigation controls support deterministic keyboard focus")
   assertTest(controller.dateButtons.allSatisfy { $0.focusRingMaskBounds == $0.bounds.insetBy(dx: 2, dy: 2) }, "focus masks stay inside date geometry")
@@ -2584,7 +2673,7 @@ emit 'Starts at next boundary' '\#(providerStartBoundaryRange)' 'provider-start-
 
   controller.select(today)
   controller.select(future)
-  RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+  assertTest(waitForSelfTestCondition(timeout: 2.0) { controller.detailState == "events" && controller.eventRows.count == 1 }, "rapid synthetic selection completes within bound")
   assertTest(controller.detailState == "events" && controller.eventRows.count == 1 &&
              controller.eventRows[0].titleLabel.stringValue == "Future all-day event" &&
              controller.eventRows[0].detailLabel.stringValue == "All day · ONGOING", "rapid selection commits latest all-day result")
@@ -2611,8 +2700,11 @@ emit 'Starts at next boundary' '\#(providerStartBoundaryRange)' 'provider-start-
   assertTest(CalendarPanelController.shouldPreserveScroll(requested: future, lastFinal: future, focusedIdentity: focusSecond.identity), "same-day focused refresh preserves scroll")
   assertTest(!CalendarPanelController.shouldPreserveScroll(requested: future, lastFinal: today, focusedIdentity: focusSecond.identity), "new selected day resets scroll despite old row focus")
   controller.select(today)
+  assertTest(waitForSelfTestCondition(timeout: 2.0) {
+    controller.detailState == "events" && controller.eventRows.count == 16 && controller.scrollView.contentView.bounds.minY == 0
+  }, "long selected day reaches top within bound")
   RunLoop.current.run(until: Date().addingTimeInterval(0.20))
-  assertTest(controller.eventRows.count == 16 && controller.scrollView.contentView.bounds.minY == 0, "long selected day starts at top")
+  assertTest(controller.detailState == "events" && controller.eventRows.count == 16 && controller.scrollView.contentView.bounds.minY == 0, "long selected day starts at top after layout settles")
   controller.eventRows.last!.scrollIntoViewForKeyboardFocus()
   controller.scrollView.reflectScrolledClipView(controller.scrollView.contentView)
   assertTest(controller.eventDocument.visibleRect.contains(controller.eventRows.last!.frame) && controller.eventRows.last!.frame.height == 44, "keyboard focus path exposes complete last event row")
@@ -2622,11 +2714,14 @@ emit 'Starts at next boundary' '\#(providerStartBoundaryRange)' 'provider-start-
   controller.scrollToBottom()
   assertTest(controller.scrollView.contentView.bounds.minY > 0, "long selected day reaches bottom")
   controller.select(future)
+  assertTest(waitForSelfTestCondition(timeout: 2.0) {
+    controller.detailState == "events" && controller.eventRows.count == 1 && controller.scrollView.contentView.bounds.minY == 0
+  }, "new selected day reaches top within bound")
   RunLoop.current.run(until: Date().addingTimeInterval(0.08))
-  assertTest(controller.eventRows.count == 1 && controller.scrollView.contentView.bounds.minY == 0, "new selected day final list resets to top")
+  assertTest(controller.detailState == "events" && controller.eventRows.count == 1 && controller.scrollView.contentView.bounds.minY == 0, "new selected day final list remains at top after layout settles")
 
   controller.select(yesterday)
-  RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+  assertTest(waitForSelfTestCondition(timeout: 2.0) { controller.detailState == "empty" && controller.eventRows.isEmpty }, "past synthetic day completes within bound")
   assertTest(controller.detailState == "empty" && controller.eventRows.isEmpty, "past selected day remains queryable")
   controller.provider.cancel()
 
@@ -2724,7 +2819,7 @@ final class PanelApplication: NSObject, NSApplicationDelegate {
   let stateReport: String?
   let expectedFocus: FrontFocus
   var timer: Timer?
-  var outsideSince: Date?
+  var globalMouseMonitor: Any?
   var lastButtons = NSEvent.pressedMouseButtons
   var signalSource: DispatchSourceSignal?
   var screenObserver: NSObjectProtocol?
@@ -2738,8 +2833,19 @@ final class PanelApplication: NSObject, NSApplicationDelegate {
   }
 
   static func shouldOrder(point: CGPoint, host: CGRect) -> Bool { host.contains(point) }
-  static func shouldPauseDismissal(isKey: Bool, hasAccessibilityFocus: Bool) -> Bool { isKey || hasAccessibilityFocus }
-  static func deactivationOverridesPointerPause() -> Bool { true }
+
+  static func shouldDismissMouseDown(point: CGPoint, host: CGRect, panel: CGRect) -> Bool {
+    !host.insetBy(dx: -2, dy: -2).contains(point) && !panel.insetBy(dx: -2, dy: -2).contains(point)
+  }
+
+  static func productionGeometryValid(host: CGRect, panel: CGRect, expectedPanel: CGRect, display: CGRect,
+                                      visibleWindows: Int) -> Bool {
+    panel.equalTo(expectedPanel) &&
+      panel.height >= CalendarPanelController.panelSize.height && panel.height <= CalendarPanelController.maximumPreferredHeight &&
+      panel.minX >= display.minX + 8 && panel.maxX <= display.maxX - 8 &&
+      panel.minY >= display.minY + 8 && panel.maxY <= display.maxY - 8 &&
+      abs((panel.maxY + 4) - host.minY) < 0.01 && !panel.intersects(host) && visibleWindows == 1
+  }
 
   static func launchChecks(point: CGPoint, host: CGRect, panel: CGRect, expectedPanel: CGRect, display: CGRect,
                            visibleWindows: Int, processAlive: Bool, pidOwned: Bool, lockOwned: Bool, descriptorOwned: Bool,
@@ -2869,14 +2975,15 @@ final class PanelApplication: NSObject, NSApplicationDelegate {
     screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in NSApp.terminate(nil) }
     wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in NSApp.terminate(nil) }
 
+    let before = NSEvent.mouseLocation
+    guard Self.shouldOrder(point: before, host: controller.hostAnchor) else {
+      writeFailure("pre_order_pointer_moved", point: before, everOrdered: false)
+      NSApp.terminate(nil)
+      return
+    }
+    controller.show()
+
     if stateReport != nil {
-      let before = NSEvent.mouseLocation
-      guard Self.shouldOrder(point: before, host: controller.hostAnchor) else {
-        writeFailure("pre_order_pointer_moved", point: before, everOrdered: false)
-        NSApp.terminate(nil)
-        return
-      }
-      controller.show()
       let after = NSEvent.mouseLocation
       guard Self.shouldOrder(point: after, host: controller.hostAnchor) else {
         controller.panel.orderOut(nil)
@@ -2887,43 +2994,50 @@ final class PanelApplication: NSObject, NSApplicationDelegate {
       }
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in self?.writeLaunchReport() }
     } else {
-      controller.show()
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in self?.validateProductionGeometry() }
     }
-    timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.observePointer() }
+
+    globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+      let point = NSEvent.mouseLocation
+      DispatchQueue.main.async { self?.dismissForMouseDown(at: point) }
+    }
+    timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.observeExplicitDismissal() }
   }
 
-  private func observePointer() {
-    if Self.shouldPauseDismissal(isKey: controller.panel.isKeyWindow, hasAccessibilityFocus: controller.hasFocusedAccessibilityDescendant()) {
-      outsideSince = nil
-      lastButtons = NSEvent.pressedMouseButtons
-      let escape = CGEventSource.keyState(.combinedSessionState, key: 53)
-      if escape && !lastEscape { NSApp.terminate(nil); return }
-      lastEscape = escape
+  private func validateProductionGeometry() {
+    guard stateReport == nil else { return }
+    let expected = controller.expectedPanelFrame()
+    let visible = NSApp.windows.filter { $0.isVisible }.count
+    guard Self.productionGeometryValid(host: controller.hostAnchor, panel: controller.panel.frame,
+                                       expectedPanel: expected, display: controller.displayFrame,
+                                       visibleWindows: visible) else {
+      controller.panel.orderOut(nil)
+      NSApp.terminate(nil)
       return
     }
-    let point = NSEvent.mouseLocation
-    let insidePanel = controller.panel.frame.insetBy(dx: -2, dy: -2).contains(point)
-    let insideHost = controller.hostAnchor.insetBy(dx: -2, dy: -2).contains(point)
-    let inside = insidePanel || insideHost
-    if inside {
-      outsideSince = nil
-    } else if let started = outsideSince {
-      if Date().timeIntervalSince(started) >= 0.130 { NSApp.terminate(nil); return }
-    } else {
-      outsideSince = Date()
+  }
+
+  private func dismissForMouseDown(at point: CGPoint) {
+    if Self.shouldDismissMouseDown(point: point, host: controller.hostAnchor, panel: controller.panel.frame) {
+      NSApp.terminate(nil)
     }
+  }
+
+  private func observeExplicitDismissal() {
     let buttons = NSEvent.pressedMouseButtons
-    if buttons != lastButtons && buttons != 0 && !inside { NSApp.terminate(nil); return }
+    if buttons != lastButtons && buttons != 0 {
+      dismissForMouseDown(at: NSEvent.mouseLocation)
+      if NSApp.isRunning == false { return }
+    }
     lastButtons = buttons
     let escape = CGEventSource.keyState(.combinedSessionState, key: 53)
     if escape && !lastEscape { NSApp.terminate(nil); return }
     lastEscape = escape
   }
 
-  // Explicit app deactivation (including opening an event action) closes the
-  // accessory panel; only the pointer auto-dismiss timer uses the pause rule.
-  func applicationDidResignActive(_ notification: Notification) { NSApp.terminate(nil) }
   func applicationWillTerminate(_ notification: Notification) {
+    timer?.invalidate()
+    if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
     if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
     if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
     controller.provider.cancel()
@@ -2956,6 +3070,13 @@ struct Main {
     var arguments = Arguments()
     if arguments.usageInvalid { fputs("Usage: invalid calendar-panel arguments\n", stderr); exit(64) }
     if arguments.close { exit(closeOwnedAndWait() ? 0 : 1) }
+    if arguments.toggle {
+      if lockedOwnerPID() != nil { exit(closeOwnedAndWait() ? 0 : 1) }
+      if arguments.anchorCG.isEmpty && !arguments.holdTest {
+        fputs("Bare toggle requires an existing verified owner or production anchors\n", stderr)
+        exit(64)
+      }
+    }
 
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
@@ -2999,13 +3120,6 @@ struct Main {
       }
       arguments.anchor = geometry.host
       arguments.display = screen.frame
-    }
-    if arguments.toggle {
-      if lockedOwnerPID() != nil { exit(closeOwnedAndWait() ? 0 : 1) }
-      if arguments.anchorCG.isEmpty && !arguments.holdTest {
-        fputs("Bare toggle requires an existing verified owner or production anchors\n", stderr)
-        exit(64)
-      }
     }
     if arguments.selfTest { selfTest(); exit(0) }
     if arguments.holdTest {

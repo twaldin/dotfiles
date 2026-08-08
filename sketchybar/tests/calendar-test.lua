@@ -38,6 +38,21 @@ assert(parsed and not parse_error and #parsed == 2, "structured event parse")
 equal(parsed[1].title, "Earlier", "chronological structured sort")
 equal(parsed[1].meeting_url, "https://meet.google.com/abc-defg-hij", "structured safe link")
 assert(parsed[1].sort_id == nil and parsed[1].sort_rank == 1 and parsed[2].sort_rank == 2, "raw UID discarded after stable sort")
+local chained_emoji = "👩" .. utf8.char(0x200d) .. "💻" .. utf8.char(0x200d) .. "👩"
+local emoji_event = assert(calendar.parse_events("__R__" .. chained_emoji .. "__P__2026-08-07 at 12:00:00 -0700 - 12:30:00 -0700__P__uid: emoji", tokens))[1]
+equal(emoji_event.title, chained_emoji, "production parse preserves valid chained GB11 emoji")
+local parsed_emoji_title = calendar.bounded_event_title("󰃭", emoji_event.title, 120, 5.4, 24.0)
+assert(parsed_emoji_title.overflow and not parsed_emoji_title.text:find("👩", 1, true), "parsed chained GB11 sequence truncates as one cluster")
+local empty_title_batch = "__R____P__2026-08-07 at 08:00:00 -0700 - 08:30:00 -0700__P__uid: empty" ..
+  "__R__Visible__P__2026-08-07 at 09:00:00 -0700 - 09:30:00 -0700__P__uid: visible"
+local empty_title_events = assert(calendar.parse_events(empty_title_batch, tokens))
+equal(#empty_title_events, 2, "empty title does not discard valid batch")
+equal(empty_title_events[1].title, "Upcoming event", "empty title gets generic fallback")
+local stripped_title_batch = "__R__" .. utf8.char(0xe123) .. "__P__2026-08-07 at 08:00:00 -0700 - 08:30:00 -0700__P__uid: stripped" ..
+  "__R__Visible__P__2026-08-07 at 09:00:00 -0700 - 09:30:00 -0700__P__uid: visible-two"
+local stripped_title_events = assert(calendar.parse_events(stripped_title_batch, tokens))
+equal(#stripped_title_events, 2, "fully stripped title does not discard valid batch")
+equal(stripped_title_events[1].title, "Upcoming event", "fully stripped title gets generic fallback")
 local multiline = "__R__Lines__P__2026-08-07 at 10:00:00 -0700 - 11:00:00 -0700__P__notes: first__N__second__N__https://zoom.us/wc/join/123456789__P__uid: lines"
 local raw_all_day = "__R__Multi-day raw__P__2026-08-20 - 2026-08-22__P__uid: raw-multi-day"
 local raw_all_day_events = assert(calendar.parse_events(raw_all_day, tokens))
@@ -94,5 +109,70 @@ assert(#max_before <= 24 and #max_active <= 24, "fixed supporting column has bou
 equal(calendar.compact_duration(1000 * 86400), "99d+", "large day values are capped")
 equal(calendar.countdown({ title = "x", start = 0, ["end"] = 1000 * 86400 }, 1).detail .. " ↗", "ends in 99d+ · 99d+ ↗", "longest active detail fixture")
 equal(calendar.countdown({ title = "x", start = 1000 * 86400, ["end"] = 2000 * 86400 }, 0).detail .. " ↗", "in 99d+ · 99d+ ↗", "longest before detail fixture")
+
+local title_glyph = "󰃭"
+local ascii_title = calendar.bounded_event_title(title_glyph, "Review reliability report", 180, 5.4, 24.0)
+equal(ascii_title.text, title_glyph .. " Review reliability report", "fitting ASCII title remains complete")
+assert(not ascii_title.overflow and ascii_title.estimated_width <= 180, "fitting ASCII title budget")
+local cjk_title = calendar.bounded_event_title(title_glyph, string.rep("会", 20), 100, 5.4, 24.0)
+assert(cjk_title.overflow and cjk_title.text:sub(-3) == "…" and cjk_title.estimated_width <= 100, "CJK uses bounded wide clusters and ellipsis")
+local emoji_title = calendar.bounded_event_title(title_glyph, string.rep("🙂", 20), 100, 5.4, 24.0)
+assert(emoji_title.overflow and emoji_title.text:sub(-3) == "…" and emoji_title.estimated_width <= 100, "emoji uses bounded wide clusters and ellipsis")
+local decomposed = "Cafe" .. utf8.char(0x0301)
+local decomposed_title = calendar.bounded_event_title(title_glyph, decomposed, 80, 5.4, 24.0)
+equal(decomposed_title.text, title_glyph .. " " .. decomposed, "combining mark stays with its base")
+assert(not decomposed_title.overflow, "decomposed fitting title is not truncated")
+local family = "👩" .. utf8.char(0x200d) .. "💻"
+local joined_title = calendar.bounded_event_title(title_glyph, string.rep(family, 12), 100, 5.4, 24.0)
+assert(joined_title.overflow and joined_title.text:sub(-3) == "…", "ZWJ sequence truncates at a cluster boundary")
+assert(not joined_title.text:sub(1, -4):match(utf8.char(0x200d) .. "$"), "valid GB11 sequence never leaves ZWJ dangling")
+assert(utf8.len(joined_title.text) ~= nil, "bounded title remains valid UTF-8")
+local combining = utf8.char(0x0301)
+local valid_gb11 = "👩" .. combining .. utf8.char(0x200d) .. "💻"
+local valid_gb11_title = calendar.bounded_event_title(title_glyph, valid_gb11, 90, 5.4, 24.0)
+assert(valid_gb11_title.overflow and not valid_gb11_title.text:find("👩", 1, true), "GB11 EP Extend* ZWJ EP stays indivisible")
+local invalid_gb11 = "A" .. utf8.char(0x200d) .. "💻"
+local invalid_gb11_title = calendar.bounded_event_title(title_glyph, invalid_gb11, 48, 5.4, 24.0)
+assert(invalid_gb11_title.overflow and invalid_gb11_title.text:find("A" .. utf8.char(0x200d) .. "…", 1, true), "non-EP ZWJ does not join the next pictograph")
+local extend_after_zwj = "👩" .. utf8.char(0x200d) .. combining .. "💻"
+local extend_after_zwj_title = calendar.bounded_event_title(title_glyph, extend_after_zwj, 90, 5.4, 24.0)
+assert(extend_after_zwj_title.overflow and extend_after_zwj_title.text:find("👩", 1, true) and not extend_after_zwj_title.text:find("💻", 1, true), "Extend after ZWJ cannot preserve GB11 state")
+local spacing_before_zwj = "👩" .. utf8.char(0x0903) .. utf8.char(0x200d) .. "💻"
+local spacing_before_zwj_title = calendar.bounded_event_title(title_glyph, spacing_before_zwj, 90, 5.4, 24.0)
+assert(spacing_before_zwj_title.overflow and spacing_before_zwj_title.text:find("👩", 1, true) and not spacing_before_zwj_title.text:find("💻", 1, true), "SpacingMark is GB9a but not GB11 Extend*")
+local chained_gb11 = "👩" .. utf8.char(0x200d) .. "💻" .. utf8.char(0x200d) .. "👩"
+local chained_gb11_title = calendar.bounded_event_title(title_glyph, chained_gb11, 120, 5.4, 24.0)
+assert(chained_gb11_title.overflow and not chained_gb11_title.text:find("👩", 1, true), "chained EP ZWJ EP ZWJ EP stays one cluster")
+local regional_pair = utf8.char(0x1f1fa) .. utf8.char(0x1f1f8)
+local regional_pair_title = calendar.bounded_event_title(title_glyph, regional_pair, 50, 5.4, 24.0)
+assert(regional_pair_title.overflow and not regional_pair_title.text:find(utf8.char(0x1f1fa), 1, true), "regional indicators pair without an internal boundary")
+local regional_triple = regional_pair .. utf8.char(0x1f1e8)
+local regional_triple_title = calendar.bounded_event_title(title_glyph, regional_triple, 70, 5.4, 24.0)
+assert(regional_triple_title.text:find(regional_pair, 1, true) and not regional_triple_title.text:find(utf8.char(0x1f1e8), 1, true), "third regional indicator starts the next pair")
+local prepend_sequence = utf8.char(0x0600) .. "A"
+local prepend_title = calendar.bounded_event_title(title_glyph, prepend_sequence, 41.9, 5.4, 24.0)
+assert(prepend_title.overflow and not prepend_title.text:find(utf8.char(0x0600), 1, true), "Prepend joins its following scalar")
+local indic_word = utf8.char(0x0915) .. utf8.char(0x094d) .. utf8.char(0x0937)
+local indic_title = calendar.bounded_event_title(title_glyph, indic_word, 30, 5.4, 24.0)
+assert(indic_title.overflow and not indic_title.text:find(utf8.char(0x0915), 1, true), "unknown-script word never truncates inside a conjunct")
+local indic_full = calendar.bounded_event_title(title_glyph, indic_word, 100, 5.4, 24.0)
+equal(indic_full.text, title_glyph .. " " .. indic_word, "unknown-script word remains complete when bounded")
+local japanese_cluster = "か" .. utf8.char(0x3099)
+local japanese_title = calendar.bounded_event_title(title_glyph, string.rep(japanese_cluster, 12), 100, 5.4, 24.0)
+assert(japanese_title.overflow and japanese_title.text:sub(-6) == utf8.char(0x3099) .. "…", "Japanese combining mark stays with its base before ellipsis")
+local dutch_title = calendar.bounded_event_title(title_glyph, "Ĳsselmeer Ĳmuiden Ĳburg Ĳzer Ĳtje Ĳss", 153, 5.4, 24.0)
+assert(dutch_title.overflow and dutch_title.estimated_width <= 153, "fallback Latin title cannot exceed its conservative budget")
+local indic_cluster = utf8.char(0x0915) .. utf8.char(0x094d) .. utf8.char(0x0937)
+local indic_title = calendar.bounded_event_title(title_glyph, string.rep(indic_cluster, 3), 100, 5.4, 24.0, 64.0)
+assert(indic_title.overflow and indic_title.text:sub(-6) == utf8.char(0x0937) .. "…", "Indic linker sequence stays in one cluster")
+local hangul_cluster = utf8.char(0xac00) .. utf8.char(0x11a8)
+local hangul_title = calendar.bounded_event_title(title_glyph, hangul_cluster, 42, 5.4, 24.0, 64.0)
+equal(hangul_title.text, title_glyph .. " …", "Hangul LV and conjoining T stay in one cluster")
+local arabic_ligature = calendar.bounded_event_title(title_glyph, string.rep(utf8.char(0xfdfd), 4), 153, 5.4, 24.0, 64.0)
+assert(arabic_ligature.overflow and arabic_ligature.estimated_width <= 153, "oversized fallback scalar uses its verified tier")
+local cyrillic_title = calendar.bounded_event_title(title_glyph, "Встреча с командой", 153, 5.4, 24.0, 64.0)
+assert(cyrillic_title.overflow and cyrillic_title.text ~= title_glyph .. " …", "Cyrillic title retains complete leading graphemes")
+local greek_title = calendar.bounded_event_title(title_glyph, "Συνάντηση ομάδας", 153, 5.4, 24.0, 64.0)
+assert(greek_title.overflow and greek_title.text ~= title_glyph .. " …", "Greek title retains complete leading graphemes")
 
 print("Calendar pure tests passed")

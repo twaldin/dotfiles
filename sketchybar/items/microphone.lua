@@ -16,13 +16,13 @@ local item = sbar.add("item", "microphone", {
   update_freq = 30,
   width = settings.control_width,
   icon = {
-    string = "󰍬", color = colors.muted, width = settings.icon_width,
+    string = "󰍬", color = colors.muted, width = settings.control_width,
     align = "center", padding_left = 0, padding_right = 0,
     font = { family = settings.font, style = "Regular", size = 14.0 },
   },
   label = { drawing = false, string = "Microphone, state unavailable" },
   background = {
-    drawing = false, color = colors.surface2, height = 26, corner_radius = 9,
+    drawing = false, color = colors.surface2, height = 26, corner_radius = 0,
   },
 })
 
@@ -86,7 +86,7 @@ local function action_row(token, suffix, label, selected, callback)
   })
   if not row or selected or state.busy then return row end
   popup.action(row, { selected = false, idle_color = colors.muted })
-  row:subscribe("mouse.clicked", function(env)
+  popup.on_click(row, function(env)
     if left_click(env) and popup.is_current(item, token) then callback() end
   end)
   return row
@@ -194,7 +194,8 @@ local function render(view)
     width = settings.control_width,
     icon = {
       string = muted == true and "󰍭" or "󰍬",
-      color = view.confirmed and muted ~= nil and (muted and colors.muted or colors.primary) or colors.muted,
+      color = hover.foreground(item,
+        view.confirmed and muted ~= nil and (muted and colors.muted or colors.primary) or colors.muted),
     },
     label = { string = semantic_label(view), drawing = false },
   })

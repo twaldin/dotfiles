@@ -14,9 +14,9 @@ local item = sbar.add("item", "status", {
   updates = true,
   update_freq = 300,
   width = settings.control_width,
-  icon = { string = "󰄨", color = colors.muted, width = settings.icon_width, align = "center", padding_left = 0, padding_right = 0, font = { family = settings.font, style = "Regular", size = 15.0 } },
+  icon = { string = "󰄨", color = colors.muted, width = settings.control_width, align = "center", padding_left = 0, padding_right = 0, font = { family = settings.font, style = "Regular", size = 15.0 } },
   label = { drawing = false },
-  background = { drawing = false, color = colors.surface2, height = 26, corner_radius = 9 },
+  background = { drawing = false, color = colors.surface2, height = 26, corner_radius = 0 },
 })
 
 local function percent(value)
@@ -33,7 +33,8 @@ local function update_popup()
 end
 
 local function render()
-  item:set({ width = settings.control_width, icon = { color = latest.cpu >= 90 and colors.warning or colors.muted } })
+  local idle_color = latest.cpu >= 90 and colors.warning or colors.muted
+  item:set({ width = settings.control_width, icon = { color = hover.foreground(item, idle_color) } })
   update_popup()
 end
 

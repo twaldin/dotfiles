@@ -17,9 +17,9 @@ local item = sbar.add("item", "battery", {
   position = "right",
   updates = true,
   width = settings.control_width,
-  icon = { string = "", color = colors.normal, width = settings.icon_width, align = "center", padding_left = 0, padding_right = 0, font = { family = settings.font, style = "Regular", size = 15.0 } },
+  icon = { string = "", color = colors.normal, width = settings.control_width, align = "center", padding_left = 0, padding_right = 0, font = { family = settings.font, style = "Regular", size = 15.0 } },
   label = { drawing = false, color = colors.muted, width = 46, max_chars = 7 },
-  background = { drawing = false, color = colors.surface2, height = 26, corner_radius = 9 },
+  background = { drawing = false, color = colors.surface2, height = 26, corner_radius = 0 },
 })
 
 local function battery_icon(value)
@@ -41,7 +41,8 @@ local function update(env)
   if env.BATTERY_REMAINING ~= nil then current.remaining = display_or(env.BATTERY_REMAINING, "—") end
   if env.BATTERY_TIME_TO_FULL ~= nil then current.full = display_or(env.BATTERY_TIME_TO_FULL, "—") end
   local charging = tostring(current.state):lower():find("charg") ~= nil
-  local color = charging and colors.accent or (current.percentage < 10 and colors.critical or (current.percentage < 30 and colors.warning or colors.primary))
+  local idle_color = charging and colors.accent or (current.percentage < 10 and colors.critical or (current.percentage < 30 and colors.warning or colors.primary))
+  local color = hover.foreground(item, idle_color)
   item:set({
     width = settings.control_width,
     icon = { string = battery_icon(current.percentage, current.state), color = color },

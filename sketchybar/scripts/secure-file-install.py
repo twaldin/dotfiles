@@ -264,10 +264,11 @@ def write_state_file(path, value, label):
 def write_calendar_state(path, value):
     validate_directory(path.parent)
     file_info(path, {0o600}, optional=True)
-    match = re.fullmatch(r"(preparing|backups|binary-published|pair-published|cleanup)\|(true|false)\|(-|[0-9]{1,20})\|(-|[0-9]{1,20})\|(true|false)\|(-|[0-9]{1,20})\|(-|[0-9]{1,20})", value)
+    number = r"[0-9]{1,20}"
+    match = re.fullmatch(rf"(preparing|backups|binary-published|pair-published|cleanup)\|(true|false)\|(-|{number})\|(-|{number})\|(true|false)\|(-|{number})\|(-|{number})\|({number})\|({number})\|({number})\|({number})", value)
     if not match:
         fail("Invalid calendar transaction state", 64)
-    _, had_binary, binary_device, binary_inode, had_marker, marker_device, marker_inode = match.groups()
+    _, had_binary, binary_device, binary_inode, had_marker, marker_device, marker_inode, _, _, _, _ = match.groups()
     if (had_binary == "true") != (binary_device != "-" and binary_inode != "-") or (had_marker == "true") != (marker_device != "-" and marker_inode != "-"):
         fail("Invalid calendar transaction identity state", 64)
     write_state_file(path, value, "Calendar")

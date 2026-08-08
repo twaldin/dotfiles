@@ -25,7 +25,7 @@ local item = sbar.add("item", "front_window", {
     font = { family = settings.app_font, style = "Regular", size = 15.0 },
   },
   label = { string = "Desktop", color = colors.primary, max_chars = 11, width = 74, align = "left", padding_left = 4, padding_right = 6 },
-  background = { drawing = true, color = colors.surface, height = 26, corner_radius = 9 },
+  background = { drawing = true, color = colors.surface, height = 26, corner_radius = 0 },
   popup = { align = "left" },
 })
 
@@ -88,7 +88,7 @@ popup.bind(item, {
         popup.rebuild(item, token, function(current_token)
           local page_windows, page, page_count = window_pages.slice(windows, requested_page)
           popup.row(item, current_token, "heading", { label = { string = "WINDOWS", color = colors.primary } })
-          for _, window in ipairs(page_windows) do
+          for slot, window in ipairs(page_windows) do
             local id = tonumber(window.id)
             local app = shell.display(window.app or "App")
             local window_title = shell.display(window.title or "")
@@ -97,14 +97,14 @@ popup.bind(item, {
               local full_label = string.format("%d  %s", tonumber(window.space) or 0, window_title ~= "" and window_title or app)
               local glyph = icons.for_app(app)
               local label = shell.ellipsis(full_label, glyph and 29 or 33)
-              local row = popup.row(item, current_token, "window" .. id, {
+              local row = popup.row(item, current_token, "window_slot_" .. slot, {
                 icon = { drawing = glyph ~= nil, string = glyph or "", width = glyph and 22 or 0, padding_left = glyph and 8 or 0, padding_right = 0, color = focused and colors.accent or colors.primary, font = { family = settings.app_font, style = "Regular", size = 14.0 } },
                 label = { string = label, color = focused and colors.primary or colors.muted, width = glyph and (settings.popup_width - 42) or (settings.popup_width - 20), max_chars = 38 },
                 background = { drawing = focused, color = colors.surface2 },
               })
               if row then
                 popup.action(row, { selected = focused, idle_color = focused and colors.primary or colors.muted, idle_icon_color = focused and colors.primary or colors.muted })
-                row:subscribe("mouse.clicked", function()
+                popup.on_click(row, function()
                   if popup.is_current(item, current_token) then
                     shell.exec({ settings.config_dir .. "/scripts/focus-window.sh", tostring(id) })
                     popup.close()
@@ -114,17 +114,23 @@ popup.bind(item, {
             end
           end
           popup.row(item, current_token, "page_heading", { label = { string = string.format("Page %d/%d", page, page_count), color = colors.primary, align = "center" } })
+          local previous = popup.row(item, current_token, "previous", {
+            drawing = page > 1,
+            label = { string = "Previous", color = colors.muted },
+          })
           if page > 1 then
-            local previous = popup.row(item, current_token, "previous", { label = { string = "Previous", color = colors.muted } })
             popup.action(previous, { idle_color = colors.muted })
-            previous:subscribe("mouse.clicked", function()
+            popup.on_click(previous, function()
               if popup.is_current(item, current_token) then render_page(page - 1) end
             end)
           end
+          local following = popup.row(item, current_token, "next", {
+            drawing = page < page_count,
+            label = { string = "Next", color = colors.muted },
+          })
           if page < page_count then
-            local following = popup.row(item, current_token, "next", { label = { string = "Next", color = colors.muted } })
             popup.action(following, { idle_color = colors.muted })
-            following:subscribe("mouse.clicked", function()
+            popup.on_click(following, function()
               if popup.is_current(item, current_token) then render_page(page + 1) end
             end)
           end

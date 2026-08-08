@@ -4,9 +4,13 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 host_arch=$(/usr/bin/uname -m)
 [ "$host_arch" = arm64 ] || { echo "This release requires an Apple-silicon host" >&2; exit 1; }
 calendar_target=arm64-apple-macosx15.0
-[ "$(/usr/bin/shasum -a 256 "$root/scripts/calendar-panel.swift" | /usr/bin/awk '{print $1}')" = 7fd04dc9e2d3fb4556dda41cd2aa5da38c2e2b622e74efc6be9a58cb0f812a72 ] || { echo "Immutable calendar source checksum failed" >&2; exit 1; }
+[ "$(/usr/bin/shasum -a 256 "$root/scripts/calendar-panel.swift" | /usr/bin/awk '{print $1}')" = e695b4a98f69436fbcc22f83750ca683a98fc1d5057e7858bb92b4417603afb3 ] || { echo "Immutable calendar source checksum failed" >&2; exit 1; }
+[ "$(/usr/bin/shasum -a 256 "$root/tests/fixtures/calendar-navigation-sf-symbols.json" | /usr/bin/awk '{print $1}')" = 3b7119c0d6d7bf98ccdeac7bfc8ea7e22fc78892c0f8b661d095cff0cb12bc04 ] || { echo "Immutable calendar navigation fixture checksum failed" >&2; exit 1; }
 work=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/calendar-panel-test.XXXXXX")
+artifact_dir=${CALENDAR_PANEL_ARTIFACT_DIR:-/tmp}
+/bin/mkdir -p "$artifact_dir"
 binary="$work/calendar-panel"
+debug_binary="$work/calendar-panel-debug"
 self_test_tmp="$work/self-test-tmp"
 /bin/mkdir -p "$self_test_tmp"
 instance=""
@@ -19,11 +23,40 @@ cleanup() {
   /bin/rm -rf "$work"
 }
 trap cleanup EXIT HUP INT TERM
-/usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -typecheck "$root/scripts/calendar-panel.swift"
+/usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -warnings-as-errors -typecheck "$root/scripts/calendar-panel.swift"
+/usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -Onone -warnings-as-errors "$root/scripts/calendar-panel.swift" -o "$debug_binary"
+[ "$(/usr/bin/lipo -archs "$debug_binary")" = "$host_arch" ] || { echo "Debug calendar helper architecture mismatch" >&2; exit 1; }
+TMPDIR="$self_test_tmp" "$debug_binary" --self-test
+echo "Calendar panel debug self-test passed"
 if /usr/bin/grep -q 'AXHeading' "$root/scripts/calendar-panel.swift"; then
   echo "Raw AXHeading role is prohibited" >&2
   exit 1
 fi
+/usr/bin/python3 - "$root/scripts/calendar-panel.swift" <<'PY'
+import pathlib
+import sys
+source = pathlib.Path(sys.argv[1]).read_text()
+launch = source.index("@main")
+owner_check = source.index("if arguments.toggle {", launch)
+app_start = source.index("let app = NSApplication.shared", launch)
+if owner_check > app_start:
+    raise SystemExit("Toggle owner close must precede AppKit startup")
+panel = source[source.index("final class PanelApplication"):source.index("private final class ContenderTestApplication")]
+for forbidden in ("applicationDidResignActive", "outsideSince", "timeIntervalSince(started)"):
+    if forbidden in panel:
+        raise SystemExit(f"Pointer/deactivation lifetime policy remains: {forbidden}")
+for required in ("shouldDismissMouseDown", "addGlobalMonitorForEvents", "validateProductionGeometry", "productionGeometryValid"):
+    if required not in panel:
+        raise SystemExit(f"Missing persistent-panel contract: {required}")
+if "EventActionRouter.perform(event, opener: self.opener)\n      self.panel.close()" not in source:
+    raise SystemExit("Event action does not close the panel explicitly")
+required_symbols = ("chevron.left.2", "chevron.left", "chevron.right", "chevron.right.2")
+if any(f'navButton("{glyph}"' in source for glyph in ("«", "‹", "›", "»")):
+    raise SystemExit("Calendar navigation retains text arrow glyphs")
+for requirement in ("final class NavigationSymbolButton", "NSImage(systemSymbolName:", "imagePosition = .imageOnly", "configured.isTemplate = true") + required_symbols:
+    if requirement not in source:
+        raise SystemExit(f"Missing image-only SF Symbol navigation contract: {requirement}")
+PY
 /usr/bin/python3 - "$root/tests/validate-calendar-panel.py" "$root/tests/validate-calendar-events.py" <<'PY'
 import ast
 import pathlib
@@ -34,9 +67,10 @@ for argument in sys.argv[1:]:
     if any(isinstance(node, ast.Assert) for node in ast.walk(tree)):
         raise SystemExit("Optimizable Python assertions are prohibited")
 PY
-/usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -O "$root/scripts/calendar-panel.swift" -o "$binary"
+/usr/bin/xcrun swiftc -target "$calendar_target" -parse-as-library -O -warnings-as-errors "$root/scripts/calendar-panel.swift" -o "$binary"
 [ "$(/usr/bin/lipo -archs "$binary")" = "$host_arch" ] || { echo "Calendar helper architecture mismatch" >&2; exit 1; }
 TMPDIR="$self_test_tmp" "$binary" --self-test
+echo "Calendar panel optimized self-test passed"
 expect_usage_64() {
   if "$binary" "$@" >"$work/usage.out" 2>"$work/usage.err"; then
     echo "Malformed arguments unexpectedly succeeded: $*" >&2
@@ -115,6 +149,14 @@ render_case_at() {
 render_case 2026-08-01 empty empty 0
 render_case 2026-08-02 one events 1
 render_case 2026-08-03 mixed events 4
+render_case 2026-08-03 mixed-repeat events 4
+/bin/cp "$work/mixed.png" "$artifact_dir/calendar-panel-determinism-a.png"
+/bin/cp "$work/mixed-repeat.png" "$artifact_dir/calendar-panel-determinism-b.png"
+/bin/cp "$work/mixed.json" "$artifact_dir/calendar-panel-determinism-a.json"
+/bin/cp "$work/mixed-repeat.json" "$artifact_dir/calendar-panel-determinism-b.json"
+/usr/bin/cmp -s "$work/mixed.png" "$work/mixed-repeat.png" || { echo "Anonymous fixture PNG rendering is not deterministic; retained both renders" >&2; exit 1; }
+/usr/bin/cmp -s "$work/mixed.json" "$work/mixed-repeat.json" || { echo "Anonymous fixture geometry is not deterministic; retained both reports" >&2; exit 1; }
+echo "Calendar panel anonymous fixture rendering is byte deterministic"
 render_case 2026-08-04 many events 16
 render_case 2026-08-04 many-bottom events 16 --scroll-bottom
 render_case 2026-08-05 all-day events 2
@@ -235,12 +277,12 @@ runtime=$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)/sketchybar-runtime
 /bin/rm -f "$runtime/calendar-panel.$(/usr/bin/id -u).$instance.pid.lock"
 instance=""
 echo "Calendar panel singleton stress passed: 32 contenders, one owner, synchronous close"
-/bin/cp "$work/mixed.png" "${CALENDAR_PANEL_SCREENSHOT:-/tmp/calendar-panel-offline-final.png}"
-/bin/cp "$work/mixed.json" "${CALENDAR_PANEL_GEOMETRY:-/tmp/calendar-panel-offline-geometry.json}"
-/bin/cp "$work/many.png" /tmp/calendar-panel-many-top.png
-/bin/cp "$work/many-bottom.png" /tmp/calendar-panel-many-bottom.png
-/bin/cp "$work/links.png" /tmp/calendar-panel-links.png
-/bin/cp "$work/full-day.png" /tmp/calendar-panel-phases.png
-/bin/cp "$work/all-day-current.png" /tmp/calendar-panel-all-day-phases.png
-/bin/cp "$work/away-today.png" /tmp/calendar-panel-away-today.png
+/bin/cp "$work/mixed.png" "${CALENDAR_PANEL_SCREENSHOT:-$artifact_dir/calendar-panel-offline-final.png}"
+/bin/cp "$work/mixed.json" "${CALENDAR_PANEL_GEOMETRY:-$artifact_dir/calendar-panel-offline-geometry.json}"
+/bin/cp "$work/many.png" "$artifact_dir/calendar-panel-many-top.png"
+/bin/cp "$work/many-bottom.png" "$artifact_dir/calendar-panel-many-bottom.png"
+/bin/cp "$work/links.png" "$artifact_dir/calendar-panel-links.png"
+/bin/cp "$work/full-day.png" "$artifact_dir/calendar-panel-phases.png"
+/bin/cp "$work/all-day-current.png" "$artifact_dir/calendar-panel-all-day-phases.png"
+/bin/cp "$work/away-today.png" "$artifact_dir/calendar-panel-away-today.png"
 echo "Calendar panel offline gate passed"

@@ -5,7 +5,18 @@ from pathlib import Path
 def check(condition, message):
     if not condition:
         raise SystemExit(message)
+
+def relative_luminance(rgb):
+    channels = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in rgb[:3]]
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+def contrast_ratio(foreground, background):
+    high, low = sorted((relative_luminance(foreground), relative_luminance(background)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
 value = json.loads(Path(sys.argv[1]).read_text())
+contract = json.loads((Path(__file__).parent / 'fixtures/calendar-navigation-sf-symbols.json').read_text())
+check(contract.get('schemaVersion') == 1, 'navigation SF Symbol fixture schema must be version 1')
 expected_state = sys.argv[2] if len(sys.argv) > 2 else None
 expected_count = int(sys.argv[3]) if len(sys.argv) > 3 else None
 panel, host, display = (value['panel'], value['host'], value['display'])
@@ -16,6 +27,10 @@ check(panel['x'] >= display['x'] + 8, 'validation failed at line 11')
 check(panel['x'] + panel['width'] <= display['x'] + display['width'] - 8, 'validation failed at line 12')
 check(panel['y'] >= display['y'] + 8, 'validation failed at line 13')
 check(panel['y'] + panel['height'] <= display['y'] + display['height'] - 8, 'validation failed at line 14')
+policy = value['window_policy']
+check(policy == {'nonactivating_panel': True, 'borderless': True, 'can_become_key': True, 'can_become_main': False,
+                 'becomes_key_only_if_needed': True, 'hides_on_deactivate': False},
+      'calendar window must keep the exact nonactivating focus policy')
 cells = value['cells']
 check(len(cells) == 42, 'validation failed at line 16')
 check(len({c['identifier'] for c in cells}) == 42, 'validation failed at line 17')
@@ -42,8 +57,44 @@ check(len(headers) == 7, 'validation failed at line 29')
 check([h['x'] + h['width'] / 2 for h in headers] == [x + 18 for x in xs], 'validation failed at line 30')
 check(all(not h['accessibility_element'] for h in headers), 'redundant weekday abbreviations must be ignored by AX')
 nav = value['navigation']
-check(len(nav) == 4, 'validation failed at line 32')
-check({n['identifier'] for n in nav} == {'calendar.nav.previous-year', 'calendar.nav.previous-month', 'calendar.nav.next-month', 'calendar.nav.next-year'}, 'validation failed at line 33')
+expected_nav = contract['navigation']
+check(len(nav) == len(expected_nav) == 4, 'validation failed at line 32')
+check([n['identifier'] for n in nav] == [n['identifier'] for n in expected_nav], 'navigation control order changed')
+check([n['symbol_name'] for n in nav] == [n['symbolName'] for n in expected_nav], 'navigation SF Symbol mapping changed')
+check([n['accessibility_label'] for n in nav] == [n['accessibilityLabel'] for n in expected_nav], 'navigation accessibility labels changed')
+for actual, expected in zip(nav, expected_nav):
+    check(actual['x'] == expected['x'] and actual['width'] == expected['width'], f"{actual['identifier']} horizontal geometry changed")
+    check(actual['title'] == actual['alternate_title'] == '', f"{actual['identifier']} has a text glyph fallback")
+    check(actual['has_image'] and actual['image_only'] and actual['image_is_template'], f"{actual['identifier']} must be an image-only template symbol")
+    check(actual['uses_normal_tint'], f"{actual['identifier']} must use the normal high-contrast tint")
+    check(actual['accessibility_element'] and actual['accessibility_role'] == 'AXButton' and actual['unignored'],
+          f"{actual['identifier']} must remain an exposed, unignored accessibility button")
+    check(actual['accessibility_help'] == contract['accessibility']['help'], f"{actual['identifier']} accessibility help changed")
+    check(actual['accessibility_actions'] == [contract['accessibility']['requiredAction']],
+          f"{actual['identifier']} must expose exactly one accessibility press action")
+month_geometry = contract['monthControl']
+month_top = panel['height'] - (value['month_control']['y'] + value['month_control']['height'])
+check(value['month_control']['x'] == month_geometry['x'] and value['month_control']['width'] == month_geometry['width'] and
+      value['month_control']['height'] == month_geometry['height'] and month_top == month_geometry['topInset'],
+      'month control geometry changed')
+check(all(n['y'] == value['month_control']['y'] and n['height'] == value['month_control']['height'] for n in nav),
+      'SF Symbol arrows must stay vertically aligned with the month control')
+check(nav[1]['x'] + nav[1]['width'] == value['month_control']['x'] and
+      value['month_control']['x'] + value['month_control']['width'] == nav[2]['x'],
+      'inner month arrows must remain flush with the central month control')
+check(contract['colors']['colorSpace'] == 'sRGB', 'navigation color fixture must use sRGB')
+expected_symbol = contract['colors']['symbolSRGB']
+expected_surface = contract['colors']['surfaceSRGB']
+actual_symbols = []
+for item in nav:
+    actual_symbol = [item['tint_red'], item['tint_green'], item['tint_blue'], item['tint_alpha']]
+    actual_symbols.append(actual_symbol)
+    check(all(abs(actual - expected) < 0.01 for actual, expected in zip(actual_symbol, expected_symbol)),
+          f"{item['identifier']} measured sRGB symbol tint changed")
+actual_surface = [value['visual_tokens'][f'surface_{channel}'] for channel in ('red', 'green', 'blue', 'alpha')]
+check(all(abs(actual - expected) < 0.01 for actual, expected in zip(actual_surface, expected_surface)), 'measured sRGB calendar surface tint changed')
+check(all(contrast_ratio(actual_symbol, actual_surface) >= contract['colors']['minimumIconContrastRatio'] for actual_symbol in actual_symbols),
+      'measured navigation SF Symbol contrast is below the fixture minimum')
 rows = value['event_rows']
 check(value['event_count'] == len(rows), 'validation failed at line 38')
 check(all((r['height'] == 44 and r['label'] and r['title'] and r['detail'] for r in rows)), 'validation failed at line 39')

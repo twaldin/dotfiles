@@ -1,4 +1,6 @@
 local text = require("lib.text")
+local grapheme = require("lib.unicode_grapheme_ranges")
+local width_ranges = require("lib.calendar_width_ranges")
 local M = {}
 
 local function leap(year)
@@ -140,6 +142,190 @@ function M.clean_text(value, max_chars, max_bytes)
   return text.clean(value, max_chars, max_bytes)
 end
 
+local function in_range(value, first, last)
+  return value >= first and value <= last
+end
+
+local function known_narrow_scalar(value)
+  return in_range(value, 0x20, 0x7e)
+    or value == 0xf00ed -- trusted calendar glyph; user PUA is removed earlier
+end
+
+local function scalar_kind(value)
+  if known_narrow_scalar(value) then return "narrow" end
+  if width_ranges.contains(width_ranges.oversized, value) then return "oversized" end
+  return "fallback"
+end
+
+local function hangul_kind(value)
+  if grapheme.contains(grapheme.hangul_l, value) then return "L" end
+  if grapheme.contains(grapheme.hangul_v, value) then return "V" end
+  if grapheme.contains(grapheme.hangul_t, value) then return "T" end
+  if in_range(value, 0xac00, 0xd7a3) then
+    return (value - 0xac00) % 28 == 0 and "LV" or "LVT"
+  end
+  return nil
+end
+
+local function title_clusters(value)
+  local clusters = {}
+  local function blank_cluster()
+    return {
+      text = "", units = 0,
+      narrow_units = 0, fallback_units = 0, oversized_units = 0,
+      prepend = false, regional = 0, hangul = nil,
+      ep_extend_run = false, zwj_after_ep = false,
+      incb_active = false, incb_linker = false,
+    }
+  end
+  local function append_scalar(cluster, character, scalar)
+    cluster.text = cluster.text .. character
+    cluster.units = cluster.units + 1
+    local kind = scalar_kind(scalar)
+    cluster[kind .. "_units"] = cluster[kind .. "_units"] + 1
+  end
+  local function start_blank_cluster()
+    local cluster = blank_cluster()
+    clusters[#clusters + 1] = cluster
+    return cluster
+  end
+  local function start_cluster(character, scalar, properties)
+    local cluster = start_blank_cluster()
+    append_scalar(cluster, character, scalar)
+    for key, property in pairs(properties or {}) do cluster[key] = property end
+    return cluster
+  end
+  local ok = pcall(function()
+    for _, scalar in utf8.codes(value) do
+      local character = utf8.char(scalar)
+      local current = clusters[#clusters]
+      local is_gcb_extend = grapheme.contains(grapheme.extend, scalar)
+        or grapheme.contains(grapheme.emoji_modifier, scalar)
+      local is_spacing_mark = grapheme.contains(grapheme.spacing_mark, scalar)
+      local is_extend = is_gcb_extend or is_spacing_mark
+      local is_extended_pictographic = grapheme.contains(grapheme.extended_pictographic, scalar)
+      local is_prepend = grapheme.contains(grapheme.prepend, scalar)
+      local is_regional = grapheme.contains(grapheme.regional_indicator, scalar)
+      local is_zwj = grapheme.contains(grapheme.zwj, scalar)
+      local hangul = hangul_kind(scalar)
+      local incb_consonant = grapheme.contains(grapheme.incb_consonant, scalar)
+      local incb_extend = grapheme.contains(grapheme.incb_extend, scalar)
+      local incb_linker = grapheme.contains(grapheme.incb_linker, scalar)
+      local joins_indic = current and current.incb_active and current.incb_linker and incb_consonant
+      local joins_hangul = current and (
+        (current.hangul == "L" and (hangul == "L" or hangul == "V" or hangul == "LV" or hangul == "LVT"))
+        or ((current.hangul == "LV" or current.hangul == "V") and (hangul == "V" or hangul == "T"))
+        or ((current.hangul == "LVT" or current.hangul == "T") and hangul == "T")
+      )
+      if is_prepend then
+        if current and current.prepend then
+          append_scalar(current, character, scalar)
+        else
+          start_cluster(character, scalar, { prepend = true })
+        end
+      elseif is_zwj then
+        if not current then current = start_blank_cluster() end
+        append_scalar(current, character, scalar)
+        current.zwj_after_ep = current.ep_extend_run == true
+        current.ep_extend_run, current.hangul, current.regional = false, nil, 0
+        if current.incb_active and (incb_extend or incb_linker) then
+          current.incb_linker = current.incb_linker or incb_linker
+        else
+          current.incb_active, current.incb_linker = false, false
+        end
+      elseif is_extend then
+        if not current then current = start_blank_cluster() end
+        append_scalar(current, character, scalar)
+        current.zwj_after_ep = false
+        current.ep_extend_run = current.ep_extend_run and is_gcb_extend
+        current.hangul, current.regional = nil, 0
+        if current.incb_active and (incb_extend or incb_linker) then
+          current.incb_linker = current.incb_linker or incb_linker
+        else
+          current.incb_active, current.incb_linker = false, false
+        end
+      elseif current and current.zwj_after_ep and is_extended_pictographic then
+        append_scalar(current, character, scalar)
+        current.zwj_after_ep, current.ep_extend_run = false, true
+        current.hangul, current.regional = hangul, 0
+        current.incb_active, current.incb_linker = false, false
+      elseif joins_hangul then
+        append_scalar(current, character, scalar)
+        current.zwj_after_ep, current.ep_extend_run = false, is_extended_pictographic
+        current.hangul, current.regional = hangul, 0
+        current.incb_active, current.incb_linker = false, false
+      elseif joins_indic then
+        append_scalar(current, character, scalar)
+        current.zwj_after_ep, current.ep_extend_run = false, is_extended_pictographic
+        current.hangul, current.regional = hangul, 0
+        current.incb_active, current.incb_linker = true, false
+      elseif current and current.prepend then
+        append_scalar(current, character, scalar)
+        current.prepend = false
+        current.zwj_after_ep, current.ep_extend_run = false, is_extended_pictographic
+        current.hangul = hangul
+        current.regional = is_regional and 1 or 0
+        current.incb_active, current.incb_linker = incb_consonant, false
+      elseif is_regional and current and current.regional == 1 then
+        append_scalar(current, character, scalar)
+        current.zwj_after_ep, current.ep_extend_run = false, is_extended_pictographic
+        current.regional, current.hangul = 2, nil
+        current.incb_active, current.incb_linker = false, false
+      else
+        start_cluster(character, scalar, {
+          regional = is_regional and 1 or 0,
+          hangul = hangul,
+          ep_extend_run = is_extended_pictographic,
+          incb_active = incb_consonant,
+        })
+      end
+    end
+  end)
+  return ok and clusters or nil
+end
+
+-- SketchyBar measures a dynamic text lane with CoreText. This function only
+-- chooses a cluster-safe bounded prefix. Pinned narrow glyphs use their exact
+-- advance; fallback scalars reserve complete-scan-verified conservative tiers.
+function M.bounded_event_title(glyph, title, budget, narrow_advance, fallback_advance, oversized_advance)
+  glyph = tostring(glyph or "")
+  title = tostring(title or "")
+  budget = math.max(1, tonumber(budget) or 1)
+  narrow_advance = math.max(1, tonumber(narrow_advance) or 1)
+  fallback_advance = math.max(narrow_advance, tonumber(fallback_advance) or narrow_advance)
+  oversized_advance = math.max(fallback_advance, tonumber(oversized_advance) or fallback_advance)
+  local full = glyph .. " " .. title
+  local clusters = title_clusters(full)
+  if not clusters then
+    return { text = glyph .. " Calendar event", overflow = true, estimated_width = budget }
+  end
+  local function advance(cluster)
+    return narrow_advance * (cluster.narrow_units or 0)
+      + fallback_advance * (cluster.fallback_units or 0)
+      + oversized_advance * (cluster.oversized_units or 0)
+  end
+  local total = 0
+  for _, cluster in ipairs(clusters) do total = total + advance(cluster) end
+  local function rounded(value) return math.ceil(value + 1.5) end
+  if rounded(total) <= budget then
+    return { text = full, overflow = false, estimated_width = rounded(total) }
+  end
+  local ellipsis, used = "…", 0
+  local raw_limit = math.max(0, budget - 1.5 - narrow_advance)
+  local parts = {}
+  for _, cluster in ipairs(clusters) do
+    local width = advance(cluster)
+    if used + width > raw_limit then break end
+    parts[#parts + 1] = cluster.text
+    used = used + width
+  end
+  return {
+    text = table.concat(parts) .. ellipsis,
+    overflow = true,
+    estimated_width = rounded(used + narrow_advance),
+  }
+end
+
 local function valid_day(year, month, day)
   return year and month and day and year >= 1900 and year <= 2200 and month >= 1 and month <= 12 and day >= 1 and day <= M.days_in_month(year, month)
 end
@@ -229,7 +415,8 @@ function M.parse_events(output, tokens)
     for _, property in ipairs(properties) do if #property > 16384 then return nil, "property" end end
     local title = M.clean_text(properties[1], 256, 1024)
     local start_time, end_time, all_day, duration_days = parse_datetime(properties[2])
-    if not title or not start_time then return nil, "datetime" end
+    if not start_time then return nil, "datetime" end
+    if not title then title = "Upcoming event" end
     local url, location, notes, uid
     for property_index = 3, #properties do
       local property = properties[property_index]:gsub(tokens.newline, "\n")
