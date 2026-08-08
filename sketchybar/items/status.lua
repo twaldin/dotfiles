@@ -3,7 +3,7 @@ local settings = require("settings")
 local shell = require("lib.shell")
 local popup = require("lib.popup")
 local hover = require("lib.hover")
-local latest = { cpu = 0, ram = 0, disk = 0, battery = 0, uptime = "—" }
+local latest = { cpu = 0, ram = 0, disk = 0, uptime = "—" }
 local active = nil
 local disk_in_flight = false
 
@@ -25,7 +25,7 @@ end
 local function update_popup()
   if not active or not popup.is_current(item, active.token) then return end
   active.resources:set({ label = { string = string.format("CPU %5.1f%%    RAM %5.1f%%", latest.cpu, latest.ram), color = latest.cpu >= 90 and colors.warning or colors.primary } })
-  active.capacity:set({ label = { string = string.format("DISK %4.1f%%    BAT %3.0f%%", latest.disk, latest.battery) } })
+  active.capacity:set({ label = { string = string.format("DISK %4.1f%%", latest.disk) } })
   active.network:set({ label = { string = "NET  Unavailable until public provider", color = colors.muted } })
   active.uptime:set({ label = { string = "UP  " .. latest.uptime, color = colors.muted } })
 end
@@ -50,7 +50,6 @@ item:subscribe("system_stats", function(env)
   latest.cpu = percent(env.CPU_USAGE) or latest.cpu
   latest.ram = percent(env.RAM_USAGE) or latest.ram
   latest.disk = percent(env.DISK_USAGE) or latest.disk
-  latest.battery = percent(env.BATTERY_PERCENTAGE) or latest.battery
   if env.UPTIME and env.UPTIME ~= "" then latest.uptime = shell.display(env.UPTIME) end
   render()
 end)
