@@ -12,7 +12,7 @@ sbar.add("item", "release.probe", {
 
 -- Left island: native Spaces at the outside edge, then focused context.
 require("items.workspaces")
-require("items.media") -- provider remains available but is hidden at rest
+require("items.media") -- fixed public-unavailable containment surface
 require("items.front_window")
 
 -- Right island creation is reversed by SketchyBar: create the outer controls
