@@ -18,9 +18,14 @@ focus_source = pathlib.Path(sys.argv[2]).resolve()
 query_source = pathlib.Path(sys.argv[3]).resolve()
 front_source = pathlib.Path(sys.argv[4]).resolve()
 front_text = front_source.read_text()
-check('settings.paths.yabai' not in front_text and 'scripts/yabai-windows.sh", "current"' in front_text and 'scripts/yabai-windows.sh", "all"' in front_text, 'front window must use topology-guarded query routes only')
-check('front_app_switched", function()' in front_text, 'front-app events must not expose app content before guarded refresh')
-check('lib.window_pages' in front_text and 'popup.rebuild' in front_text and 'added < 12' not in front_text, 'front-window popup must use deterministic pagination without irreversible truncation')
+for forbidden in ('settings.paths.yabai', 'yabai-windows.sh', 'focus-window.sh', 'lib.shell',
+                  'lib.icons', 'lib.window_pages', 'front_app_switched', 'popup.action',
+                  'popup.on_click', 'mouse.clicked', 'sbar.exec'):
+    check(forbidden not in front_text, f'front-window privacy quarantine retains {forbidden}')
+for required in ('App / title  Native privacy view', 'Window list  Native privacy view',
+                 'Focus window  Provider unavailable', 'Move / swap / resize  Unavailable',
+                 'Close / minimize / zoom  Unavailable', 'Space / display actions  Unavailable'):
+    check(required in front_text, f'front-window privacy quarantine misses {required}')
 
 with tempfile.TemporaryDirectory(prefix='yabai-window-guard-test.') as raw:
     base = pathlib.Path(raw)
