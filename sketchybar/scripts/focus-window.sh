@@ -3,7 +3,7 @@ set -eu
 case "${1:-}" in ''|0|0*|*[!0-9]*) exit 64 ;; esac
 requested=$1
 script_dir=$(CDPATH='' cd -- "$(/usr/bin/dirname -- "$0")" && pwd -P)
-yabai=/opt/homebrew/bin/yabai
+yabai=/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai
 valid_topology() {
   { "$yabai" -m query --spaces 2>/dev/null || printf '\n!'; } | "$script_dir/yabai-guard.py" topology 2>/dev/null
 }

@@ -227,7 +227,7 @@ assert(date.properties.label.string:match("^%d?%d:%d%d [AP]M$") and not date.pro
 
 -- Complete sanitized titles stay whole; overflow uses a cluster-safe ellipsis.
 equal(event.properties.icon.string, glyph .. " Synthetic review", "ready synthetic title")
-assert(event.properties.label.string:find("↗", 1, true), "safe meeting marker")
+assert(not event.properties.label.string:find("↗", 1, true), "meeting marker is removed from the static surface")
 fixture_title = "ABCDEFGHIJKLMNOPQRSTUV" -- 22 model glyphs; 24 with the trusted prefix.
 fire(event, "system_woke")
 equal(event.properties.icon.string, glyph .. " " .. fixture_title, "target-length model title remains complete")
@@ -269,103 +269,10 @@ assert(event.properties.label.string:match("^ends in "), "during-event countdown
 assert(event.properties.label.string:find(" · ", 1, true), "during-event duration")
 start_offset, event_duration = 3600, 1500
 
--- Both full click surfaces have one left route; all other buttons are no-ops.
-assert(date.subscriptions["mouse.clicked"] and #date.subscriptions["mouse.clicked"] == 1, "one date click handler")
-assert(event.subscriptions["mouse.clicked"] and #event.subscriptions["mouse.clicked"] == 1, "one event click handler")
-for _, object in ipairs({ date, event }) do
-  for _, button in ipairs({ "right", "middle", "other", "unknown" }) do
-    commands, query_count = {}, 0
-    fire(object, "mouse.clicked", { BUTTON = button })
-    equal(#commands, 0, "non-left click command no-op")
-    equal(query_count, 0, "non-left click query no-op")
-  end
-  commands, query_count = {}, 0
-  fire(object, "mouse.clicked", {})
-  equal(#commands, 0, "missing-button command no-op")
-  equal(query_count, 0, "missing-button query no-op")
-end
-
-local function release_date_debounce()
-  for index = #delayed, 1, -1 do
-    if not delayed[index].ran and delayed[index].seconds == 0.30 then run_delay(index); return end
-  end
-  error("missing calendar click debounce")
-end
-
-local function click_date()
-  fire(date, "mouse.clicked", { BUTTON = "left" })
-  release_date_debounce()
-end
-
-commands, query_count = {}, 0
-fire(date, "mouse.clicked", { BUTTON = "left" })
-equal(query_count, 1, "date left click queries anchor once")
-equal(#commands, 1, "date left click launches helper once")
-fire(date, "mouse.clicked", { BUTTON = "left" })
-equal(query_count, 1, "double click is ignored during bounded debounce")
-equal(#commands, 1, "double click cannot close a just-opened owner")
-release_date_debounce()
-local display2 = commands[1]:find("'--anchor%-cg' '%-800' '100' '116' '32'")
-local display10 = commands[1]:find("'--anchor%-cg' '1212' '0' '116' '32'")
-assert(display2 and display10 and display2 < display10, "116 x 32 anchors sorted by display")
-assert(commands[1]:find("calendar%-panel' '%-%-toggle'") and commands[1]:find("'--ical%-buddy' '/opt/homebrew/bin/icalBuddy'"), "native helper route unchanged")
-
-query_rects = { ["display-1"] = { origin = { 0 / 0, 0 }, size = { 116, 32 } } }
-commands = {}
-click_date()
-equal(#commands, 0, "invalid anchor fails closed without opening another application")
-query_rects = {
-  ["display-1"] = { origin = { 1212, 0 }, size = { 116, 32 } },
-  ["display-2"] = { origin = { 0 / 0, 0 }, size = { 116, 32 } },
-}
-commands = {}
-click_date()
-equal(#commands, 1, "valid clicked-display candidate survives unrelated malformed display")
-assert(commands[1]:find("'--anchor%-cg' '1212' '0' '116' '32'"), "only valid candidate reaches helper")
-query_rects = { ["display-1"] = { origin = { 1212, 0 }, size = { 116, 32 } } }
-helper_exit, commands = 75, {}
-click_date()
-equal(#commands, 1, "pointer-abort helper exit has no fallback")
-helper_exit, commands = 5, {}
-click_date()
-equal(#commands, 1, "helper failure cannot open unanchored Calendar")
-query_error, helper_exit, commands = true, 0, {}
-click_date()
-equal(#commands, 0, "query failure is a safe no-action result")
-query_error = false
-
-emit_safe, provider_error, emit_empty = true, false, false
-fixture_title = "Synthetic review"
-fire(event, "system_woke")
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "safe meeting opens once")
-assert(commands[1]:find("https://zoom.us/wc/join/123456789", 1, true), "allowlisted meeting route")
-local pre_end_now = fixed_now
-fixed_now = fixed_now + start_offset + event_duration + 1
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "event ended after render falls back once")
-assert(commands[1]:find("%-a") and not commands[1]:find("zoom.us", 1, true), "ended meeting link is never opened")
-equal(event.properties.icon.string, glyph .. " Calendar", "ended click clears stale current event")
-equal(event.properties.label.string, "LOADING", "ended click shows immediate refresh state")
-assert_dynamic_event_layout("ended loading detail")
-local ended_refresh_delay = #delayed
-equal(delayed[ended_refresh_delay].seconds, 0, "ended click schedules immediate forced refresh")
-run_delay(ended_refresh_delay)
-fixed_now = pre_end_now
-fire(event, "system_woke")
-commands, open_failure = {}, true
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 2, "failed meeting open falls back once")
-assert(commands[2]:find("%-a") and commands[2]:find("Calendar", 1, true), "meeting fallback targets Calendar")
-open_failure, emit_safe = false, false
-fire(event, "system_woke")
-assert(not event.properties.label.string:find("↗", 1, true), "unsafe meeting has no marker")
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "unsafe meeting falls back directly")
-assert(commands[1]:find("%-a") and not commands[1]:find("zoom.us", 1, true), "unsafe URL never opens")
+-- Calendar surfaces are display-only. They never subscribe to clicks or open apps/URLs.
+assert(not date.subscriptions["mouse.clicked"], "date surface is static")
+assert(not event.subscriptions["mouse.clicked"], "event surface is static")
+assert(not event.properties.label.string:find("↗", 1, true), "meeting marker is absent")
 
 -- Normal hover changes fill and foreground without changing border or geometry.
 local normal_width = event.properties.width
@@ -412,11 +319,6 @@ equal(event.properties.icon.string, glyph .. " Upcoming event", "privacy-off sta
 equal(event.properties.label.string, "STALE", "stale detail")
 equal(event.properties.icon.color, colors.warning, "warning title remains visible")
 equal(event.properties.label.color, colors.warning, "warning detail remains visible")
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "stale event fallback once")
-assert(commands[1]:find("%-a") and not commands[1]:find("zoom.us", 1, true), "stale link not actionable")
-
 -- Surface hover is independent, preserves warnings, and keeps square continuous geometry.
 local event_child_history = #event.set_history
 local warning_icon_color = event.properties.icon.color
@@ -462,9 +364,6 @@ equal(date_surface.properties.background.color, colors.right_date, "targeted dat
 settings.calendar_show_titles, provider_error, emit_empty = true, false, true
 fire(event, "system_woke")
 equal(event.properties.icon.string, glyph .. " No upcoming events", "empty title")
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "empty event opens Calendar once")
 provider_error, emit_empty = true, false
 fire(event, "system_woke")
 equal(event.properties.icon.string, glyph .. " Calendar unavailable", "uncached provider error generic")

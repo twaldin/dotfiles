@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='focus-space-test.') as raw:
     fake = base / 'fake-yabai'
     fixture = base / 'spaces.json'
     record = base / 'focus-record'
-    script.write_text(source.read_text().replace('/opt/homebrew/bin/yabai', str(fake)))
+    script.write_text(source.read_text().replace('/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai', str(fake)))
     script.chmod(0o755)
     shutil.copy2(guard_source, base / 'yabai-guard.py')
     (base / 'yabai-guard.py').chmod(0o755)

@@ -5,10 +5,6 @@ local calendar_model = require("lib.calendar")
 local calendar_layout = require("lib.calendar_bar_layout")
 local hover = require("lib.hover")
 
-local function open_calendar()
-  shell.exec({ "/usr/bin/open", "-a", "Calendar" })
-end
-
 local date_hovered = false
 local date_time = sbar.add("item", "calendar", {
   position = "right",
@@ -29,73 +25,6 @@ local date_time = sbar.add("item", "calendar", {
   },
   background = { drawing = false },
 })
-
-local function finite_coordinate(value)
-  return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge and math.abs(value) <= 10000000
-end
-
-local function exact_pair(value)
-  if type(value) ~= "table" then return false end
-  local count = 0
-  for key in pairs(value) do
-    if key ~= 1 and key ~= 2 then return false end
-    count = count + 1
-  end
-  return count == 2
-end
-
-local function exact_rect(value)
-  if type(value) ~= "table" then return false end
-  local count = 0
-  for key in pairs(value) do
-    if key ~= "origin" and key ~= "size" then return false end
-    count = count + 1
-  end
-  return count == 2 and exact_pair(value.origin) and exact_pair(value.size)
-end
-
-local function calendar_anchor_arguments()
-  local ok, query = pcall(function() return date_time:query() end)
-  if not ok or type(query) ~= "table" or type(query.bounding_rects) ~= "table" then return nil end
-  local rects, seen, entry_count = {}, {}, 0
-  for key, rect in pairs(query.bounding_rects) do
-    entry_count = entry_count + 1
-    if entry_count > 64 then return nil end
-    local display_id = type(key) == "string" and key:match("^display%-(%d+)$") or nil
-    local numeric_id = display_id and tonumber(display_id) or nil
-    if numeric_id and numeric_id >= 1 and numeric_id <= 0xffffffff then
-      if seen[numeric_id] then return nil end
-      seen[numeric_id] = true
-      if exact_rect(rect) then
-        local x, y, width, height = rect.origin[1], rect.origin[2], rect.size[1], rect.size[2]
-        if finite_coordinate(x) and finite_coordinate(y) and finite_coordinate(width) and finite_coordinate(height) and
-           width == 116 and height == 32 then
-          if #rects >= 16 then return nil end
-          rects[#rects + 1] = { id = numeric_id, x = x, y = y, width = width, height = height }
-        end
-      end
-    end
-  end
-  if #rects == 0 then return nil end
-  table.sort(rects, function(a, b) return a.id < b.id end)
-  local argv = { settings.paths.calendar_panel, "--toggle" }
-  for _, rect in ipairs(rects) do
-    argv[#argv + 1] = "--anchor-cg"
-    argv[#argv + 1] = tostring(rect.x)
-    argv[#argv + 1] = tostring(rect.y)
-    argv[#argv + 1] = tostring(rect.width)
-    argv[#argv + 1] = tostring(rect.height)
-  end
-  argv[#argv + 1] = "--ical-buddy"
-  argv[#argv + 1] = settings.paths.icalbuddy
-  return argv
-end
-
-local function toggle_calendar_panel()
-  local argv = calendar_anchor_arguments()
-  if not argv then return false end
-  return pcall(function() shell.exec(argv, function() end) end)
-end
 
 local function render_clock()
   local date_text = os.date("%a %b ") .. tostring(tonumber(os.date("%d")))
@@ -201,18 +130,6 @@ local date_surface = sbar.add("bracket", "calendar.date.bracket", { "calendar" }
 })
 
 date_time:subscribe({ "routine", "system_woke" }, render_clock)
-local calendar_click_blocked = false
-local calendar_click_generation = 0
-date_time:subscribe("mouse.clicked", function(env)
-  if env.BUTTON ~= "left" or calendar_click_blocked then return end
-  calendar_click_blocked = true
-  calendar_click_generation = calendar_click_generation + 1
-  local token = calendar_click_generation
-  sbar.delay(0.30, function()
-    if token == calendar_click_generation then calendar_click_blocked = false end
-  end)
-  toggle_calendar_panel()
-end)
 hover.bind_surface(date_time, date_surface, {
   idle_surface = colors.right_date,
   idle_border = colors.transparent,
@@ -260,7 +177,7 @@ local function render_event()
       title, detail = "Refreshing…", ""
     else
       title = settings.calendar_show_titles and current_event.title or "Upcoming event"
-      detail = status.detail .. (current_event.meeting_url and " ↗" or "")
+      detail = status.detail
     end
   elseif provider_state == "loading" then
     title = "Calendar"
@@ -365,25 +282,6 @@ end
 
 next_event:subscribe("routine", function() refresh_next(false) end)
 next_event:subscribe("system_woke", function() refresh_next(true) end)
-next_event:subscribe("mouse.clicked", function(env)
-  if env.BUTTON ~= "left" then return end
-  if provider_state == "ready" and current_event and calendar_model.countdown(current_event, os.time()).phase == "ended" then
-    current_event = nil
-    last_good_event = nil
-    provider_state = "loading"
-    render_event()
-    sbar.delay(0, function() refresh_next(true) end)
-    open_calendar()
-    return
-  end
-  if provider_state == "ready" and current_event and current_event.meeting_url then
-    shell.exec({ "/usr/bin/open", current_event.meeting_url }, function(_, exit_code)
-      if exit_code ~= 0 then open_calendar() end
-    end)
-  else
-    open_calendar()
-  end
-end)
 hover.bind_surface(next_event, event_surface, {
   idle_surface = colors.right_event,
   idle_border = colors.transparent,

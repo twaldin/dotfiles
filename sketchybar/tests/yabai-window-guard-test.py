@@ -44,8 +44,8 @@ with tempfile.TemporaryDirectory(prefix='yabai-window-guard-test.') as raw:
     calls = base / 'calls'
     focused = base / 'focused'
     shutil.copy2(guard_source, guard)
-    focus.write_text(focus_source.read_text().replace('/opt/homebrew/bin/yabai', str(fake)))
-    query.write_text(query_source.read_text().replace('/opt/homebrew/bin/yabai', str(fake)))
+    focus.write_text(focus_source.read_text().replace('/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai', str(fake)))
+    query.write_text(query_source.read_text().replace('/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai', str(fake)))
     for path in (guard, focus, query):
         path.chmod(0o755)
     fake.write_text('''#!/bin/sh

@@ -6,11 +6,8 @@ case "$require_live_shape" in 0|1) ;; *) echo "SKETCHYBAR_REQUIRE_LIVE_SHAPE mus
 host_arch=$(/usr/bin/uname -m)
 host_macos_version=$(/usr/bin/sw_vers -productVersion)
 "$root/scripts/secure-file-install.py" host-contract "$host_arch" "$host_macos_version"
-[ "$(/usr/bin/shasum -a 256 "$root/scripts/calendar-panel.swift" | /usr/bin/awk '{print $1}')" = e695b4a98f69436fbcc22f83750ca683a98fc1d5057e7858bb92b4417603afb3 ] || { echo "Immutable calendar source checksum failed" >&2; exit 1; }
-[ "$(/usr/bin/shasum -a 256 "$root/tests/fixtures/calendar-navigation-sf-symbols.json" | /usr/bin/awk '{print $1}')" = 3b7119c0d6d7bf98ccdeac7bfc8ea7e22fc78892c0f8b661d095cff0cb12bc04 ] || { echo "Immutable calendar navigation fixture checksum failed" >&2; exit 1; }
 bar_render=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/calendar-bar-render.png.XXXXXX")
-native_build_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/calendar-native-build.XXXXXX")
-cleanup() { /bin/rm -f "$bar_render"; /bin/rm -rf "$native_build_dir"; }
+cleanup() { /bin/rm -f "$bar_render"; }
 trap cleanup EXIT HUP INT TERM
 case "$(/opt/homebrew/bin/lua -v 2>&1)" in "Lua 5.5."*) ;; *) echo "Lua 5.5.x is required" >&2; exit 1 ;; esac
 case "$(/opt/homebrew/bin/luac -v 2>&1)" in "Lua 5.5."*) ;; *) echo "luac 5.5.x is required" >&2; exit 1 ;; esac
@@ -49,13 +46,6 @@ SKETCHYBAR_CONFIG_DIR="$root" /opt/homebrew/bin/lua "$root/tests/text-test.lua"
 SKETCHYBAR_CONFIG_DIR="$root" /opt/homebrew/bin/lua "$root/tests/window-pages-test.lua"
 /opt/homebrew/bin/lua "$root/tests/audio-coordinator-test.lua"
 /opt/homebrew/bin/lua "$root/tests/audio-items-test.lua"
-checked_binary="$native_build_dir/calendar-panel-arm64"
-/usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -warnings-as-errors -typecheck "$root/scripts/calendar-panel.swift"
-/usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -O -warnings-as-errors "$root/scripts/calendar-panel.swift" -o "$checked_binary"
-[ "$(/usr/bin/lipo -archs "$checked_binary")" = arm64 ] || { echo "Calendar helper build architecture mismatch" >&2; exit 1; }
-"$root/tests/calendar-panel-offline.sh"
-/usr/bin/python3 "$root/tests/calendar-install-contract.py" "$root/install-deps.sh"
-PYTHONOPTIMIZE=1 /usr/bin/python3 "$root/tests/calendar-install-contract.py" "$root/install-deps.sh"
 /usr/bin/xcrun swiftc -typecheck "$root/tests/render-calendar-bar.swift"
 for state in idle event-hover date-hover system-hover; do
   /usr/bin/xcrun swift "$root/tests/render-calendar-bar.swift" "$bar_render" "$state"

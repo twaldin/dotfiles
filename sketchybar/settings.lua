@@ -7,20 +7,19 @@ local M = {
   popup_width = 280,
   icon_width = 24,
   control_width = 28,
-  release_fingerprint = "d0092386f83e105250523d874890b920a116904ea9360fe2001f324874104cd7",
+  release_fingerprint = "bd1186da124740e22734ef1dde7e8576f217cad43990f9fa8d0c9c18087267de",
   calendar_show_titles = true,
   left_island_limit = 560,
   spaces_width_limit = 340,
   space_count = 9,
   paths = {
     blueutil = "/opt/homebrew/bin/blueutil",
-    calendar_panel = os.getenv("HOME") .. "/.local/share/sketchybar-calendar/calendar-panel",
     icalbuddy = "/opt/homebrew/bin/icalBuddy",
     lua = "/opt/homebrew/bin/lua",
     media = "/opt/homebrew/bin/media-control",
     stats = "/opt/homebrew/bin/stats_provider",
     system_controls = os.getenv("HOME") .. "/.local/share/sketchybar-controls/system-controls",
-    yabai = "/opt/homebrew/bin/yabai",
+    yabai = "/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai",
   },
 }
 

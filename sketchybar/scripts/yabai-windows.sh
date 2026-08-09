@@ -2,7 +2,7 @@
 set -eu
 case "${1:-}" in all|current) mode=$1 ;; *) exit 64 ;; esac
 script_dir=$(CDPATH='' cd -- "$(/usr/bin/dirname -- "$0")" && pwd -P)
-yabai=/opt/homebrew/bin/yabai
+yabai=/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai
 valid_topology() {
   { "$yabai" -m query --spaces 2>/dev/null || printf '\n!'; } | "$script_dir/yabai-guard.py" topology 2>/dev/null
 }
