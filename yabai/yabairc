@@ -2,7 +2,7 @@
 
 # yabai runs in basic mode with System Integrity Protection fully enabled.
 # Do not add --load-sa or scripting-addition-only settings here.
-YABAI=/opt/homebrew/bin/yabai
+YABAI=/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai
 
 "$YABAI" -m config \
   external_bar all:32:0 \

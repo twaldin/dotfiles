@@ -37,12 +37,12 @@ shortcuts that duplicate this table.
 Use the repository fail-closed rollback command:
 
 ```sh
-./yabai/activate-aerospace-rollback.sh
+/usr/bin/python3 -I yabai/deploy-lifecycle.py rollback
 ```
 
-The script unloads and disables skhd before yabai. It opens AeroSpace only
-after process inspection proves that both primary processes are absent. It
-aborts on an inspection error.
+The module attempts yabai, intended skhd, and alternate skhd shutdown in that
+order. It opens AeroSpace only after final inspection proves that both primary
+processes are absent. It aborts on an inspection error.
 
 Then verify the fallback:
 
@@ -59,7 +59,7 @@ Quit AeroSpace normally, then use the guarded primary activation:
 
 ```sh
 osascript -e 'tell application id "bobko.aerospace" to quit'
-./yabai/activate-yabai.sh
+/usr/bin/python3 -I yabai/deploy-lifecycle.py activate
 ```
 
 The activation script fails closed if AeroSpace is still active. It verifies

@@ -15,6 +15,8 @@
   </dict>
   <key>RunAtLoad</key>
   <true/>
+  <key>Umask</key>
+  <integer>63</integer>
   <key>KeepAlive</key>
   <dict>
     <key>Crashed</key>
@@ -23,9 +25,9 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>StandardOutPath</key>
-  <string>/tmp/yabai_twaldin.out.log</string>
+  <string>/Users/twaldin/Library/Logs/yabai/yabai.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/yabai_twaldin.err.log</string>
+  <string>/Users/twaldin/Library/Logs/yabai/yabai.err.log</string>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>LimitLoadToSessionType</key>
