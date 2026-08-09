@@ -6,9 +6,43 @@ export PATH="$HOME/.cargo/bin:$PATH"
 export PATH="$HOME/.local/share/bob/nvim-bin:$PATH"
 export PATH="$HOME/.local/bin:$PATH"
 export EDITOR="nvim"
+alias pa="nvm use 22; prime-agent"
 alias tmx="$HOME/scripts/tmux_sessionizer.sh"
-alias cc="claude --dangerously-skip-permissions"
+# Normal Claude Code: clear any GLM/VibeProxy overrides leaked by claude-glm.
+cc() {
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL \
+        ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+        ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL
+  command claude --dangerously-skip-permissions "$@"
+}
 alias cx="codex --yolo"
+
+# Claude Code routed to Z.AI GLM via VibeProxy (local cli-proxy-api on :8318).
+# Usage: claude-glm [model] [claude args...]   e.g.  claude-glm            (glm-5.2)
+#                                                    claude-glm glm-5.1   (override model)
+# Set GLM_DIRECT=1 to bypass VibeProxy and hit z.ai's Anthropic endpoint directly.
+claude-glm() {
+  local model="glm-5.2"
+  if [ -n "$1" ] && [ "${1#-}" = "$1" ]; then model="$1"; shift; fi
+  local auth_token
+  auth_token=$(/usr/bin/security find-generic-password -a "$USER" -s "z.ai API key" -w 2>/dev/null) || {
+    print -u2 'claude-glm: add the rotated key to Keychain service "z.ai API key"'
+    return 1
+  }
+  if [ "$GLM_DIRECT" = "1" ]; then
+    export ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic"
+    export ANTHROPIC_AUTH_TOKEN="$auth_token"
+  else
+    export ANTHROPIC_BASE_URL="http://127.0.0.1:8318"
+    export ANTHROPIC_AUTH_TOKEN="$auth_token"
+  fi
+  export ANTHROPIC_MODEL="$model"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$model"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$model"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-5-turbo"
+  export ANTHROPIC_SMALL_FAST_MODEL="glm-5-turbo"
+  command claude --dangerously-skip-permissions "$@"
+}
 alias nosleep="sudo pmset -a disablesleep 1"
 alias yessleep="sudo pmset -a disablesleep 0"
 alias vi="nvim"
