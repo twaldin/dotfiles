@@ -3,13 +3,26 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 sources=(Sources/PublicStats/*.swift)
-[[ ${#sources[@]} -eq 11 ]] || { echo E_SOURCE_COUNT >&2; exit 1; }
+[[ ${#sources[@]} -eq 12 ]] || { echo E_SOURCE_COUNT >&2; exit 1; }
 
-forbidden='IOReport|AppleSMC|SMC(Open|Close|Read|Write|Call)|IOHIDEvent|IOHIDServiceClient|IORegistry|IOServiceMatching|IOServiceGetMatching|IOServiceOpen|IOConnectCall|currentAllocatedSize|MXGPUMetric|MTLCounterSampleBuffer|sampleCounters|powermetrics|ioreg|wdutil|fs_usage|nettop|smctemp|osx-cpu-temp|system_profiler|sppower_|pmset|libproc|proc_pid|KERN_PROCARGS2|x-apple\.systempreferences|/usr/bin/shortcuts|IOPMSleepSystem|AuthorizationExecuteWithPrivileges|SMJobBless|posix_spawn|popen\(|system\(|execv|dlopen|dlsym|NSClassFromString|NSSelectorFromString|sel_registerName|CFBundleGetFunctionPointerForName|methodForSelector|performSelector|/usr/bin/sudo|/bin/sh|/bin/bash|/usr/bin/env|ProcessInfo\.globallyUniqueString'
+forbidden='IOReport|AppleSMC|SMC(Open|Close|Read|Write|Call)|IOHIDEvent|IOHIDServiceClient|IORegistry|IOServiceMatching|IOServiceGetMatching|IOServiceOpen|IOConnectCall|currentAllocatedSize|MXGPUMetric|MTLCounterSampleBuffer|sampleCounters|hw\.perflevel|powermetrics|ioreg|wdutil|fs_usage|nettop|smctemp|osx-cpu-temp|system_profiler|sppower_|pmset|libproc|proc_pid|KERN_PROCARGS2|x-apple\.systempreferences|/usr/bin/shortcuts|IOPMSleepSystem|AuthorizationExecuteWithPrivileges|SMJobBless|posix_spawn|popen\(|system\(|execv|dlopen|dlsym|NSClassFromString|NSSelectorFromString|sel_registerName|CFBundleGetFunctionPointerForName|methodForSelector|performSelector|/usr/bin/sudo|/bin/sh|/bin/bash|/usr/bin/env|ProcessInfo\.globallyUniqueString'
 if grep -En "$forbidden" "${sources[@]}"; then
   echo E_SOURCE_DENY >&2
   exit 1
 fi
+[[ ! -e Sources/PublicStats/StorageIOSampler.swift ]] || { echo E_STORAGE_IO_SOURCE >&2; exit 1; }
+[[ ! -e ../../scripts/gpu-usage.py ]] || { echo E_GPU_ACTIVITY_SOURCE >&2; exit 1; }
+if grep -E 'storageIO|StorageIO|SSD_(IO|READ_BPS|WRITE_BPS)' "${sources[@]}" >/dev/null; then
+  echo E_STORAGE_IO_SCHEMA >&2
+  exit 1
+fi
+if grep -Fq 'gpu-usage.py' ../../items/status.lua; then
+  echo E_GPU_ACTIVITY_CONSUMER >&2
+  exit 1
+fi
+grep -Fq 'system_cpu_detail_v1' Sources/PublicStats/Contract.swift || { echo E_CPU_DETAIL_EVENT >&2; exit 1; }
+grep -Fq 'ProcessInfo.processInfo.systemUptime' Sources/PublicStats/Daemon.swift || { echo E_CPU_UPTIME_SOURCE >&2; exit 1; }
+grep -Fq 'host_processor_info' Sources/PublicStats/PerCoreCPUSampler.swift || { echo E_CPU_CORE_SOURCE >&2; exit 1; }
 for fixture in Tests/AuditFixtures/private-*.fixture \
                Tests/AuditFixtures/dynamic-call.fixture \
                Tests/AuditFixtures/shell-call.fixture \
@@ -95,12 +108,15 @@ fi
 grep -Fq 'String(value.metricsSequence)' Tests/AuditFixtures/sequence-numeric.fixture || {
   echo E_SEQUENCE_NEGATIVE_FIXTURE >&2; exit 1;
 }
-if grep -Eq 'String\(value\.(metrics|battery)Sequence\)' Sources/PublicStats/Contract.swift; then
+if grep -Eq 'String\(value\.(metrics|cpuDetail|battery)Sequence\)' Sources/PublicStats/Contract.swift; then
   echo E_SEQUENCE_NUMERIC_SERIALIZATION >&2
   exit 1
 fi
 grep -Fq '"METRICS_SEQ", sequenceField(value.metricsSequence)' Sources/PublicStats/Contract.swift || {
   echo E_METRICS_SEQUENCE_GRAMMAR >&2; exit 1;
+}
+grep -Fq '"CPU_DETAIL_SEQ", sequenceField(value.cpuDetailSequence)' Sources/PublicStats/Contract.swift || {
+  echo E_CPU_DETAIL_SEQUENCE_GRAMMAR >&2; exit 1;
 }
 grep -Fq '"BATTERY_SEQ", sequenceField(value.batterySequence)' Sources/PublicStats/Contract.swift || {
   echo E_BATTERY_SEQUENCE_GRAMMAR >&2; exit 1;
@@ -118,7 +134,7 @@ baseline_sdk=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk
 xcrun swiftc -typecheck -warnings-as-errors -swift-version 6 -sdk "$baseline_sdk" \
   -target arm64-apple-macosx15.0 "${sources[@]}"
 
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/public-stats-audit.XXXXXX")
+scratch=$(mktemp -d "${TMPDIR:?macOS per-user TMPDIR is required}/public-stats-audit.XXXXXX")
 chmod 700 "$scratch"
 cleanup() {
   chmod -R u+w "$scratch" 2>/dev/null || true

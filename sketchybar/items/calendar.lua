@@ -3,25 +3,23 @@ local settings = require("settings")
 local shell = require("lib.shell")
 local calendar_model = require("lib.calendar")
 local calendar_layout = require("lib.calendar_bar_layout")
-local hover = require("lib.hover")
-
-local date_hovered = false
+local date_width = settings.right_layout.calendar_date_width
 local date_time = sbar.add("item", "calendar", {
   position = "right",
   updates = true,
   update_freq = 30,
-  width = 116,
+  width = date_width,
   padding_left = 0,
   padding_right = 0,
   icon = {
-    string = "", color = colors.muted, width = 58, align = "right",
+    string = "", color = colors.muted, width = 63, align = "right",
     padding_left = 0, padding_right = 4, y_offset = 1,
-    font = { family = settings.font, style = "SemiBold", size = 9.0 },
+    font = settings.type.bar_meta,
   },
   label = {
-    string = "", color = colors.accent, width = 58, align = "left",
+    string = "", color = colors.accent, width = 63, align = "left",
     padding_left = 4, padding_right = 0, y_offset = 1,
-    font = { family = settings.font, style = "Medium", size = 9.0 },
+    font = settings.type.bar_meta,
   },
   background = { drawing = false },
 })
@@ -32,20 +30,20 @@ local function render_clock()
   local time_text = hour .. os.date(":%M %p")
   local advance = calendar_layout.title_narrow_advance
   local gap = calendar_layout.content_gap
-  local date_width = #date_text * advance
+  local date_text_width = #date_text * advance
   local time_width = #time_text * advance
-  local outer = math.max(0, (116 - date_width - time_width - gap) / 2)
+  local outer = math.max(0, (date_width - date_text_width - time_width - gap) / 2)
   date_time:set({
-    width = 116,
+    width = date_width,
     icon = {
       string = date_text,
-      color = date_hovered and colors.primary or colors.muted,
-      width = outer + date_width + (gap / 2),
+      color = colors.muted,
+      width = outer + date_text_width + (gap / 2),
       padding_left = 0, padding_right = gap / 2, y_offset = 1,
     },
     label = {
       string = time_text,
-      color = date_hovered and colors.primary or colors.accent,
+      color = colors.accent,
       width = outer + time_width + (gap / 2),
       padding_left = gap / 2, padding_right = 0, y_offset = 1,
     },
@@ -94,13 +92,13 @@ local next_event = sbar.add("item", "calendar.next", {
     string = initial_event_layout.full_title, color = colors.primary,
     width = initial_event_layout.icon_width, align = "left", max_chars = initial_event_layout.max_chars,
     padding_left = initial_event_layout.icon_left, padding_right = initial_event_layout.icon_right,
-    font = { family = settings.font, style = "SemiBold", size = 9.0 },
+    font = settings.type.bar_event,
   },
   label = {
     string = "LOADING", color = colors.muted, drawing = initial_event_layout.label_drawing,
     width = initial_event_layout.label_width, align = "left",
     padding_left = initial_event_layout.label_left, padding_right = initial_event_layout.label_right,
-    font = { family = settings.font, style = "Medium", size = 8.0 },
+    font = settings.type.bar_event_detail,
   },
   background = { drawing = false },
 })
@@ -109,7 +107,7 @@ local event_surface = sbar.add("bracket", "calendar.event.bracket", { "calendar.
   background = {
     drawing = true,
     color = colors.right_event,
-    height = 26,
+    height = settings.surface_height,
     corner_radius = 0,
     border_width = 0,
     border_color = colors.transparent,
@@ -121,7 +119,7 @@ local date_surface = sbar.add("bracket", "calendar.date.bracket", { "calendar" }
   background = {
     drawing = true,
     color = colors.right_date,
-    height = 26,
+    height = settings.surface_height,
     corner_radius = 0,
     border_width = 0,
     border_color = colors.transparent,
@@ -130,22 +128,12 @@ local date_surface = sbar.add("bracket", "calendar.date.bracket", { "calendar" }
 })
 
 date_time:subscribe({ "routine", "system_woke" }, render_clock)
-hover.bind_surface(date_time, date_surface, {
-  idle_surface = colors.right_date,
-  idle_border = colors.transparent,
-  hover_border = colors.transparent,
-  on_change = function(active)
-    date_hovered = active
-    render_clock()
-  end,
-})
 render_clock()
 
 local generation = 0
 local current_event = nil
 local last_good_event = nil
 local provider_state = "loading"
-local event_hovered = false
 local last_query = 0
 local query_in_flight = false
 local query_queued = false
@@ -154,8 +142,7 @@ local refresh_next
 
 local function event_foregrounds()
   if provider_state == "error" then return colors.warning, colors.warning end
-  return event_hovered and colors.primary or colors.accent,
-    event_hovered and colors.primary or colors.muted
+  return colors.accent, colors.muted
 end
 
 local function paint_event()
@@ -247,12 +234,12 @@ refresh_next = function(force)
       "/usr/bin/perl", "-e", "alarm 3; exec @ARGV or exit 127", settings.paths.icalbuddy,
       "-uid", "-nc", "-nrd", "-cf", "",
       "-tf", "%H:%M:%S %z", "-df", "%Y-%m-%d",
-      "-po", "title,datetime,url,location,notes",
+      "-po", "title,datetime",
       -- iCalBuddy uses the first and last -ps characters to delimit its separator list;
       -- the emitted field separator is the random token without these pipe delimiters.
       "-ps", "|" .. separators.property .. "|",
       "-b", separators.record, "-ss", "", "-nnr", separators.newline,
-      "-iep", "title,datetime,url,location,notes",
+      "-iep", "title,datetime",
       "eventsFrom:" .. first, "to:" .. last,
     }, function(output, exit_code)
       if token ~= generation or active_query_token ~= token then return end
@@ -282,15 +269,6 @@ end
 
 next_event:subscribe("routine", function() refresh_next(false) end)
 next_event:subscribe("system_woke", function() refresh_next(true) end)
-hover.bind_surface(next_event, event_surface, {
-  idle_surface = colors.right_event,
-  idle_border = colors.transparent,
-  hover_border = colors.transparent,
-  on_change = function(active)
-    event_hovered = active
-    paint_event()
-  end,
-})
 refresh_next(true)
 
 return date_time

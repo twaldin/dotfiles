@@ -9,8 +9,17 @@ export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 uid=$(/usr/bin/id -u)
 sbarlua_commit=dba9cc421b868c918d5c23c408544a28aadf2f2f
 sbarlua_legacy_sha256=53d7169806ba874f36b0f2f8128f3ad7c929ce969d40ef65ee23eb5cf0206c60
-runtime_base=${TMPDIR:-/tmp}
-case "$runtime_base" in /*) ;; *) exit 64 ;; esac
+tmpdir_error() {
+  code=$1
+  echo "SketchyBar: unsafe or missing per-user TMPDIR (exit $code)" >&2
+  exit "$code"
+}
+runtime_base_input=${TMPDIR:-}
+case "$runtime_base_input" in /*) ;; *) tmpdir_error 64 ;; esac
+runtime_base=$(CDPATH='' cd -P -- "$runtime_base_input" 2>/dev/null && pwd -P) || tmpdir_error 73
+[ -d "$runtime_base" ] && [ ! -L "$runtime_base" ] \
+  && [ "$(/usr/bin/stat -f %u "$runtime_base")" = "$uid" ] \
+  && [ "$(/usr/bin/stat -f %Lp "$runtime_base")" = 700 ] || tmpdir_error 73
 runtime="$runtime_base/sketchybar-lua-$uid"
 if [ ! -e "$runtime" ] && [ ! -L "$runtime" ]; then /bin/mkdir -m 0700 "$runtime"; fi
 [ -d "$runtime" ] && [ ! -L "$runtime" ] && [ "$(/usr/bin/stat -f %u "$runtime")" = "$uid" ] && [ "$(/usr/bin/stat -f %Lp "$runtime")" = 700 ] || exit 73

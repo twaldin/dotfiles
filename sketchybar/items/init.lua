@@ -10,25 +10,27 @@ sbar.add("item", "release.probe", {
   label = { drawing = false, string = settings.release_fingerprint },
 })
 
--- Left island: native Spaces at the outside edge, then focused context.
+-- Left island: native Spaces, focused context, then compact device controls.
 require("items.workspaces")
-require("items.media") -- fixed public-unavailable containment surface
 require("items.front_window")
 
--- Right island creation is reversed by SketchyBar: create the outer controls
--- first so time remains at the inner edge of the island.
+-- Keep the six compact device controls left so the six stats stay clear of the notch.
 require("items.connectivity")
+require("items.display")
 require("items.audio")
 require("items.microphone")
 require("items.battery")
-require("items.status")
-require("items.calendar")
 
-sbar.add("bracket", "system.bracket", { "wifi", "bluetooth", "audio", "microphone", "battery", "status" }, {
+-- Right-position items render in reverse creation order: Calendar is outermost,
+-- then the six stats stay in the center of the right half.
+require("items.calendar")
+require("items.status")
+
+sbar.add("bracket", "system.bracket", { "wifi", "bluetooth", "display", "audio", "microphone", "battery" }, {
   background = {
     drawing = true,
     color = colors.right_system,
-    height = 26,
+    height = settings.surface_height,
     corner_radius = 0,
     border_width = 0,
     border_color = colors.transparent,

@@ -103,7 +103,7 @@ SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 # Exact normalized strings captured from yabai 7.1.25. In particular,
 # focus_follows_mouse configures as "off" but reads back as "disabled".
 EXPECTED_CONFIG: Mapping[str, str] = {
-    "external_bar": "all:32:0",
+    "external_bar": "all:36:0",
     "mouse_follows_focus": "off",
     "focus_follows_mouse": "disabled",
     "display_arrangement_order": "default",

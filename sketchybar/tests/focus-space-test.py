@@ -19,10 +19,12 @@ guard_source = source.parent / 'yabai-guard.py'
 with tempfile.TemporaryDirectory(prefix='focus-space-test.') as raw:
     base = pathlib.Path(raw)
     script = base / 'focus-space.sh'
-    fake = base / 'fake-yabai'
+    home = base / 'home'
+    fake = home / 'Applications/Yabai.app/Contents/MacOS/yabai'
+    fake.parent.mkdir(parents=True)
     fixture = base / 'spaces.json'
     record = base / 'focus-record'
-    script.write_text(source.read_text().replace('/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai', str(fake)))
+    script.write_text(source.read_text())
     script.chmod(0o755)
     shutil.copy2(guard_source, base / 'yabai-guard.py')
     (base / 'yabai-guard.py').chmod(0o755)
@@ -35,7 +37,7 @@ case "$*" in
 esac
 ''')
     fake.chmod(0o755)
-    environment = dict(os.environ, FAKE_YABAI_SPACES=str(fixture), FAKE_YABAI_RECORD=str(record))
+    environment = dict(os.environ, HOME=str(home), FAKE_YABAI_SPACES=str(fixture), FAKE_YABAI_RECORD=str(record))
 
     def spaces(focused=1, external_focus=False):
         result = [{'index': index, 'display': 1, 'has-focus': focused == index} for index in [9, 3, 7, 1, 5, 8, 2, 6, 4]]

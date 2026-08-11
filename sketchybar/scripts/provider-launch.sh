@@ -2,18 +2,26 @@
 set -eu
 umask 077
 
-provider=/opt/homebrew/bin/stats_provider
+provider="$HOME/.local/share/sketchybar-provider/sketchybar-public-stats"
 uid=$(/usr/bin/id -u)
 script_dir=$(CDPATH='' cd -- "$(/usr/bin/dirname -- "$0")" && pwd -P)
 log_helper="$script_dir/provider-log.py"
-runtime_base=${TMPDIR:-/tmp}
-case "$runtime_base" in /*) ;; *) exit 64 ;; esac
-runtime="$runtime_base/sketchybar-stats-provider-$uid"
+tmpdir_error() {
+  code=$1
+  echo "Public stats: unsafe or missing per-user TMPDIR (exit $code)" >&2
+  exit "$code"
+}
+runtime_base_input=${TMPDIR:-}
+case "$runtime_base_input" in /*) ;; *) tmpdir_error 64 ;; esac
+runtime_base=$(CDPATH='' cd -P -- "$runtime_base_input" 2>/dev/null && pwd -P) || tmpdir_error 73
+[ -d "$runtime_base" ] && [ ! -L "$runtime_base" ] \
+  && [ "$(/usr/bin/stat -f %u "$runtime_base")" = "$uid" ] \
+  && [ "$(/usr/bin/stat -f %Lp "$runtime_base")" = 700 ] || tmpdir_error 73
+runtime="$runtime_base/sketchybar-public-stats-$uid"
 if [ ! -e "$runtime" ] && [ ! -L "$runtime" ]; then /bin/mkdir -m 0700 "$runtime"; fi
 [ -d "$runtime" ] && [ ! -L "$runtime" ] && [ "$(/usr/bin/stat -f %u "$runtime")" = "$uid" ] && [ "$(/usr/bin/stat -f %Lp "$runtime")" = 700 ] || exit 73
 pidfile="$runtime/provider.pid"
 pending_intent="$runtime/provider.pending"
-legacy_pidfile="$runtime_base/sketchybar-stats-provider.${uid}.pid"
 lockdir="$runtime/launcher.lock"
 log="$runtime/provider.log"
 
@@ -65,14 +73,13 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-[ "${SKETCHYBAR_PROVIDER_LOCK_TEST:-}" = 1 ] && exit 0
 
 owned_pid() {
   pid=$1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   command=$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)
   case "$command" in
-    "$provider --bar sketchybar --cpu usage --memory ram_usage --disk usage --battery percentage remaining state time_to_full --uptime day hour min --interval 3 --no-units") return 0 ;;
+    "$provider daemon") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -82,7 +89,7 @@ pending_owned_pid() {
   if owned_pid "$pid"; then return 0; fi
   command=$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)
   case "$command" in
-    *"$log_helper exec-owned $log $pidfile $pending_intent "*" $provider --bar sketchybar --cpu usage --memory ram_usage --disk usage --battery percentage remaining state time_to_full --uptime day hour min --interval 3 --no-units") return 0 ;;
+    *"$log_helper exec-owned $log $pidfile $pending_intent "*" $provider daemon") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -103,8 +110,6 @@ fi
 old_pid=""
 if [ -r "$pidfile" ]; then
   old_pid=$(/bin/cat "$pidfile" 2>/dev/null || true)
-elif [ -f "$legacy_pidfile" ] && [ ! -L "$legacy_pidfile" ] && [ "$(/usr/bin/stat -f %u "$legacy_pidfile")" = "$uid" ]; then
-  old_pid=$(/bin/cat "$legacy_pidfile" 2>/dev/null || true)
 fi
 case "$old_pid" in ''|*[!0-9]*) [ -z "$old_pid" ] || exit 73 ;; esac
 if [ -n "$old_pid" ] && [ -n "$(/bin/ps -p "$old_pid" -o pid= 2>/dev/null)" ] && ! owned_pid "$old_pid"; then
@@ -114,7 +119,7 @@ if [ -n "$old_pid" ] && [ -n "$(/bin/ps -p "$old_pid" -o pid= 2>/dev/null)" ] &&
     count=$((count + 1))
   done
   if /bin/kill -0 "$old_pid" 2>/dev/null && ! owned_pid "$old_pid"; then
-    log_message "live pending or unverified stats_provider; refusing duplicate"
+    log_message "live pending or unverified public stats provider; refusing duplicate"
     exit 75
   fi
 fi
@@ -126,23 +131,17 @@ if [ -n "$old_pid" ] && owned_pid "$old_pid"; then
     count=$((count + 1))
   done
   if /bin/kill -0 "$old_pid" 2>/dev/null && owned_pid "$old_pid"; then
-    log_message "owned stats_provider did not stop; refusing duplicate"
+    log_message "owned public stats provider did not stop; refusing duplicate"
     exit 75
   fi
 fi
 /bin/rm -f "$pidfile"
-if [ -f "$legacy_pidfile" ] && [ ! -L "$legacy_pidfile" ] && [ "$(/usr/bin/stat -f %u "$legacy_pidfile")" = "$uid" ]; then
-  /bin/rm -f "$legacy_pidfile"
-fi
 [ "$action" = stop ] && exit 0
-[ -x "$provider" ] || { log_message "stats_provider is not installed"; exit 69; }
+[ -x "$provider" ] || { log_message "public stats provider is not installed"; exit 69; }
 "$log_helper" pid "$pending_intent" "$$"
 
-"$log_helper" exec-owned "$log" "$pidfile" "$pending_intent" "$$" "$provider" --bar sketchybar --cpu usage --memory ram_usage --disk usage \
-  --battery percentage remaining state time_to_full --uptime day hour min \
-  --interval 3 --no-units &
+"$log_helper" exec-owned "$log" "$pidfile" "$pending_intent" "$$" "$provider" daemon &
 new_pid=$!
-if [ "${SKETCHYBAR_PROVIDER_ABORT_AFTER_FORK:-}" = 1 ]; then /bin/kill -KILL "$$"; fi
 count=0
 while /bin/kill -0 "$new_pid" 2>/dev/null && ! owned_pid "$new_pid" && [ "$count" -lt 20 ]; do
   /bin/sleep 0.01
@@ -151,13 +150,13 @@ done
 if ! owned_pid "$new_pid"; then
   /bin/kill "$new_pid" 2>/dev/null || true
   wait "$new_pid" 2>/dev/null || true
-  log_message "stats_provider launch failed"
+  log_message "public stats provider launch failed"
   exit 75
 fi
 validate_regular_metadata "$pidfile" || exit 75
 published_pid=$(/bin/cat "$pidfile" 2>/dev/null || true)
 if [ "$published_pid" != "$new_pid" ] || ! owned_pid "$new_pid"; then
-  log_message "stats_provider ownership publication failed"
+  log_message "public stats provider ownership publication failed"
   exit 75
 fi
 launch_committed=true

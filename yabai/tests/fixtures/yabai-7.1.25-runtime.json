@@ -11,7 +11,7 @@
     "auto_balance": "off",
     "bottom_padding": "10",
     "display_arrangement_order": "default",
-    "external_bar": "all:32:0",
+    "external_bar": "all:36:0",
     "focus_follows_mouse": "disabled",
     "layout": "bsp",
     "left_padding": "10",

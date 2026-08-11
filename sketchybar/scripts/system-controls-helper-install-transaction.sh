@@ -1,11 +1,7 @@
 #!/bin/sh
 set -eu
 
-case "$#" in
-  4) system_controls_test_fixtures=false ;;
-  5) [ "$5" = --test-fixtures ] || { echo "Invalid system controls transaction fixture sentinel" >&2; exit 64; }; system_controls_test_fixtures=true ;;
-  *) echo "Usage: system-controls-helper-install-transaction CANDIDATE MARKER DIRECTORY EXPECTED_SOURCE_SHA256" >&2; exit 64 ;;
-esac
+[ "$#" -eq 4 ] || { echo "Usage: system-controls-helper-install-transaction CANDIDATE MARKER DIRECTORY EXPECTED_SOURCE_SHA256" >&2; exit 64; }
 candidate=$1
 candidate_marker=$2
 directory=$3
@@ -74,11 +70,7 @@ lock_guard="$directory_physical/.system-controls-install.lock/guard"
 if [ -n "${SKETCHYBAR_SYSTEM_CONTROLS_LOCK_FD:-}" ]; then
   "$secure_installer" system-controls-lock-verify "$lock_guard" "$SKETCHYBAR_SYSTEM_CONTROLS_LOCK_FD"
 else
-  if [ "$system_controls_test_fixtures" = true ]; then
-    exec "$secure_installer" system-controls-lock-run "$lock_guard" "$script_dir/system-controls-helper-install-transaction.sh" "$candidate" "$candidate_marker" "$directory_physical" "$controls_candidate_source" --test-fixtures
-  else
-    exec "$secure_installer" system-controls-lock-run "$lock_guard" "$script_dir/system-controls-helper-install-transaction.sh" "$candidate" "$candidate_marker" "$directory_physical" "$controls_candidate_source"
-  fi
+  exec "$secure_installer" system-controls-lock-run "$lock_guard" "$script_dir/system-controls-helper-install-transaction.sh" "$candidate" "$candidate_marker" "$directory_physical" "$controls_candidate_source"
 fi
 recovery_dir="$directory_physical/.system-controls-install-transaction"
 recovery_state="$recovery_dir/state"
@@ -271,11 +263,6 @@ owns_recovery=false
 
 restore_previous() {
   restored=true
-  if [ "$system_controls_test_fixtures" = true ] && [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_ROLLBACK_READY:-}" ]; then
-    printf '%s
-' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_ROLLBACK_READY"
-    /bin/sleep 0.2
-  fi
   if [ "$had_binary" = true ]; then
     exact_old_with_backup "$destination" "$binary_backup" 755 "$binary_device" "$binary_inode" || { exact_owned_identity "$binary_backup" 755 "$binary_device" "$binary_inode" && exact_owned_identity "$destination" 755 "$candidate_device" "$candidate_inode"; } || return 1
   elif [ -e "$destination" ] || [ -L "$destination" ]; then
@@ -401,40 +388,13 @@ fi
 "$secure_installer" system-controls-state "$recovery_state" "backups|$state_suffix"
 "$secure_installer" sync-directory "$directory_physical"
 binary_replaced=true
-if [ "$system_controls_test_fixtures" = true ] && [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_BEFORE_BINARY_RENAME_READY:-}" ]; then
-  printf '%s
-' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_BEFORE_BINARY_RENAME_READY"
-  /bin/sleep 0.2
-fi
 exact_owned_identity "$candidate" 755 "$candidate_device" "$candidate_inode" || { echo "System controls binary staging identity changed before publication" >&2; exit 1; }
 /bin/mv -f "$candidate" "$destination"
-if [ "$system_controls_test_fixtures" = true ] && [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_AFTER_BINARY_RENAME_READY:-}" ]; then
-  printf '%s
-' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_AFTER_BINARY_RENAME_READY"
-  /bin/sleep 0.2
-fi
 exact_owned_identity "$destination" 755 "$candidate_device" "$candidate_inode" || { echo "System controls binary publication identity changed" >&2; exit 1; }
 "$secure_installer" sync-directory "$directory_physical"
 "$secure_installer" system-controls-state "$recovery_state" "binary-published|$state_suffix"
-if [ "$system_controls_test_fixtures" = true ] && [ "${SKETCHYBAR_TEST_ABORT_AFTER_SYSTEM_CONTROLS_BINARY_RENAME:-0}" = 1 ]; then
-  /bin/kill -TERM "$$"
-fi
-if [ "$system_controls_test_fixtures" = true ] && [ "${SKETCHYBAR_TEST_FAIL_SYSTEM_CONTROLS_MARKER_RENAME:-0}" = 1 ]; then
-  echo "System controls helper marker installation failed" >&2
-  exit 1
-fi
-if [ "$system_controls_test_fixtures" = true ] && [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_BEFORE_MARKER_RENAME_READY:-}" ]; then
-  printf '%s
-' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_BEFORE_MARKER_RENAME_READY"
-  /bin/sleep 0.2
-fi
 exact_owned_identity "$candidate_marker" 644 "$marker_candidate_device" "$marker_candidate_inode" || { echo "System controls marker staging identity changed before publication" >&2; exit 1; }
 /bin/mv -f "$candidate_marker" "$destination_marker"
-if [ "$system_controls_test_fixtures" = true ] && [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_AFTER_MARKER_RENAME_READY:-}" ]; then
-  printf '%s
-' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_AFTER_MARKER_RENAME_READY"
-  /bin/sleep 0.2
-fi
 if ! exact_owned_identity "$destination" 755 "$candidate_device" "$candidate_inode" || ! exact_owned_identity "$destination_marker" 644 "$marker_candidate_device" "$marker_candidate_inode"; then
   echo "Installed system controls pair failed final validation" >&2
   exit 1

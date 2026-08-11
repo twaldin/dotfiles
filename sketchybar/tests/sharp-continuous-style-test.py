@@ -71,8 +71,6 @@ for literal in (
     "color = colors.right_event",
     "color = colors.right_date",
     "border_width = 0",
-    "idle_surface = colors.right_event",
-    "idle_surface = colors.right_date",
     'width = "dynamic"',
     'icon_width = "dynamic"',
     "calendar_model.bounded_event_title",

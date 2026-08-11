@@ -6,6 +6,7 @@ private struct SelfTestChecks: Codable, Sendable {
     let battery: String
     let conditions: String
     let cpu: String
+    let cpuDetail: String
     let memoryPressure: String
     let metal: String
     let networkCounters: String
@@ -16,6 +17,7 @@ private struct SelfTestChecks: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case battery, conditions, cpu, metal, swap, vm, volume
+        case cpuDetail = "cpu_detail"
         case memoryPressure = "memory_pressure"
         case networkCounters = "network_counters"
         case networkPath = "network_path"
@@ -52,6 +54,7 @@ private final class PathSelfTestBox: @unchecked Sendable {
 enum SelfTest {
     static func run() -> Bool {
         let cpuOK = testCPU()
+        let cpuDetailOK = testCPUDetail()
         let vmOK: Bool
         switch readMemory() {
         case .success: vmOK = true
@@ -73,16 +76,18 @@ enum SelfTest {
         let metalState = metalReading.present ? "ok" : "absent"
         let batteryReading = readBattery()
         let batteryState = batteryReading.batteryStatus.rawValue
-        let batteryOK = batteryReading.batteryStatus == .present ||
-            batteryReading.batteryStatus == .absent
+        // Battery sampling is an optional event domain. The bar uses its own
+        // native battery reader, so an unavailable provider battery must not
+        // hide failures in the metric domains that this daemon serves.
         let contractOK = testContract()
-        let ok = cpuOK && vmOK && volumeOK && pathOK && conditionsClosed &&
-            pressureOK && batteryOK && contractOK
+        let ok = cpuOK && cpuDetailOK && vmOK && volumeOK && pathOK && conditionsClosed &&
+            pressureOK && contractOK
         let document = SelfTestDocument(
             checks: SelfTestChecks(
                 battery: batteryState,
                 conditions: conditionsClosed ? "closed_read" : "unavailable",
                 cpu: cpuOK ? "ok" : "unavailable",
+                cpuDetail: cpuDetailOK ? "ok" : "unavailable",
                 memoryPressure: pressureOK ? "source_created" : "unavailable",
                 metal: metalState,
                 networkCounters: countersState,
@@ -130,6 +135,27 @@ enum SelfTest {
         return false
     }
 
+    private static func testCPUDetail() -> Bool {
+        guard ProcessInfo.processInfo.systemUptime.isFinite,
+              ProcessInfo.processInfo.systemUptime >= 0,
+              case .success(let first) = readPerCoreCPUTicks() else { return false }
+        let clockTicks = Int64(sysconf(_SC_CLK_TCK))
+        var sampler = PerCoreCPUSampler()
+        _ = sampler.consume(ticks: first,
+                            timeNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                            clockTicksPerSecond: clockTicks)
+        let deadline = DispatchTime.now() + .seconds(3)
+        repeat {
+            Thread.sleep(forTimeInterval: 0.1)
+            guard case .success(let next) = readPerCoreCPUTicks() else { return false }
+            let sample = sampler.consume(ticks: next,
+                                         timeNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                                         clockTicksPerSecond: clockTicks)
+            if sample.valid { return true }
+        } while DispatchTime.now() < deadline
+        return false
+    }
+
     private static func testPath() -> Bool {
         let box = PathSelfTestBox()
         let monitor = NWPathMonitor()
@@ -157,19 +183,24 @@ enum SelfTest {
     private static func testContract() -> Bool {
         let instance = "0123456789abcdef0123456789abcdef"
         let initial = MetricsSnapshot(producerInstance: instance)
+        let detailSnapshot = CPUDetailSnapshot(producerInstance: instance)
         var batterySnapshot = BatterySnapshot()
         batterySnapshot.producerInstance = instance
         guard let metrics = try? ContractSerializer.metrics(initial),
+              let detail = try? ContractSerializer.cpuDetail(detailSnapshot),
               let battery = try? ContractSerializer.battery(batterySnapshot),
-              metrics.event == .metrics, battery.event == .battery,
+              metrics.event == .metrics, detail.event == .cpuDetail, battery.event == .battery,
               Set(metrics.fields.map(\.0)) == Set(ContractSerializer.metricsRequiredKeys),
+              Set(detail.fields.map(\.0)) == Set(ContractSerializer.cpuDetailRequiredKeys),
               Set(battery.fields.map(\.0)) == Set(ContractSerializer.batteryRequiredKeys),
               metrics.fields.contains(where: { $0 == ("GPU_ACTIVITY_VALID", "0") }) else { return false }
         var invalid = initial
         invalid.cpuBusyPercent = .infinity
         guard (try? ContractSerializer.metrics(invalid)) == nil else { return false }
-        let allKeys = Set(metrics.fields.map(\.0)).union(battery.fields.map(\.0))
+        let allKeys = Set(metrics.fields.map(\.0)).union(detail.fields.map(\.0))
+            .union(battery.fields.map(\.0))
         return allKeys == Set(ContractSerializer.metricsRequiredKeys)
+            .union(ContractSerializer.cpuDetailRequiredKeys)
             .union(ContractSerializer.batteryRequiredKeys)
     }
 }

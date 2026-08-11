@@ -14,6 +14,14 @@ import tempfile
 import time
 
 
+SBARLUA_TEST_ENVIRONMENT = (
+    "SKETCHYBAR_SBARLUA_SIGNAL_READY",
+    "SKETCHYBAR_SBARLUA_ABORT_AFTER_MODULE",
+    "SKETCHYBAR_SBARLUA_FAIL_MARKER",
+    "SKETCHYBAR_SBARLUA_SUCCESS_READY",
+)
+
+
 def fail(message, code=1):
     sys.stderr.write(message + "\n")
     raise SystemExit(code)
@@ -193,8 +201,7 @@ def open_system_controls_lock(guard):
 
 def run_system_controls_locked(guard, arguments):
     expected_script = pathlib.Path(__file__).resolve().parent / "system-controls-helper-install-transaction.sh"
-    fixture_arguments = len(arguments) == 6 and arguments[-1] == "--test-fixtures"
-    if (len(arguments) != 5 and not fixture_arguments) or pathlib.Path(arguments[0]).resolve() != expected_script:
+    if len(arguments) != 5 or pathlib.Path(arguments[0]).resolve() != expected_script:
         fail("Invalid system controls locked transaction arguments", 64)
     directory = pathlib.Path(os.path.realpath(arguments[3]))
     if pathlib.Path(arguments[3]).absolute() != directory or guard != directory / ".system-controls-install.lock" / "guard":
@@ -259,19 +266,6 @@ def write_state_file(path, value, label):
             pass
         fail(label + " transaction state publication failed")
     os.close(descriptor)
-
-
-def write_calendar_state(path, value):
-    validate_directory(path.parent)
-    file_info(path, {0o600}, optional=True)
-    number = r"[0-9]{1,20}"
-    match = re.fullmatch(rf"(preparing|backups|binary-published|pair-published|cleanup)\|(true|false)\|(-|{number})\|(-|{number})\|(true|false)\|(-|{number})\|(-|{number})\|({number})\|({number})\|({number})\|({number})", value)
-    if not match:
-        fail("Invalid calendar transaction state", 64)
-    _, had_binary, binary_device, binary_inode, had_marker, marker_device, marker_inode, _, _, _, _ = match.groups()
-    if (had_binary == "true") != (binary_device != "-" and binary_inode != "-") or (had_marker == "true") != (marker_device != "-" and marker_inode != "-"):
-        fail("Invalid calendar transaction identity state", 64)
-    write_state_file(path, value, "Calendar")
 
 
 def write_system_controls_state(path, value):
@@ -407,6 +401,57 @@ def prepare_sbarlua_runtime(directory, expected_commit, legacy_module_hash):
     os.close(marker_descriptor)
 
 
+def ensure_private_directory(path):
+    if path.exists() or path.is_symlink():
+        validate_directory(path)
+        try:
+            mode = stat.S_IMODE(path.lstat().st_mode)
+        except OSError:
+            fail("Private install directory is unavailable")
+        if mode != 0o700:
+            fail("Private install directory must have mode 0700")
+        return
+    ensure_directory(path.parent)
+    try:
+        path.mkdir(mode=0o700)
+    except OSError:
+        fail("Private install directory could not be created")
+    validate_directory(path)
+    if stat.S_IMODE(path.lstat().st_mode) != 0o700:
+        fail("Private install directory must have mode 0700")
+
+
+def install_executable(source, destination, expected_hash, verify_self_test=False):
+    if (len(expected_hash) != 64
+            or any(character not in "0123456789abcdef" for character in expected_hash)):
+        fail("Executable checksum is invalid", 64)
+    ensure_private_directory(destination.parent)
+    file_info(destination, {0o755})
+    source_info(source)
+    temporary = copy_to_temp(source, destination.parent, ".executable.", 0o755)
+    try:
+        if hashlib.sha256(temporary.read_bytes()).hexdigest() != expected_hash:
+            raise OSError("candidate checksum mismatch")
+        if verify_self_test:
+            verified = subprocess.run(
+                [str(temporary), "--self-test"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                     "HOME": os.path.expanduser("~"), "LANG": "C", "LC_ALL": "C"},
+                timeout=30, check=False)
+            if verified.returncode != 0:
+                raise OSError("candidate self-test failed")
+        os.replace(temporary, destination)
+        file_info(destination, {0o755}, optional=False)
+        if hashlib.sha256(destination.read_bytes()).hexdigest() != expected_hash:
+            raise OSError("published checksum mismatch")
+        sync_directory(destination.parent)
+    except (OSError, subprocess.SubprocessError):
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+        fail("Executable publication failed")
+
+
 def prepare_asset(destination):
     ensure_directory(destination.parent)
     file_info(destination, {0o644})
@@ -426,7 +471,11 @@ def install_asset(source, destination):
         fail("Asset publication failed")
 
 
-def install_sbarlua(source, commit, directory):
+def install_sbarlua(source, commit, directory, test_fixtures=False):
+    fixture_environment_present = any(
+        name in os.environ for name in SBARLUA_TEST_ENVIRONMENT)
+    if fixture_environment_present and not test_fixtures:
+        fail("SbarLua test fixture environment requires --test-fixtures", 64)
     if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
         fail("SbarLua commit is invalid", 64)
     prepare_sbarlua_structure(directory)
@@ -435,7 +484,8 @@ def install_sbarlua(source, commit, directory):
     marker = directory / "COMMIT"
     module_stage = copy_to_temp(source, directory, ".sketchybar.so.stage.", 0o755)
     module_hash = hashlib.sha256(module_stage.read_bytes()).hexdigest()
-    marker_source_descriptor, marker_source_raw = tempfile.mkstemp(prefix="marker-source.")
+    marker_source_descriptor, marker_source_raw = tempfile.mkstemp(
+        prefix=".marker-source.", dir=directory)
     marker_source = pathlib.Path(marker_source_raw)
     os.write(marker_source_descriptor, (commit + "\n" + module_hash + "\n").encode("ascii"))
     os.close(marker_source_descriptor)
@@ -472,7 +522,8 @@ def install_sbarlua(source, commit, directory):
     try:
         os.replace(module_stage, module)
         module_published = True
-        signal_ready = os.environ.get("SKETCHYBAR_SBARLUA_SIGNAL_READY")
+        signal_ready = (os.environ.get("SKETCHYBAR_SBARLUA_SIGNAL_READY")
+                        if test_fixtures else None)
         if signal_ready:
             ready_path = pathlib.Path(signal_ready)
             ready_descriptor = os.open(ready_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -480,9 +531,9 @@ def install_sbarlua(source, commit, directory):
             os.fsync(ready_descriptor)
             os.close(ready_descriptor)
             signal.pause()
-        if os.environ.get("SKETCHYBAR_SBARLUA_ABORT_AFTER_MODULE") == "1":
+        if test_fixtures and os.environ.get("SKETCHYBAR_SBARLUA_ABORT_AFTER_MODULE") == "1":
             os.kill(os.getpid(), signal.SIGTERM)
-        if os.environ.get("SKETCHYBAR_SBARLUA_FAIL_MARKER") == "1":
+        if test_fixtures and os.environ.get("SKETCHYBAR_SBARLUA_FAIL_MARKER") == "1":
             raise OSError("synthetic marker failure")
         os.replace(marker_stage, marker)
         marker_published = True
@@ -525,7 +576,8 @@ def install_sbarlua(source, commit, directory):
         sync_directory(directory)
         restore_handlers()
         fail("SbarLua publication failed")
-    success_ready = os.environ.get("SKETCHYBAR_SBARLUA_SUCCESS_READY")
+    success_ready = (os.environ.get("SKETCHYBAR_SBARLUA_SUCCESS_READY")
+                     if test_fixtures else None)
     if success_ready:
         ready_path = pathlib.Path(success_ready)
         ready_descriptor = os.open(ready_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -546,11 +598,9 @@ def main():
     mode = sys.argv[1]
     if mode == "host-contract" and len(sys.argv) == 4:
         validate_host_contract(sys.argv[2], sys.argv[3])
-    elif mode == "calendar-state" and len(sys.argv) == 4:
-        write_calendar_state(pathlib.Path(sys.argv[2]), sys.argv[3])
     elif mode == "system-controls-state" and len(sys.argv) == 4:
         write_system_controls_state(pathlib.Path(sys.argv[2]), sys.argv[3])
-    elif mode == "system-controls-lock-run" and len(sys.argv) in {8, 9}:
+    elif mode == "system-controls-lock-run" and len(sys.argv) == 8:
         run_system_controls_locked(pathlib.Path(sys.argv[2]), sys.argv[3:])
     elif mode == "system-controls-lock-verify" and len(sys.argv) == 4:
         verify_system_controls_lock(pathlib.Path(sys.argv[2]), sys.argv[3])
@@ -566,20 +616,27 @@ def main():
         if expected_mode not in {0o644, 0o755}:
             fail("Invalid sync file mode", 64)
         sync_file(pathlib.Path(sys.argv[2]), expected_mode)
-    elif mode == "calendar-provenance" and len(sys.argv) == 5:
-        validate_native_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4], "calendar-panel")
     elif mode == "system-controls-provenance" and len(sys.argv) == 5:
         validate_native_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4], "system-controls")
     elif mode == "system-controls-candidate-provenance" and len(sys.argv) == 5:
         validate_native_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4])
     elif mode == "prepare-sbarlua" and len(sys.argv) == 5:
         prepare_sbarlua_runtime(pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4])
+    elif mode == "executable" and len(sys.argv) == 6 and sys.argv[5] == "--self-test":
+        install_executable(
+            pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4],
+            verify_self_test=True)
     elif mode == "prepare-asset" and len(sys.argv) == 3:
         prepare_asset(pathlib.Path(sys.argv[2]))
     elif mode == "asset" and len(sys.argv) == 4:
         install_asset(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))
-    elif mode == "sbarlua" and len(sys.argv) == 5:
-        install_sbarlua(pathlib.Path(sys.argv[2]), sys.argv[3], pathlib.Path(sys.argv[4]))
+    elif mode == "sbarlua" and len(sys.argv) in {5, 6}:
+        test_fixtures = len(sys.argv) == 6 and sys.argv[5] == "--test-fixtures"
+        if len(sys.argv) == 6 and not test_fixtures:
+            fail("Invalid secure install arguments", 64)
+        install_sbarlua(
+            pathlib.Path(sys.argv[2]), sys.argv[3], pathlib.Path(sys.argv[4]),
+            test_fixtures=test_fixtures)
     else:
         fail("Invalid secure install arguments", 64)
 

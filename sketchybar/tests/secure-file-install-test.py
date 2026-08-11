@@ -18,15 +18,34 @@ def check(condition, message):
 helper = pathlib.Path(sys.argv[1]).resolve()
 installer = pathlib.Path(sys.argv[2]).resolve()
 source = installer.read_text()
-stats_formula = installer.parent / 'deps' / 'sketchybar-system-stats.rb'
-check(stats_formula.is_file() and hashlib.sha256(stats_formula.read_bytes()).hexdigest() == '639b236a164c049a98eab97265b8a3c333c5c5f39e7a95544302c89247715d55', 'stats_provider 0.8.2 formula must be vendored at the reviewed checksum')
-check('stats_formula_installed_sha256' in source and source.index('stats_formula_installed_sha256') < min(source.index('brew reinstall twaldin/sketchybar-frozen/sketchybar-system-stats'), source.index('brew install twaldin/sketchybar-frozen/sketchybar-system-stats')), 'the exact local-tap formula consumed by Brew must be checksum-verified before install or reinstall')
-check('brew reinstall twaldin/sketchybar-frozen/sketchybar-system-stats' in source and 'brew install twaldin/sketchybar-frozen/sketchybar-system-stats' in source and 'if [ ! -x /opt/homebrew/bin/stats_provider ]' not in source and 'joncrangle/tap/sketchybar-system-stats' not in source, 'every stats_provider install must converge through the local checksum-pinned frozen tap')
-check(source.index('host_macos_version=$(/usr/bin/sw_vers -productVersion)') < source.index('host-contract "$host_arch" "$host_macos_version"') < source.index('/opt/homebrew/bin/brew install lua') and 'CALENDAR_SOURCE_SHA256=' not in source and 'calendar_target=' not in source and 'stats_actual_sha256' in source, 'release must reject unsupported hosts before mutation and omit the inactive Calendar helper')
-check('brew pin twaldin/sketchybar-frozen/sketchybar-system-stats' in source and 'brew list --pinned' in source and 'brew pin sketchybar-system-stats >/dev/null 2>&1 || true' not in source, 'stats_provider pinning must be a verified required postcondition')
+check('sketchybar-system-stats' not in source and '/opt/homebrew/bin/stats_provider' not in source,
+      'legacy unified stats provider must be retired')
+check('public_stats_build=$(/usr/bin/mktemp -d' in source and
+      '/usr/bin/swift build -c release --package-path "$PUBLIC_STATS_DIR" --scratch-path "$public_stats_build"' in source and
+      'public_stats_candidate="$public_stats_build/release/sketchybar-public-stats"' in source and
+      '"$public_stats_candidate" --self-test' in source and
+      '"$SECURE_INSTALLER" executable "$public_stats_candidate" "$PUBLIC_STATS_BINARY" "$public_stats_candidate_sha256" --self-test' in source and
+      source.index('"$public_stats_candidate" --self-test') < source.index('"$SECURE_INSTALLER" executable') and
+      '"$PUBLIC_STATS_BINARY" --self-test' not in source and
+      '/bin/mkdir -p "$HOME/.local/bin"' not in source and
+      'public_stats_build_cleanup() { /bin/rm -rf "$public_stats_build"; }' in source and
+      'public_stats_test_status' not in source and
+      '$PUBLIC_STATS_DIR/.build' not in source,
+      'the first-party public stats provider must build in private scratch, install, clean, and self-test')
+check(source.index('host_macos_version=$(/usr/bin/sw_vers -productVersion)') <
+      source.index('host-contract "$host_arch" "$host_macos_version"') <
+      source.index('/opt/homebrew/bin/brew install lua') and
+      'CALENDAR_SOURCE_SHA256=' not in source and 'calendar_target=' not in source,
+      'release must reject unsupported hosts before mutation and omit the inactive Calendar helper')
 check('HOME="$stage_home" /usr/bin/make' in source and '"$SECURE_INSTALLER" sbarlua' in source, 'SbarLua must install into owned staging HOME before secure pair publication')
+check('--test-fixtures' not in source and 'SKETCHYBAR_SBARLUA_' not in source,
+      'release installer must not enable or export SbarLua test fixtures')
 check('prepare-sbarlua "$SBARLUA_DIR" "$SBARLUA_COMMIT" "$SBARLUA_LEGACY_SHA256"' in source, 'SbarLua installer must rebuild any pair that fails exact current-or-approved-legacy provenance')
 check('"$CONFIG_DIR/scripts/smoke-config.sh"' in source and source.index('"$CONFIG_DIR/scripts/smoke-config.sh"') > source.index('"$SECURE_INSTALLER" sbarlua'), 'dependency installation must require the complete offline smoke gate after publication')
+check('SKETCHYBAR_LOG_DIR="$HOME/Library/Logs/sketchybar"' in source
+      and '/bin/mkdir -m 0700 "$SKETCHYBAR_LOG_DIR"' in source
+      and '/usr/bin/stat -f %Lp "$SKETCHYBAR_LOG_DIR"' in source,
+      'launchd log directory is not created and validated as owner-only')
 check('>"$SBARLUA_DIR/COMMIT"' not in source, 'SbarLua marker must not use direct shell redirection')
 check('"$SECURE_INSTALLER" prepare-asset "$destination"' in source and '"$SECURE_INSTALLER" asset "$temporary" "$destination"' in source, 'assets must validate and publish through secure same-directory staging')
 commit = 'dba9cc421b868c918d5c23c408544a28aadf2f2f'
@@ -34,8 +53,11 @@ new_module_hash = hashlib.sha256(b'new module').hexdigest()
 new_marker = commit + '\n' + new_module_hash + '\n'
 
 
-def run(arguments, environment=None):
-    return subprocess.run([sys.executable, str(helper)] + arguments, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def run(arguments, environment=None, timeout=30):
+    return subprocess.run(
+        [sys.executable, str(helper)] + arguments, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=timeout)
 
 
 for architecture, version, expected in (
@@ -49,36 +71,6 @@ for architecture, version, expected in (
 ):
     validated = run(['host-contract', architecture, version])
     check(validated.returncode == expected, 'host contract boundary fixture failed for ' + architecture + ' ' + version)
-
-
-def calendar_marker(source_hash, binary):
-    return ('version=2\nsource_sha256=' + source_hash + '\ntarget=arm64-apple-macosx15.0\nbuild_mode=-O\nbinary_sha256=' + hashlib.sha256(binary.read_bytes()).hexdigest() + '\n')
-
-
-with tempfile.TemporaryDirectory(prefix='secure-calendar-provenance-test.') as raw:
-    base = pathlib.Path(raw).resolve()
-    source_file = base / 'tiny.c'
-    source_file.write_text('int calendar_fixture(void) { return 0; }\n')
-    binary = base / 'calendar-panel'
-    marker = base / 'SOURCE_SHA256'
-    source_hash = 'a' * 64
-    arm_build = subprocess.run(['/usr/bin/xcrun', 'clang', '-target', 'arm64-apple-macosx15.0', '-c', str(source_file), '-o', str(binary)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    check(arm_build.returncode == 0, 'arm64 calendar provenance fixture must compile')
-    binary.chmod(0o755)
-    marker.write_text(calendar_marker(source_hash, binary))
-    marker.chmod(0o644)
-    exact = run(['calendar-provenance', str(binary), str(marker), source_hash])
-    marker.write_text(source_hash + '\n')
-    legacy = run(['calendar-provenance', str(binary), str(marker), source_hash])
-    marker.write_text(calendar_marker(source_hash, binary))
-    binary.write_bytes(binary.read_bytes() + b'changed')
-    wrong_binary = run(['calendar-provenance', str(binary), str(marker), source_hash])
-    x86_build = subprocess.run(['/usr/bin/xcrun', 'clang', '-target', 'x86_64-apple-macosx15.0', '-c', str(source_file), '-o', str(binary)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    check(x86_build.returncode == 0, 'wrong-architecture calendar provenance fixture must compile')
-    binary.chmod(0o755)
-    marker.write_text(calendar_marker(source_hash, binary))
-    wrong_architecture = run(['calendar-provenance', str(binary), str(marker), source_hash])
-    check(exact.returncode == 0 and legacy.returncode == 75 and wrong_binary.returncode == 75 and wrong_architecture.returncode == 75, 'calendar skip provenance must accept only exact v2 source/target/-O/binary-hash/arm64 state')
 
 
 with tempfile.TemporaryDirectory(prefix='secure-asset-test.') as raw:
@@ -122,6 +114,56 @@ with tempfile.TemporaryDirectory(prefix='secure-asset-parent-test.') as raw:
     linked = run(['prepare-asset', str(linked_parent / 'asset')])
     check(linked.returncode != 0 and not (real_parent / 'asset').exists(), 'symlink asset parent must reject')
 
+with tempfile.TemporaryDirectory(prefix='secure-executable-test.') as raw:
+    base = pathlib.Path(raw).resolve()
+    payload = base / 'provider'
+    payload.write_bytes(b'#!/bin/sh\n[ "$1" = "--self-test" ] || exit 64\nexit 0\n')
+    destination = base / '.local' / 'bin' / 'sketchybar-public-stats'
+    installed = run(['executable', str(payload), str(destination), hashlib.sha256(payload.read_bytes()).hexdigest(), '--self-test'])
+    check(installed.returncode == 0 and destination.read_bytes() == payload.read_bytes()
+          and stat.S_IMODE(destination.stat().st_mode) == 0o755
+          and stat.S_IMODE(destination.parent.stat().st_mode) == 0o700
+          and destination.stat().st_nlink == 1,
+          'executable publication must create a private parent and one owned 0755 file')
+
+    before = destination.read_bytes()
+    wrong_hash = run(['executable', str(payload), str(destination), '0' * 64, '--self-test'])
+    check(wrong_hash.returncode != 0 and destination.read_bytes() == before,
+          'wrong executable checksum must reject before publication')
+
+    failing = base / 'failing-provider'
+    failing.write_bytes(b'#!/bin/sh\nexit 1\n')
+    failed_hash = hashlib.sha256(failing.read_bytes()).hexdigest()
+    failed = run(['executable', str(failing), str(destination), failed_hash, '--self-test'])
+    check(failed.returncode != 0 and destination.read_bytes() == before,
+          'failed staged self-test must preserve the prior executable')
+
+    target = base / 'target-provider'
+    target.write_bytes(b'unchanged')
+    target.chmod(0o755)
+    destination.unlink()
+    destination.symlink_to(target)
+    linked = run(['executable', str(payload), str(destination), hashlib.sha256(payload.read_bytes()).hexdigest(), '--self-test'])
+    check(linked.returncode != 0 and target.read_bytes() == b'unchanged',
+          'executable destination symlink must reject without target mutation')
+    destination.unlink()
+    os.link(target, destination)
+    hard = run(['executable', str(payload), str(destination), hashlib.sha256(payload.read_bytes()).hexdigest(), '--self-test'])
+    check(hard.returncode != 0 and target.read_bytes() == b'unchanged',
+          'hard-linked executable destination must reject')
+
+with tempfile.TemporaryDirectory(prefix='secure-executable-parent-test.') as raw:
+    base = pathlib.Path(raw).resolve()
+    payload = base / 'provider'
+    payload.write_bytes(b'#!/bin/sh\n[ "$1" = "--self-test" ] || exit 64\nexit 0\n')
+    for mode in (0o755, 0o777):
+        parent = base / ('bin-' + oct(mode))
+        parent.mkdir(mode=mode)
+        parent.chmod(mode)
+        rejected = run(['executable', str(payload), str(parent / 'provider'), hashlib.sha256(payload.read_bytes()).hexdigest(), '--self-test'])
+        check(rejected.returncode != 0 and not (parent / 'provider').exists(),
+              'non-private executable parent must reject: ' + oct(mode))
+
 with tempfile.TemporaryDirectory(prefix='secure-sbarlua-test.') as raw:
     base = pathlib.Path(raw).resolve()
     directory = base / 'sketchybar_lua'
@@ -142,14 +184,32 @@ with tempfile.TemporaryDirectory(prefix='secure-sbarlua-test.') as raw:
     marker.write_text('preserved marker\n')
     before_modes = (stat.S_IMODE(module.stat().st_mode), stat.S_IMODE(marker.stat().st_mode))
     before_identities = ((module.stat().st_dev, module.stat().st_ino), (marker.stat().st_dev, marker.stat().st_ino))
+    fixture_values = {
+        'SKETCHYBAR_SBARLUA_SIGNAL_READY': str(base / 'ungated-signal-ready'),
+        'SKETCHYBAR_SBARLUA_ABORT_AFTER_MODULE': '1',
+        'SKETCHYBAR_SBARLUA_FAIL_MARKER': '1',
+        'SKETCHYBAR_SBARLUA_SUCCESS_READY': str(base / 'ungated-success-ready'),
+    }
+    for fixture_name, fixture_value in fixture_values.items():
+        leaked_environment = dict(os.environ, **{fixture_name: fixture_value})
+        ungated = run(
+            ['sbarlua', str(staged), commit, str(directory)],
+            leaked_environment, timeout=5)
+        check(ungated.returncode == 64
+              and module.read_bytes() == b'preserved module'
+              and marker.read_text() == 'preserved marker\n',
+              'production SbarLua publication must reject leaked fixture environment before mutation: '
+              + fixture_name)
     failed_environment = dict(os.environ, SKETCHYBAR_SBARLUA_FAIL_MARKER='1')
-    failed = run(['sbarlua', str(staged), commit, str(directory)], failed_environment)
+    failed = run(
+        ['sbarlua', str(staged), commit, str(directory), '--test-fixtures'],
+        failed_environment)
     after_identities = ((module.stat().st_dev, module.stat().st_ino), (marker.stat().st_dev, marker.stat().st_ino))
     marker_failure_residue = [path.name for path in directory.iterdir() if path.name not in {'sketchybar.so', 'COMMIT'}]
     check(failed.returncode != 0 and module.read_bytes() == b'preserved module' and marker.read_text() == 'preserved marker\n' and before_modes == (stat.S_IMODE(module.stat().st_mode), stat.S_IMODE(marker.stat().st_mode)) and before_identities == after_identities and marker_failure_residue == [], 'marker failure must restore the exact prior pair without transaction residue')
     signal_ready = base / 'signal-ready'
     signal_environment = dict(os.environ, SKETCHYBAR_SBARLUA_SIGNAL_READY=str(signal_ready))
-    interrupted_process = subprocess.Popen([sys.executable, str(helper), 'sbarlua', str(staged), commit, str(directory)], env=signal_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    interrupted_process = subprocess.Popen([sys.executable, str(helper), 'sbarlua', str(staged), commit, str(directory), '--test-fixtures'], env=signal_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     for _ in range(500):
         if signal_ready.exists() or interrupted_process.poll() is not None:
             break
@@ -163,7 +223,7 @@ with tempfile.TemporaryDirectory(prefix='secure-sbarlua-test.') as raw:
 
     success_ready = base / 'success-ready'
     success_environment = dict(os.environ, SKETCHYBAR_SBARLUA_SUCCESS_READY=str(success_ready))
-    success_process = subprocess.Popen([sys.executable, str(helper), 'sbarlua', str(staged), commit, str(directory)], env=success_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    success_process = subprocess.Popen([sys.executable, str(helper), 'sbarlua', str(staged), commit, str(directory), '--test-fixtures'], env=success_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     for _ in range(500):
         if success_ready.exists() or success_process.poll() is not None:
             break
@@ -218,7 +278,7 @@ with tempfile.TemporaryDirectory(prefix='secure-sbarlua-first-failure-test.') as
     staged.write_bytes(b'new module')
     staged.chmod(0o755)
     prepared = run(['prepare-sbarlua', str(directory), commit, new_module_hash])
-    failed = run(['sbarlua', str(staged), commit, str(directory)], dict(os.environ, SKETCHYBAR_SBARLUA_FAIL_MARKER='1'))
+    failed = run(['sbarlua', str(staged), commit, str(directory), '--test-fixtures'], dict(os.environ, SKETCHYBAR_SBARLUA_FAIL_MARKER='1'))
     check(prepared.returncode != 0 and failed.returncode != 0 and not (directory / 'sketchybar.so').exists() and not (directory / 'COMMIT').exists(), 'first-install marker failure must leave no divergent pair')
 
 print('Secure asset and SbarLua install contracts passed')

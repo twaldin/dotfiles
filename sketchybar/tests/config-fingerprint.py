@@ -9,11 +9,36 @@ settings = root / "settings.lua"
 pattern = re.compile(r'(release_fingerprint\s*=\s*")[0-9a-f]{64}("\s*,)')
 
 def runtime_paths():
-    values = [root / "sketchybarrc"]
+    values = [root / "sketchybarrc", root / "install-deps.sh"]
     values.extend(path for path in root.glob("*.lua") if path.is_file())
     for directory in (root / "items", root / "lib"):
         values.extend(path for path in directory.rglob("*.lua") if path.is_file())
+    scripts = root / "scripts"
+    values.extend(path for path in scripts.rglob("*")
+                  if path.is_file() and path.suffix in {".py", ".sh", ".swift"})
+    provider = root / "providers" / "public-stats"
+    values.append(provider / "Package.swift")
+    values.extend(path for path in (provider / "Sources").rglob("*") if path.is_file())
+    values.extend(path for path in (root / "launch-agents").glob("*.plist") if path.is_file())
     return sorted(set(values), key=lambda path: path.relative_to(root).as_posix())
+
+required_runtime_paths = {
+    root / "install-deps.sh",
+    root / "scripts/audio-state.py",
+    root / "scripts/battery-state.py",
+    root / "scripts/battery-state.swift",
+    root / "scripts/connectivity-state.py",
+    root / "scripts/provider-launch.sh",
+    root / "scripts/provider-log.py",
+    root / "scripts/secure-file-install.py",
+    root / "scripts/system-controls.swift",
+    root / "providers/public-stats/Package.swift",
+    root / "launch-agents/homebrew.mxcl.sketchybar.plist",
+}
+missing_runtime_paths = required_runtime_paths.difference(runtime_paths())
+if missing_runtime_paths:
+    raise SystemExit("release fingerprint omits required production sources")
+
 
 def normalized(path):
     data = path.read_bytes()

@@ -12,15 +12,16 @@ if document["ok"] is not True or document["schema"] != 2:
     raise SystemExit(1)
 checks = document["checks"]
 expected = {
-    "battery", "conditions", "cpu", "memory_pressure", "metal",
+    "battery", "conditions", "cpu", "cpu_detail", "memory_pressure", "metal",
     "network_counters", "network_path", "swap", "vm", "volume",
 }
 if set(checks) != expected:
     raise SystemExit(1)
 allowed = {
-    "battery": {"present", "absent"},
+    "battery": {"present", "absent", "unavailable", "ambiguous"},
     "conditions": {"closed_read"},
     "cpu": {"ok"},
+    "cpu_detail": {"ok"},
     "memory_pressure": {"source_created"},
     "metal": {"ok", "absent"},
     "network_counters": {"ok", "unavailable"},

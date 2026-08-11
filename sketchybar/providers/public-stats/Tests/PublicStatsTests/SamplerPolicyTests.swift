@@ -284,7 +284,7 @@ struct SamplerPolicyTests {
         }
     }
 
-    func testSelfTestUsesBoundedCPUSamplingAndFailsUnprovedBattery() throws {
+    func testSelfTestUsesBoundedCPUAndDetailSamplingAndAllowsOptionalBatteryDegradation() throws {
         let testFile = URL(fileURLWithPath: #filePath)
         let root = testFile.deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -292,9 +292,11 @@ struct SamplerPolicyTests {
                                 encoding: .utf8)
         XCTAssertTrue(source.contains("let deadline = DispatchTime.now() + .seconds(3)"))
         XCTAssertTrue(source.contains("if sample.valid { return true }"))
-        XCTAssertTrue(source.contains("pressureOK && batteryOK && contractOK"))
-        XCTAssertTrue(source.contains("batteryReading.batteryStatus == .present"))
-        XCTAssertTrue(source.contains("batteryReading.batteryStatus == .absent"))
+        XCTAssertTrue(source.contains("cpuOK && cpuDetailOK"))
+        XCTAssertTrue(source.contains("pressureOK && contractOK"))
+        XCTAssertTrue(source.contains("readPerCoreCPUTicks()"))
+        XCTAssertFalse(source.contains("batteryOK"))
+        XCTAssertTrue(source.contains("let batteryState = batteryReading.batteryStatus.rawValue"))
     }
 
     func testStartupTransactionPrecedesCallbackConsumption() throws {
@@ -315,6 +317,7 @@ struct SamplerPolicyTests {
         XCTAssertTrue(source.contains("batteryPendingDuringStartup = true"))
         XCTAssertTrue(source.contains("producerInstance = instance"))
         XCTAssertTrue(source.contains("battery.batterySequence = next"))
+        XCTAssertTrue(source.contains("cpuDetail.cpuDetailSequence = next"))
         XCTAssertTrue(source.contains("metrics.metricsSequence = next"))
     }
 
@@ -322,6 +325,7 @@ struct SamplerPolicyTests {
         XCTAssertNil(batteryWatcherDiagnostic(installed: true))
         XCTAssertEqual(batteryWatcherDiagnostic(installed: false), "E_BATTERY_WATCH")
         XCTAssertEqual(contractDiagnostic(for: .metrics), "E_METRICS_CONTRACT")
+        XCTAssertEqual(contractDiagnostic(for: .cpuDetail), "E_CPU_DETAIL_CONTRACT")
         XCTAssertEqual(contractDiagnostic(for: .battery), "E_BATTERY_CONTRACT")
     }
 
@@ -335,6 +339,140 @@ struct SamplerPolicyTests {
             "GPU_CAPS_VALID", "GPU_PRESENT", "GPU_UNIFIED", "GPU_LOW_POWER", "GPU_REMOVABLE",
             "GPU_HEADLESS", "GPU_RECOMMENDED_MAX_B", "GPU_ACTIVITY_VALID",
         ])
+    }
+
+    func testPerCoreSourceUsesGenericPublicMachDataWithoutTopologyClaims() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let root = testFile.deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/PublicStats/PerCoreCPUSampler.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(source.contains("host_processor_info"))
+        XCTAssertTrue(source.contains("PROCESSOR_CPU_LOAD_INFO"))
+        XCTAssertFalse(source.contains("sysctl"))
+        XCTAssertFalse(source.lowercased().contains("performancecore"))
+        XCTAssertFalse(source.lowercased().contains("efficiencycore"))
+    }
+
+    func testPartialMetricsResetClearsEveryUnsampledDomain() {
+        var snapshot = MetricsSnapshot(producerInstance: "0123456789abcdef0123456789abcdef",
+                                       logicalProcessors: 8, activeProcessors: 6)
+        snapshot.cpuValid = true
+        snapshot.cpuBusyPercent = 25
+        snapshot.cpuIdlePercent = 75
+        snapshot.memoryValid = true
+        snapshot.memoryTotalBytes = 100
+        snapshot.memoryUsedBytes = 60
+        snapshot.memoryAvailableBytes = 40
+        snapshot.swapValid = true
+        snapshot.swapTotalBytes = 10
+        snapshot.swapUsedBytes = 5
+        snapshot.storageValid = true
+        snapshot.storageTotalBytes = 100
+        snapshot.storageFreeBytes = 20
+        snapshot.storageUsedBytes = 80
+        snapshot.storageUsedPercent = 80
+        snapshot.importantAvailableBytes = 15
+        snapshot.networkSampled = true
+        snapshot.networkValid = true
+        snapshot.networkState = .satisfied
+        snapshot.networkPathType = .wifi
+        snapshot.networkReceiveBytesPerSecond = 9
+        snapshot.thermalValid = true
+        snapshot.thermalState = .nominal
+        snapshot.pressureValid = true
+        snapshot.pressureState = .normal
+        snapshot.lowPowerState = .on
+        snapshot.gpuCapabilitiesValid = true
+        snapshot.gpuPresent = true
+        snapshot.gpuUnified = true
+
+        resetForPartialMetricsEvent(&snapshot)
+
+        XCTAssertFalse(snapshot.cpuSampled || snapshot.cpuValid)
+        XCTAssertEqual(snapshot.cpuBusyPercent, 0)
+        XCTAssertEqual(snapshot.cpuLogical, 8)
+        XCTAssertEqual(snapshot.cpuActive, 6)
+        XCTAssertFalse(snapshot.memorySampled || snapshot.memoryValid || snapshot.swapValid)
+        XCTAssertEqual(snapshot.memoryTotalBytes, 0)
+        XCTAssertEqual(snapshot.swapTotalBytes, 0)
+        XCTAssertFalse(snapshot.storageSampled || snapshot.storageValid)
+        XCTAssertNil(snapshot.importantAvailableBytes)
+        XCTAssertFalse(snapshot.networkSampled || snapshot.networkValid)
+        XCTAssertEqual(snapshot.networkState, .unknown)
+        XCTAssertEqual(snapshot.networkPathType, .unknown)
+        XCTAssertFalse(snapshot.conditionSampled || snapshot.thermalValid || snapshot.pressureValid)
+        XCTAssertEqual(snapshot.thermalState, .unknown)
+        XCTAssertEqual(snapshot.pressureState, .unknown)
+        XCTAssertEqual(snapshot.lowPowerState, .offOrUnsupported)
+        XCTAssertTrue(snapshot.gpuCapabilitiesValid && snapshot.gpuPresent && snapshot.gpuUnified)
+    }
+
+    func testNetworkResetObservationSerializesAsSampledInvalidPath() throws {
+        let selection = PathSelection(state: .satisfied, type: .wifi, names: ["en0"],
+                                      expensive: true, constrained: false)
+        let observation = resetNetworkObservation(selection)
+        XCTAssertTrue(observation.sampled)
+        XCTAssertFalse(observation.valid)
+        XCTAssertEqual(observation.state, .satisfied)
+        XCTAssertEqual(observation.type, .wifi)
+        XCTAssertTrue(observation.expensive)
+        XCTAssertEqual(observation.receiveBytesPerSecond, 0)
+        XCTAssertEqual(observation.transmitBytesPerSecond, 0)
+
+        var snapshot = MetricsSnapshot(producerInstance: "0123456789abcdef0123456789abcdef",
+                                       logicalProcessors: 2, activeProcessors: 2)
+        resetForPartialMetricsEvent(&snapshot)
+        snapshot.networkSampled = observation.sampled
+        snapshot.networkValid = observation.valid
+        snapshot.networkState = observation.state
+        snapshot.networkPathType = observation.type
+        snapshot.networkReceiveBytesPerSecond = observation.receiveBytesPerSecond
+        snapshot.networkTransmitBytesPerSecond = observation.transmitBytesPerSecond
+        snapshot.networkExpensive = observation.expensive
+        snapshot.networkConstrained = observation.constrained
+        _ = try ContractSerializer.metrics(snapshot)
+    }
+
+    func testSerializerRejectsStaleUnsampledDomains() {
+        func rejected(_ snapshot: MetricsSnapshot) -> Bool {
+            do { _ = try ContractSerializer.metrics(snapshot); return false }
+            catch { return true }
+        }
+        let instance = "0123456789abcdef0123456789abcdef"
+        var cpu = MetricsSnapshot(producerInstance: instance, logicalProcessors: 2, activeProcessors: 2)
+        cpu.cpuSampled = false
+        cpu.cpuLoad1 = 1
+        XCTAssertTrue(rejected(cpu))
+        var network = MetricsSnapshot(producerInstance: instance, logicalProcessors: 2, activeProcessors: 2)
+        network.networkState = .satisfied
+        network.networkPathType = .wifi
+        XCTAssertTrue(rejected(network))
+        var conditions = MetricsSnapshot(producerInstance: instance, logicalProcessors: 2, activeProcessors: 2)
+        conditions.conditionSampled = false
+        conditions.lowPowerState = .on
+        XCTAssertTrue(rejected(conditions))
+    }
+
+    func testSerializedCPUComponentsMatchConsumerTolerance() throws {
+        var snapshot = MetricsSnapshot(producerInstance: "0123456789abcdef0123456789abcdef",
+                                       logicalProcessors: 2, activeProcessors: 2)
+        snapshot.cpuValid = true
+        snapshot.cpuUserPercent = 33.3334
+        snapshot.cpuNicePercent = 33.3334
+        snapshot.cpuSystemPercent = 0.0004
+        snapshot.cpuBusyPercent = snapshot.cpuUserPercent + snapshot.cpuNicePercent + snapshot.cpuSystemPercent
+        snapshot.cpuIdlePercent = 100 - snapshot.cpuBusyPercent
+        let fields = Dictionary(uniqueKeysWithValues: try ContractSerializer.metrics(snapshot).fields)
+        let busy = Double(fields["CPU_BUSY_PCT"] ?? "") ?? .nan
+        let user = Double(fields["CPU_USER_PCT"] ?? "") ?? .nan
+        let nice = Double(fields["CPU_NICE_PCT"] ?? "") ?? .nan
+        let system = Double(fields["CPU_SYSTEM_PCT"] ?? "") ?? .nan
+        XCTAssertTrue(busy.isFinite && user.isFinite && nice.isFinite && system.isFinite)
+        XCTAssertTrue(abs(busy - user - nice - system)
+                      <= ContractSerializer.serializedPercentageTolerance)
     }
 
     private func description(current: Int64 = 50, maximum: Int64 = 100,

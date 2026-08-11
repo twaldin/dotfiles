@@ -23,6 +23,10 @@ local function action_value(value)
   return type(value) == "function" and value() or value
 end
 
+local function checked_options(value)
+  return type(value) == "table" and value or {}
+end
+
 local function merge(target, source)
   for key, value in pairs(source or {}) do
     if type(value) == "table" and type(target[key]) == "table" then
@@ -128,8 +132,8 @@ end
 local function new_entry(kind, host, suffix, properties, width)
   local name = string.format("popup.%s.%s", host.name, suffix)
   local item
-  if kind == "slider" then
-    item = sbar.add("slider", name, width, properties)
+  if kind == "slider" or kind == "graph" then
+    item = sbar.add(kind, name, width, properties)
   else
     item = sbar.add("item", name, properties)
   end
@@ -174,6 +178,7 @@ function M.close()
   if host then
     host:set({ popup = { drawing = false } })
     host_visual(host, false, options)
+    if hover.is_active(host) then hover.clear() end
     if options and options.on_close then options.on_close() end
   end
   remove_dynamic()
@@ -215,7 +220,7 @@ end
 function M.action(row, options)
   local entry = M.row_entries[row]
   if not interactive_entry(entry) then return nil end
-  options = options or {}
+  options = checked_options(options)
   entry.action_enabled = true
   entry.selected = options.selected == true
   entry.selected_color = options.selected_color or colors.surface
@@ -240,27 +245,32 @@ local function row_properties(host, suffix, properties)
     width = settings.popup_width,
     padding_left = 0,
     padding_right = 0,
-    background = { drawing = false, color = colors.transparent, height = 30, corner_radius = 0 },
+    background = { drawing = false, color = colors.transparent, height = settings.popup_layout.row_height, corner_radius = 0 },
     icon = { drawing = false, width = 0, padding_left = 0, padding_right = 0 },
     label = {
       string = "—",
       color = colors.normal,
-      width = settings.popup_width - 20,
+      width = settings.popup_width - (2 * settings.popup_layout.gutter),
       align = "left",
-      padding_left = 10,
-      padding_right = 10,
-      max_chars = 38,
+      padding_left = settings.popup_layout.gutter,
+      padding_right = settings.popup_layout.gutter,
+      font = settings.type.popup_row,
     },
   }
   if suffix == "heading" then
-    base.background = { drawing = true, color = colors.surface2, height = 32, corner_radius = 0 }
+    base.background = { drawing = true, color = colors.surface2, height = settings.popup_layout.heading_height, corner_radius = 0 }
     base.label.color = colors.primary
-    base.label.font = settings.font .. ":Bold:11.0"
+    base.label.font = settings.type.popup_head
   elseif suffix:match("_heading$") then
     base.label.color = colors.primary
-    base.label.font = settings.font .. ":Bold:11.0"
+    base.label.font = settings.type.popup_head
   end
-  return merge(base, properties)
+  local result = merge(base, properties)
+  if not (properties and properties.label and properties.label.width ~= nil) then
+    local icon_width = result.icon and result.icon.drawing ~= false and tonumber(result.icon.width) or 0
+    result.label.width = math.max(0, settings.popup_width - 20 - (icon_width or 0))
+  end
+  return result
 end
 
 function M.row(host, token, suffix, properties)
@@ -276,6 +286,119 @@ function M.row(host, token, suffix, properties)
   end
   entry.item:set({ background = { drawing = base.background.drawing == true } })
   return remember_entry(entry)
+end
+
+function M.header(host, token, title, chip, options)
+  options = checked_options(options)
+  local text = tostring(title or "")
+  if chip and tostring(chip) ~= "" then text = text .. "  ·  " .. tostring(chip) end
+  return M.row(host, token, "heading", {
+    background = { drawing = true, color = colors.surface2, height = settings.popup_layout.heading_height },
+    label = {
+      string = text, align = "center", color = options.color or colors.primary,
+      font = settings.type.popup_head, max_chars = 44,
+    },
+  })
+end
+
+function M.field(host, token, suffix, label, value, options)
+  options = checked_options(options)
+  local layout = settings.popup_layout
+  local left_width = settings.popup_width - (2 * layout.gutter) - layout.column_gap - layout.value_width
+  return M.row(host, token, suffix, {
+    background = { drawing = options.selected == true, color = options.background or colors.surface2, height = options.height or layout.row_height },
+    icon = {
+      drawing = true, string = tostring(label or ""), color = options.label_color or colors.primary,
+      width = left_width, align = "left", padding_left = layout.gutter, padding_right = 0,
+      font = options.font or settings.type.popup_row, max_chars = options.label_max_chars or 28,
+    },
+    label = {
+      drawing = true, string = tostring(value == nil and "—" or value), color = options.value_color or options.color or colors.primary,
+      width = layout.value_width, align = "right", padding_left = layout.column_gap,
+      padding_right = layout.gutter, font = options.font or settings.type.popup_row,
+      max_chars = options.value_max_chars or 16,
+    },
+  })
+end
+
+function M.note(host, token, suffix, text, options)
+  options = checked_options(options)
+  return M.row(host, token, suffix, {
+    background = { drawing = options.background ~= nil, color = options.background or colors.transparent, height = options.height or settings.popup_layout.row_height },
+    label = {
+      string = tostring(text or ""), color = options.color or colors.muted,
+      align = options.align or "left", font = options.font or settings.type.popup_row,
+      max_chars = options.max_chars or 48,
+    },
+  })
+end
+
+function M.axis(host, token, suffix, left, right)
+  return M.field(host, token, suffix, left, right, {
+    height = settings.popup_layout.axis_height, font = settings.type.popup_axis,
+    label_color = colors.muted, value_color = colors.muted,
+  })
+end
+
+function M.section(host, token, suffix, title)
+  return M.row(host, token, suffix, {
+    background = { drawing = true, color = colors.surface, height = settings.popup_layout.section_height },
+    icon = {
+      drawing = true, string = "▎", width = 20, color = colors.blue,
+      padding_left = 8, padding_right = 0,
+    },
+    label = {
+      string = tostring(title or ""), color = colors.muted, align = "left",
+      padding_left = 4, padding_right = 10,
+      font = settings.type.popup_section,
+    },
+  })
+end
+
+local function left_click(env)
+  return not env.BUTTON or env.BUTTON == "left"
+end
+
+function M.choice(host, token, suffix, label, selected, callback, options)
+  options = checked_options(options)
+  local row = M.row(host, token, suffix, {
+    icon = {
+      drawing = true, string = options.icon or (selected and "✓" or ""), width = 24,
+      color = options.color or colors.green, padding_left = 8, padding_right = 0,
+    },
+    label = { string = label, color = selected and colors.primary or colors.muted },
+    background = { drawing = selected, color = colors.surface2 },
+  })
+  if not row then return nil end
+  M.action(row, {
+    selected = selected, idle_color = selected and colors.primary or colors.muted,
+    idle_icon_color = selected and (options.color or colors.green) or colors.muted,
+  })
+  if type(callback) == "function" and (options.allow_selected or not selected) then
+    M.on_click(row, function(env)
+      if left_click(env or {}) and M.is_current(host, token) then callback() end
+    end)
+  end
+  return row
+end
+
+function M.link(host, token, suffix, label, callback, options)
+  options = checked_options(options)
+  local row = M.row(host, token, suffix, {
+    icon = {
+      drawing = true, string = options.icon or "↗", width = 24,
+      color = options.color or colors.blue, padding_left = 8, padding_right = 0,
+    },
+    label = { string = label, color = colors.primary },
+  })
+  if not row then return nil end
+  M.action(row, { idle_color = colors.primary, idle_icon_color = options.color or colors.blue })
+  M.on_click(row, function(env)
+    if not left_click(env or {}) or not M.is_current(host, token) then return end
+    M.close()
+    callback()
+  end)
+  return row
 end
 
 function M.rebuild(host, token, builder)
@@ -312,8 +435,9 @@ function M.rebuild(host, token, builder)
   return next(seen) ~= nil
 end
 
-function M.slider(host, token, suffix, percentage, on_click)
+function M.slider(host, token, suffix, percentage, on_click, options)
   if not M.is_current(host, token) then return nil end
+  options = checked_options(options)
   local width = settings.popup_width - 16
   local properties = {
     drawing = true,
@@ -327,7 +451,7 @@ function M.slider(host, token, suffix, percentage, on_click)
     slider = {
       percentage = percentage,
       width = width,
-      highlight_color = colors.accent,
+      highlight_color = options.color or colors.accent,
       background = {
         color = colors.surface2,
         height = 4,
@@ -336,11 +460,11 @@ function M.slider(host, token, suffix, percentage, on_click)
         border_color = colors.transparent,
       },
       knob = {
-        drawing = true,
+        drawing = options.knob ~= false,
         string = "●",
         color = colors.active,
         highlight_color = colors.active,
-        font = { family = settings.font, style = "Regular", size = 13.0 },
+        font = settings.type.popup_action_icon,
         background = { drawing = false },
       },
     },
@@ -353,15 +477,82 @@ function M.slider(host, token, suffix, percentage, on_click)
     if obsolete then remove_entry(obsolete) end
     entry = new_entry("slider", host, suffix, properties, width)
   end
-  entry.click_callback = function(env)
-    if M.is_current(host, token) then on_click(env) end
+  if type(on_click) == "function" then
+    entry.click_callback = function(env)
+      if M.is_current(host, token) then on_click(env) end
+    end
+  else
+    entry.click_callback = nil
   end
   entry.item:set({ background = { drawing = false, color = colors.transparent } })
   return remember_entry(entry)
 end
 
+function M.meter(host, token, suffix, percentage, color)
+  return M.slider(host, token, suffix, percentage, nil, { knob = false, color = color })
+end
+
+function M.graph(host, token, suffix, values, current, options)
+  if not M.is_current(host, token) then return nil end
+  options = checked_options(options)
+  local width = settings.popup_width - 16
+  local properties = {
+    drawing = true,
+    position = "popup." .. host.name,
+    display = "active",
+    padding_left = 8,
+    padding_right = 8,
+    background = {
+      drawing = true,
+      color = options.background or colors.surface2,
+      height = options.height or 76,
+      corner_radius = 0,
+    },
+    icon = { drawing = false },
+    label = { drawing = false },
+    graph = {
+      color = options.color or colors.blue,
+      fill_color = options.fill_color or colors.transparent,
+      line_width = options.line_width or 1,
+    },
+  }
+  local entry = existing_entry("graph", suffix)
+  local created = false
+  if entry then
+    entry.item:set(properties)
+  else
+    local obsolete = M.entries[suffix]
+    if obsolete then remove_entry(obsolete) end
+    entry = new_entry("graph", host, suffix, properties, width)
+    created = true
+  end
+  local function normalized(value)
+    value = tonumber(value)
+    return value and (math.max(0, math.min(100, value)) / 100) or nil
+  end
+  local reset = not created and options.reset_id ~= nil and options.reset_id ~= entry.reset_id
+  if created or reset then
+    local source = values or {}
+    if #source == 0 and tonumber(current) then source = { current } end
+    local points = {}
+    if #source > 0 then
+      for index = 1, width do
+        local source_index = #source == 1 and 1 or math.floor((index - 1) * (#source - 1) / (width - 1)) + 1
+        points[#points + 1] = normalized(source[source_index]) or 0
+      end
+      entry.item:push(points)
+    end
+    entry.last_sample_id = options.sample_id
+    entry.reset_id = options.reset_id
+  elseif tonumber(current) and (options.sample_id == nil or options.sample_id ~= entry.last_sample_id) then
+    entry.item:push({ normalized(current) })
+    entry.last_sample_id = options.sample_id
+  end
+  return remember_entry(entry)
+end
+
 function M.open(host, options)
-  options = options or {}
+  options = checked_options(options)
   if M.open_host then M.close() end
   M.open_host = host
   M.open_options = options
@@ -383,7 +574,7 @@ function M.toggle(host, options)
 end
 
 function M.bind(host, options)
-  options = options or {}
+  options = checked_options(options)
   host:set({
     popup = {
       align = options.align or "left",

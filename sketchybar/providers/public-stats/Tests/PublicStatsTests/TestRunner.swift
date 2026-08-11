@@ -9,6 +9,7 @@ enum PrototypeTestRunner {
         let policy = SamplerPolicyTests()
         let tests: [(String, () throws -> Void)] = [
             ("contract.metrics-v2", contract.testInitialMetricsHasExactV2KeysAndFixedValues),
+            ("contract.cpu-detail-v1", contract.testCPUDetailHasExactFixedV1ShapeAndValidatesRelations),
             ("contract.ssd-explicit", contract.testImportantAvailabilityHasExplicitRequiredFields),
             ("contract.battery-v2", contract.testBatteryHasExactUnavailableV2Schema),
             ("contract.battery-status", contract.testBatterySerializerAcceptsEveryExactStatusShape),
@@ -17,7 +18,7 @@ enum PrototypeTestRunner {
             ("contract.metrics-valid", contract.testMetricsSerializerAcceptsEveryValidDomainShape),
             ("contract.battery-invalid", contract.testSerializerRejectsInvalidBatteryRelationsAndRanges),
             ("contract.closed", contract.testClosedFieldValidatorRejectsOrderMissingDuplicateUnexpectedAndNonASCII),
-            ("contract.argv", contract.testEmitterArgumentsUseFixedV2Grammar),
+            ("contract.argv", contract.testEmitterArgumentsUseFixedEventGrammar),
             ("contract.pending", contract.testPendingEventsCoalesceAndPreserveIndependentStreamOrder),
             ("contract.instance", contract.testProducerInstanceGrammarIsStrictAndGeneratedValueConforms),
             ("contract.freshness", contract.testProducerCursorCoordinatesLossyRestartReplayFreshnessAndIndependentDomains),
@@ -27,6 +28,9 @@ enum PrototypeTestRunner {
             ("delta.cpu-normal", delta.testCPUNormalSplit),
             ("delta.cpu-invalid", delta.testCPUZeroDeltaGapAndImplausibleResetAreInvalid),
             ("delta.cpu-wrap", delta.testCPUOneLaneWrapIsAccepted),
+            ("delta.cpu-detail-reset", delta.testPerCoreFirstSampleResetAndShapeChangesAreInvalid),
+            ("delta.cpu-detail-normal", delta.testPerCoreProducesOneNeutralBusyValuePerLogicalCore),
+            ("delta.cpu-detail-invalid", delta.testPerCoreRejectsZeroDeltaGapAndImplausibleLaneReset),
             ("delta.vm", delta.testMemoryFormulaForPageSizesPurgeableAndClamp),
             ("delta.vm-invalid", delta.testMemoryAndSwapRejectInvalidArithmetic),
             ("delta.volume", delta.testVolumeValidation),
@@ -50,10 +54,15 @@ enum PrototypeTestRunner {
             ("policy.battery-types", policy.testCapacityAndBooleanValueTypesAndRangesAreRejected),
             ("policy.providing-source", policy.testGlobalProvidingSourceIsClosed),
             ("policy.parser-reachability", policy.testEveryParsedBatteryStateIsSerializerReachable),
-            ("policy.self-test-policy", policy.testSelfTestUsesBoundedCPUSamplingAndFailsUnprovedBattery),
+            ("policy.self-test-policy", policy.testSelfTestUsesBoundedCPUAndDetailSamplingAndAllowsOptionalBatteryDegradation),
             ("policy.startup-order", policy.testStartupTransactionPrecedesCallbackConsumption),
             ("policy.battery-watch", policy.testBatteryWatcherFailureHasFixedDegradedDiagnostic),
             ("policy.metal", policy.testStaticMetalContractCannotRepresentActivityValue),
+            ("policy.cpu-detail-source", policy.testPerCoreSourceUsesGenericPublicMachDataWithoutTopologyClaims),
+            ("policy.partial-reset", policy.testPartialMetricsResetClearsEveryUnsampledDomain),
+            ("policy.network-reset", policy.testNetworkResetObservationSerializesAsSampledInvalidPath),
+            ("policy.unsampled-relations", policy.testSerializerRejectsStaleUnsampledDomains),
+            ("policy.cpu-rounding", policy.testSerializedCPUComponentsMatchConsumerTolerance),
         ]
         for (name, test) in tests {
             do { try test() }

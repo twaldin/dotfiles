@@ -1,13 +1,15 @@
+local settings = require("settings")
 local M = {
-  event_max_width = 256,
-  edge_padding = 8,
-  content_gap = 8,
-  title_narrow_advance = 5.4,
-  title_fallback_advance = 24.0,
-  title_oversized_advance = 64.0,
+  event_max_width = settings.right_layout.calendar_event_width,
+  edge_padding = settings.spacing.edge,
+  content_gap = settings.spacing.item,
+  -- Conservative width bounds certified for the supported 36-point bar.
+  title_narrow_advance = 6.9,
+  title_fallback_advance = 27.0,
+  title_oversized_advance = 75.0,
   title_font_postscript = "JetBrainsMonoNF-SemiBold",
-  title_font_size = 9.0,
-  detail_advance = 4.8,
+  title_font_size = 11.5,
+  detail_advance = 6.0,
 }
 
 function M.detail_width(detail)

@@ -9,48 +9,46 @@ CONFIG_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 SECURE_INSTALLER="$CONFIG_DIR/scripts/secure-file-install.py"
 SYSTEM_CONTROLS_HELPER_DIR="$HOME/.local/share/sketchybar-controls"
 SYSTEM_CONTROLS_SOURCE="$CONFIG_DIR/scripts/system-controls.swift"
-SYSTEM_CONTROLS_SOURCE_SHA256=ebdca705586046f967eff2832abe683536badc5c74e8c206e8914a1e7b9220d1
+SYSTEM_CONTROLS_SOURCE_SHA256=bb2e07839781cd5a5cc7a68e3c4855ef4a3e1cc78de585f2086af278ff41461b
+AUDIO_COORDINATOR_SOURCE="$CONFIG_DIR/scripts/audio-state.py"
+AUDIO_COORDINATOR_SOURCE_SHA256=e20c622aa87372a941a01bec76a0815074c2d2350ca67a32d3032ce834b166fb
+
+uid=$(/usr/bin/id -u)
+runtime_base_input=${TMPDIR:-}
+case "$runtime_base_input" in /*) ;; *) echo "Installer requires macOS per-user TMPDIR (exit 64)" >&2; exit 64 ;; esac
+runtime_base=$(CDPATH='' cd -P -- "$runtime_base_input" 2>/dev/null && pwd -P) || { echo "Installer requires a safe per-user TMPDIR (exit 73)" >&2; exit 73; }
+[ -d "$runtime_base" ] && [ ! -L "$runtime_base" ]   && [ "$(/usr/bin/stat -f %u "$runtime_base")" = "$uid" ]   && [ "$(/usr/bin/stat -f %Lp "$runtime_base")" = 700 ]   || { echo "Installer requires a safe per-user TMPDIR (exit 73)" >&2; exit 73; }
 
 command -v /opt/homebrew/bin/brew >/dev/null 2>&1 || { echo "Homebrew is required at /opt/homebrew/bin/brew" >&2; exit 69; }
-STATS_FORMULA="$CONFIG_DIR/deps/sketchybar-system-stats.rb"
-STATS_FORMULA_SHA256=639b236a164c049a98eab97265b8a3c333c5c5f39e7a95544302c89247715d55
+PUBLIC_STATS_DIR="$CONFIG_DIR/providers/public-stats"
+PUBLIC_STATS_BINARY="$HOME/.local/share/sketchybar-provider/sketchybar-public-stats"
 host_arch=$(/usr/bin/uname -m)
 host_macos_version=$(/usr/bin/sw_vers -productVersion)
 "$SECURE_INSTALLER" host-contract "$host_arch" "$host_macos_version"
 [ "$(/usr/bin/shasum -a 256 "$SYSTEM_CONTROLS_SOURCE" | /usr/bin/awk '{print $1}')" = "$SYSTEM_CONTROLS_SOURCE_SHA256" ] || { echo "Immutable system controls source checksum failed" >&2; exit 1; }
-stats_expected_sha256=60c6e2c4af882ed656d1f8a81f3c8e4879a93d8d8e5c6d4039515d5b092e1b41
-[ "$(/usr/bin/shasum -a 256 "$STATS_FORMULA" | /usr/bin/awk '{print $1}')" = "$STATS_FORMULA_SHA256" ] || { echo "Pinned stats_provider formula checksum failed" >&2; exit 1; }
-/opt/homebrew/bin/brew install lua ical-buddy blueutil media-control
+[ "$(/usr/bin/shasum -a 256 "$AUDIO_COORDINATOR_SOURCE" | /usr/bin/awk '{print $1}')" = "$AUDIO_COORDINATOR_SOURCE_SHA256" ] || { echo "Immutable audio coordinator source checksum failed" >&2; exit 1; }
+SKETCHYBAR_LOG_DIR="$HOME/Library/Logs/sketchybar"
+if [ ! -e "$SKETCHYBAR_LOG_DIR" ] && [ ! -L "$SKETCHYBAR_LOG_DIR" ]; then
+  /bin/mkdir -m 0700 "$SKETCHYBAR_LOG_DIR"
+fi
+[ -d "$SKETCHYBAR_LOG_DIR" ] && [ ! -L "$SKETCHYBAR_LOG_DIR" ]   && [ "$(/usr/bin/stat -f %u "$SKETCHYBAR_LOG_DIR")" = "$(/usr/bin/id -u)" ]   && [ "$(/usr/bin/stat -f %Lp "$SKETCHYBAR_LOG_DIR")" = 700 ]   || { echo "SketchyBar launch log directory is unsafe" >&2; exit 73; }
+/opt/homebrew/bin/brew install lua ical-buddy
 
-if ! /opt/homebrew/bin/brew tap | /usr/bin/grep -Fx 'twaldin/sketchybar-frozen' >/dev/null; then
-  /opt/homebrew/bin/brew tap-new --no-git twaldin/sketchybar-frozen
-fi
-stats_tap=$(/opt/homebrew/bin/brew --repo twaldin/sketchybar-frozen)
-[ -d "$stats_tap/Formula" ] && [ ! -L "$stats_tap/Formula" ] || { echo "Local frozen Homebrew tap is unsafe" >&2; exit 1; }
-stats_formula_destination="$stats_tap/Formula/sketchybar-system-stats.rb"
-"$SECURE_INSTALLER" asset "$STATS_FORMULA" "$stats_formula_destination"
-stats_formula_installed_sha256=$(/usr/bin/shasum -a 256 "$stats_formula_destination" | /usr/bin/awk '{print $1}')
-[ "$stats_formula_installed_sha256" = "$STATS_FORMULA_SHA256" ] || { echo "Installed frozen stats_provider formula checksum failed" >&2; exit 1; }
-/opt/homebrew/bin/brew unpin sketchybar-system-stats >/dev/null 2>&1 || true
-if /opt/homebrew/bin/brew list --versions sketchybar-system-stats >/dev/null 2>&1; then
-  /opt/homebrew/bin/brew reinstall twaldin/sketchybar-frozen/sketchybar-system-stats
-else
-  /opt/homebrew/bin/brew install twaldin/sketchybar-frozen/sketchybar-system-stats
-fi
+public_stats_build=$(/usr/bin/mktemp -d "$runtime_base/sketchybar-public-stats-build.XXXXXX")
+public_stats_build_cleanup() { /bin/rm -rf "$public_stats_build"; }
+trap public_stats_build_cleanup EXIT HUP INT TERM
+/usr/bin/swift build -c release --package-path "$PUBLIC_STATS_DIR" --scratch-path "$public_stats_build"
+public_stats_candidate="$public_stats_build/release/sketchybar-public-stats"
+public_stats_candidate_sha256=$(/usr/bin/shasum -a 256 "$public_stats_candidate" | /usr/bin/awk '{print $1}')
+"$public_stats_candidate" --self-test
+[ "$(/usr/bin/shasum -a 256 "$public_stats_candidate" | /usr/bin/awk '{print $1}')" = "$public_stats_candidate_sha256" ] || { echo "Public stats candidate changed after self-test" >&2; exit 75; }
+"$SECURE_INSTALLER" executable "$public_stats_candidate" "$PUBLIC_STATS_BINARY" "$public_stats_candidate_sha256" --self-test
+[ "$(/usr/bin/shasum -a 256 "$PUBLIC_STATS_BINARY" | /usr/bin/awk '{print $1}')" = "$public_stats_candidate_sha256" ] || { echo "Installed public stats checksum mismatch" >&2; exit 75; }
+public_stats_build_cleanup
+trap - EXIT HUP INT TERM
 
 lua_version=$(/opt/homebrew/bin/lua -v 2>&1)
 case "$lua_version" in "Lua 5.5"*) ;; *) echo "Lua 5.5 is required; found: $lua_version" >&2; exit 1 ;; esac
-stats_version=$(/opt/homebrew/bin/stats_provider --version 2>&1 | /usr/bin/awk '{print $2}')
-stats_prefix=$(/opt/homebrew/bin/brew --prefix twaldin/sketchybar-frozen/sketchybar-system-stats)
-stats_binary=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' /opt/homebrew/bin/stats_provider)
-stats_expected=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$stats_prefix/bin/stats_provider")
-[ "$stats_binary" = "$stats_expected" ] || { echo "stats_provider does not resolve to the frozen Homebrew formula" >&2; exit 1; }
-stats_actual_sha256=$(/usr/bin/shasum -a 256 "$stats_binary" | /usr/bin/awk '{print $1}')
-[ "$stats_actual_sha256" = "$stats_expected_sha256" ] || { echo "Frozen stats_provider binary checksum failed" >&2; exit 1; }
-# The vendored formula pins the upstream 0.8.2 release URLs and SHA-256 values.
-[ "$stats_version" = 0.8.2 ] || { echo "Expected released tap stats_provider 0.8.2; found $stats_version" >&2; exit 1; }
-/opt/homebrew/bin/brew pin twaldin/sketchybar-frozen/sketchybar-system-stats >/dev/null
-/opt/homebrew/bin/brew list --pinned | /usr/bin/awk '{print $1}' | /usr/bin/grep -Fx 'sketchybar-system-stats' >/dev/null || { echo "stats_provider formula is not pinned" >&2; exit 1; }
 
 install_asset() {
   url=$1
@@ -60,7 +58,7 @@ install_asset() {
   actual=""
   if [ -r "$destination" ]; then actual=$(/usr/bin/shasum -a 256 "$destination" | /usr/bin/awk '{print $1}'); fi
   [ "$actual" = "$expected" ] && return 0
-  temporary=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/sketchybar-asset.XXXXXX")
+  temporary=$(/usr/bin/mktemp "$runtime_base/sketchybar-asset.XXXXXX")
   /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 --output "$temporary" "$url"
   downloaded=$(/usr/bin/shasum -a 256 "$temporary" | /usr/bin/awk '{print $1}')
   [ "$downloaded" = "$expected" ] || { /bin/rm -f "$temporary"; echo "Checksum failed for $url" >&2; exit 1; }
@@ -129,7 +127,7 @@ if [ "$controls_install_valid" != true ]; then
 fi
 
 if ! "$SECURE_INSTALLER" prepare-sbarlua "$SBARLUA_DIR" "$SBARLUA_COMMIT" "$SBARLUA_LEGACY_SHA256"; then
-  work=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/SbarLua.XXXXXX")
+  work=$(/usr/bin/mktemp -d "$runtime_base/SbarLua.XXXXXX")
   trap 'rm -rf "$work"' EXIT HUP INT TERM
   stage_home="$work/stage-home"
   /bin/mkdir -m 0700 "$stage_home"

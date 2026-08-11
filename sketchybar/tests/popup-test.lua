@@ -4,14 +4,28 @@ package.loaded.colors = {
   transparent = 0, popup = 1, surface = 2, surface2 = 3, right_hover = 4,
   border = 5, primary = 6, muted = 7, normal = 6, active = 6, accent = 8,
 }
-package.loaded.settings = { popup_width = 280, font = "Test" }
+package.loaded.settings = {
+  popup_width = 280,
+  font = "Test",
+  popup_layout = {
+    gutter = 12, value_width = 80, column_gap = 8,
+    heading_height = 32, section_height = 26, row_height = 28, axis_height = 16,
+  },
+  type = {
+    popup_head = "Test:Bold:11.0", popup_row = "Test:Regular:11.0",
+    popup_section = "Test:SemiBold:9.5", popup_axis = "Test:Medium:9.0",
+  },
+}
 
 local hover_state = setmetatable({}, { __mode = "k" })
+local hover_active, hover_clear_count = nil, 0
 package.loaded["lib.hover"] = {
   set_popup_open = function(item, open)
     hover_state[item] = open == true
     return true
   end,
+  is_active = function(item) return hover_active == item end,
+  clear = function() hover_active = nil; hover_clear_count = hover_clear_count + 1 end,
 }
 
 local function merge(target, source)
@@ -34,6 +48,10 @@ local function fake(name, properties)
       item.subscriptions[event] = item.subscriptions[event] or {}
       item.subscriptions[event][#item.subscriptions[event] + 1] = callback
     end
+  end
+  function item:push(value)
+    item.pushes = item.pushes or {}
+    item.pushes[#item.pushes + 1] = value
   end
   return item
 end
@@ -144,6 +162,7 @@ assert(popup.debug_state().close_ticket == ticket_before_background, "local row 
 
 -- A row-global exit independently covers popup-to-outside. A duplicate host
 -- global delivery cannot create a second ticket.
+hover_active = host
 fire(action, "mouse.exited.global")
 local union_exit_ticket = popup.debug_state().close_ticket
 fire(host, "mouse.exited.global")
@@ -151,6 +170,7 @@ assert(popup.debug_state().close_ticket == union_exit_ticket, "duplicate union l
 advance(0.131)
 assert(not popup.is_open(host), "row-global union exit closes after dwell")
 assert(hover_state[host] == false, "close state reaches host visual reducer")
+assert(hover_active == nil and hover_clear_count == 1, "close clears a stale host hover")
 
 -- A row-to-background transition stays owned until a host-local exit proves the
 -- pointer moved to a different bar item.
@@ -239,5 +259,47 @@ assert(popup.is_open(host), "host reopened")
 fire(host, "mouse.clicked", { BUTTON = "right" })
 assert(external_state == false, "right-click callback observes popup already closed")
 assert(not popup.is_open(host), "right-click leaves no popup")
+
+-- Graph histories fill their drawable width and stable rebuilds push once per sample.
+popup.open(host, { build = function(current_token)
+  popup.graph(host, current_token, "history", { 10, 20, 30 }, 30, { sample_id = "one" })
+end })
+local graph = items["popup.host.history"]
+assert(#graph.pushes == 1 and #graph.pushes[1] == 264, "graph history is resampled to the plot width")
+assert(graph.pushes[1][1] == 0.1 and graph.pushes[1][264] == 0.3, "resampling preserves history endpoints")
+token = popup.generation
+popup.rebuild(host, token, function(current_token)
+  popup.graph(host, current_token, "history", { 10, 20, 30 }, 30, { sample_id = "one" })
+end)
+assert(#graph.pushes == 1, "same sample is not pushed twice")
+popup.rebuild(host, token, function(current_token)
+  popup.graph(host, current_token, "history", { 10, 20, 30, 31 }, 31, { sample_id = "two" })
+end)
+assert(#graph.pushes == 2 and #graph.pushes[2] == 1 and graph.pushes[2][1] == 0.31, "new sample is pushed once")
+popup.rebuild(host, token, function(current_token)
+  popup.graph(host, current_token, "history", {}, 0, { sample_id = "reset-sample", reset_id = "reset" })
+end)
+assert(#graph.pushes == 3 and #graph.pushes[3] == 264 and graph.pushes[3][264] == 0, "graph reset overwrites stale plot data")
+popup.close()
+
+-- Section and link helpers provide hierarchy and explicit actions without fake chevrons.
+local linked = false
+popup.open(host, { build = function(current_token)
+  popup.section(host, current_token, "section", "System tools")
+  popup.link(host, current_token, "link", "Open tool", function() linked = true end)
+end })
+assert(items["popup.host.section"].properties.label.string == "System tools", "section title remains clean title case")
+assert(not items["popup.host.section"].properties.label.string:find("─"), "section title has no box-drawing decoration")
+fire(items["popup.host.link"], "mouse.clicked", { BUTTON = "left" })
+assert(linked and not popup.is_open(host), "link closes its popup before invoking its action")
+
+-- Lua forwards gsub's replacement count when the expression is the final
+-- argument. Popup helpers must ignore that extra scalar instead of crashing.
+popup.open(host, { build = function(current_token)
+  popup.field(host, current_token, "multi_return", "State", ("radio_off"):gsub("_", " "))
+end })
+assert(items["popup.host.multi_return"].properties.label.string == "radio off",
+  "popup field tolerates a trailing Lua multi-return count")
+popup.close()
 
 print("SketchyBar popup persistent ownership and reconciliation passed")

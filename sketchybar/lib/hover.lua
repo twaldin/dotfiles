@@ -16,10 +16,13 @@ function M.is_active(item)
 end
 
 -- Routine/provider renders call this so a live update cannot erase the active
--- hover cue. Warning and critical colors remain semantic safety signals.
+-- hover cue. Semantic safety colors remain visible while hovered.
 function M.foreground(item, idle_color)
   if not M.is_active(item) then return idle_color end
-  if idle_color == colors.warning or idle_color == colors.critical then return idle_color end
+  if idle_color == colors.warning
+     or idle_color == colors.critical
+     or idle_color == colors.state.actionable
+     or idle_color == colors.red then return idle_color end
   return colors.primary
 end
 

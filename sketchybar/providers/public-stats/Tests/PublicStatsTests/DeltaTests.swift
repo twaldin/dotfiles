@@ -48,6 +48,49 @@ struct DeltaTests {
         XCTAssertEqual(sample.userPercent, 25, accuracy: 0.000_001)
     }
 
+    func testPerCoreFirstSampleResetAndShapeChangesAreInvalid() {
+        var sampler = PerCoreCPUSampler()
+        let first = [ticks(10, 10, 10, 70), ticks(20, 10, 10, 60)]
+        XCTAssertFalse(sampler.consume(ticks: first, timeNanoseconds: 1_000_000_000,
+                                       clockTicksPerSecond: 100).valid)
+        let changedShape = [ticks(20, 20, 20, 140)]
+        XCTAssertFalse(sampler.consume(ticks: changedShape, timeNanoseconds: 2_000_000_000,
+                                       clockTicksPerSecond: 100).valid)
+        sampler.reset()
+        XCTAssertFalse(sampler.consume(ticks: first, timeNanoseconds: 3_000_000_000,
+                                       clockTicksPerSecond: 100).valid)
+    }
+
+    func testPerCoreProducesOneNeutralBusyValuePerLogicalCore() {
+        var sampler = PerCoreCPUSampler()
+        _ = sampler.consume(ticks: [ticks(100, 100, 100, 100), ticks(100, 100, 100, 100)],
+                            timeNanoseconds: 1_000_000_000, clockTicksPerSecond: 100)
+        let sample = sampler.consume(ticks: [ticks(140, 110, 120, 130), ticks(110, 110, 110, 170)],
+                                     timeNanoseconds: 2_000_000_000, clockTicksPerSecond: 100)
+        XCTAssertTrue(sample.valid)
+        XCTAssertEqual(sample.busyPercentages.count, 2)
+        XCTAssertEqual(sample.busyPercentages[0], 70, accuracy: 0.000_001)
+        XCTAssertEqual(sample.busyPercentages[1], 30, accuracy: 0.000_001)
+    }
+
+    func testPerCoreRejectsZeroDeltaGapAndImplausibleLaneReset() {
+        let first = [ticks(100, 100, 100, 100)]
+        var sampler = PerCoreCPUSampler()
+        _ = sampler.consume(ticks: first, timeNanoseconds: 1_000_000_000, clockTicksPerSecond: 100)
+        XCTAssertFalse(sampler.consume(ticks: first, timeNanoseconds: 2_000_000_000,
+                                       clockTicksPerSecond: 100).valid)
+        sampler.reset()
+        _ = sampler.consume(ticks: first, timeNanoseconds: 1_000_000_000, clockTicksPerSecond: 100)
+        XCTAssertFalse(sampler.consume(ticks: [ticks(110, 110, 110, 110)],
+                                       timeNanoseconds: 14_000_000_001,
+                                       clockTicksPerSecond: 100).valid)
+        sampler.reset()
+        _ = sampler.consume(ticks: first, timeNanoseconds: 1_000_000_000, clockTicksPerSecond: 100)
+        XCTAssertFalse(sampler.consume(ticks: [ticks(90, 110, 110, 110)],
+                                       timeNanoseconds: 2_000_000_000,
+                                       clockTicksPerSecond: 100).valid)
+    }
+
     func testMemoryFormulaForPageSizesPurgeableAndClamp() {
         let fourK = calculateMemory(total: 1_000_000, internalPages: 100, purgeablePages: 20,
                                     wiredPages: 10, compressedPages: 5, pageSize: 4096)
@@ -148,6 +191,10 @@ struct DeltaTests {
 
     func testReviewedLinkCounterABI() {
         XCTAssertTrue(linkCounterABICompatible())
+    }
+
+    private func ticks(_ user: UInt32, _ nice: UInt32, _ system: UInt32, _ idle: UInt32) -> CPUTicks {
+        CPUTicks(user: user, nice: nice, system: system, idle: idle)
     }
 
     private func sample(receive: UInt64, transmit: UInt64) -> LinkCounterSample {

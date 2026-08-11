@@ -43,6 +43,7 @@ enum EstimateState: String, Sendable, CaseIterable {
 
 enum FixedEvent: String, Equatable, Sendable {
     case metrics = "system_metrics_v2"
+    case cpuDetail = "system_cpu_detail_v1"
     case battery = "system_battery_v2"
 }
 
@@ -59,6 +60,7 @@ enum ContractError: Error, Equatable, Sendable {
 
 let maximumEstimateMinutes = UInt64(Int32.max)
 let metricsMaximumAgeSeconds: UInt64 = 15
+let cpuDetailMaximumAgeSeconds: UInt64 = 15
 let batteryMaximumAgeSeconds: UInt64 = 130
 let maximumLuaExactInteger: UInt64 = 9_007_199_254_740_991
 
@@ -92,7 +94,7 @@ func makeProducerInstance() -> String {
 }
 
 enum EventDomain: Equatable, Sendable {
-    case metrics, battery
+    case metrics, cpuDetail, battery
 }
 
 enum StreamAcceptance: Equatable, Sendable {
@@ -100,14 +102,15 @@ enum StreamAcceptance: Equatable, Sendable {
     case rejected
 }
 
-// Normative reference model for the future Lua consumer; the source-only producer does not
-// apply inbound-event policy. One cursor coordinates both domains. A fresh, never-seen instance can establish
-// a baseline at any sequence because the emitter is intentionally lossy. Freshness makes
-// that restart usable after a missed sequence zero; it is not a same-user security proof.
-// The old instance is retired, both domains clear, and later values increase independently.
+// Normative reference model for the Lua consumers; the source-only producer does not
+// apply inbound-event policy. One cursor coordinates all three domains. A fresh,
+// never-seen instance can establish a baseline at any sequence because the emitter is
+// intentionally lossy. The old instance is retired, all domains clear, and later values
+// increase independently.
 struct ProducerCursor: Sendable {
     private(set) var instance: String?
     private(set) var metricsSequence: UInt64?
+    private(set) var cpuDetailSequence: UInt64?
     private(set) var batterySequence: UInt64?
     private var retiredInstances: Set<String> = []
 
@@ -115,8 +118,12 @@ struct ProducerCursor: Sendable {
                          sequence candidateSequence: UInt64,
                          sampleEpochSeconds: UInt64,
                          nowEpochSeconds: UInt64) -> StreamAcceptance {
-        let maximumAgeSeconds = domain == .metrics
-            ? metricsMaximumAgeSeconds : batteryMaximumAgeSeconds
+        let maximumAgeSeconds: UInt64
+        switch domain {
+        case .metrics: maximumAgeSeconds = metricsMaximumAgeSeconds
+        case .cpuDetail: maximumAgeSeconds = cpuDetailMaximumAgeSeconds
+        case .battery: maximumAgeSeconds = batteryMaximumAgeSeconds
+        }
         guard isValidProducerInstance(candidate), sampleEpochSeconds > 0,
               nowEpochSeconds <= maximumLuaExactInteger,
               sampleEpochSeconds <= nowEpochSeconds,
@@ -130,6 +137,7 @@ struct ProducerCursor: Sendable {
                 retiredInstances.insert(instance)
                 self.instance = candidate
                 metricsSequence = nil
+                cpuDetailSequence = nil
                 batterySequence = nil
                 resetAllDomains = true
             }
@@ -141,6 +149,9 @@ struct ProducerCursor: Sendable {
         case .metrics:
             if let metricsSequence, candidateSequence <= metricsSequence { return .rejected }
             metricsSequence = candidateSequence
+        case .cpuDetail:
+            if let cpuDetailSequence, candidateSequence <= cpuDetailSequence { return .rejected }
+            cpuDetailSequence = candidateSequence
         case .battery:
             if let batterySequence, candidateSequence <= batterySequence { return .rejected }
             batterySequence = candidateSequence
@@ -221,6 +232,17 @@ struct MetricsSnapshot: Equatable, Sendable {
     }
 }
 
+struct CPUDetailSnapshot: Equatable, Sendable {
+    var cpuDetailSchema: UInt64 = 1
+    var producerInstance: String
+    var cpuDetailSequence: UInt64 = 0
+    var cpuDetailSampleEpochSeconds: UInt64 = 1
+    var coreValid = false
+    var coreBusyPercentages: [Double] = []
+    var uptimeValid = false
+    var uptimeSeconds: UInt64 = 0
+}
+
 struct BatterySnapshot: Equatable, Sendable {
     var batterySchema: UInt64 = 2
     var producerInstance = ""
@@ -267,6 +289,10 @@ enum ContractSerializer {
         "GPU_CAPS_VALID", "GPU_PRESENT", "GPU_UNIFIED", "GPU_LOW_POWER", "GPU_REMOVABLE",
         "GPU_HEADLESS", "GPU_RECOMMENDED_MAX_B", "GPU_ACTIVITY_VALID",
     ]
+    static let cpuDetailRequiredKeys: [String] = [
+        "CPU_DETAIL_SCHEMA", "PRODUCER_INSTANCE", "CPU_DETAIL_SEQ", "CPU_DETAIL_SAMPLE_EPOCH_S",
+        "CPU_CORE_VALID", "CPU_CORE_COUNT", "CPU_CORE_BUSY_PCTS", "UPTIME_VALID", "UPTIME_S",
+    ]
     static let batteryRequiredKeys: [String] = [
         "BATTERY_SCHEMA", "PRODUCER_INSTANCE", "BATTERY_SEQ", "BATTERY_SAMPLE_EPOCH_S",
         "BATTERY_STATUS", "BATTERY_PERCENT_PCT", "BATTERY_STATE",
@@ -276,6 +302,7 @@ enum ContractSerializer {
     ]
 
     private static let posix = Locale(identifier: "en_US_POSIX")
+    static let serializedPercentageTolerance = 0.0021
 
     static func decimal(_ value: Double) -> String? {
         guard value.isFinite, value >= 0 else { return nil }
@@ -283,8 +310,33 @@ enum ContractSerializer {
         return String(format: "%.3f", locale: posix, value)
     }
 
+    static func validatesSamplingRelations(_ value: MetricsSnapshot) -> Bool {
+        let cpuCleared = !value.cpuValid && value.cpuBusyPercent == 0 && value.cpuUserPercent == 0 &&
+            value.cpuNicePercent == 0 && value.cpuSystemPercent == 0 && value.cpuIdlePercent == 0 &&
+            value.cpuLoad1 == 0 && value.cpuLoad5 == 0 && value.cpuLoad15 == 0
+        let memoryCleared = !value.memoryValid && value.memoryTotalBytes == 0 &&
+            value.memoryUsedBytes == 0 && value.memoryAvailableBytes == 0 &&
+            value.memoryCompressedBytes == 0 && value.memoryWiredBytes == 0 &&
+            !value.swapValid && value.swapTotalBytes == 0 && value.swapUsedBytes == 0
+        let storageCleared = !value.storageValid && value.storageTotalBytes == 0 &&
+            value.storageFreeBytes == 0 && value.storageUsedBytes == 0 &&
+            value.storageUsedPercent == 0 && value.importantAvailableBytes == nil
+        let networkCleared = !value.networkValid && value.networkState == .unknown &&
+            value.networkPathType == .unknown && value.networkReceiveBytesPerSecond == 0 &&
+            value.networkTransmitBytesPerSecond == 0 && !value.networkExpensive && !value.networkConstrained
+        let conditionsCleared = !value.thermalValid && !value.pressureValid &&
+            value.thermalState == .unknown && value.pressureState == .unknown &&
+            value.lowPowerState == .offOrUnsupported
+        return (value.cpuSampled || cpuCleared) &&
+            (value.memorySampled || memoryCleared) &&
+            (value.storageSampled || storageCleared) &&
+            (value.networkSampled || networkCleared) &&
+            (value.conditionSampled || conditionsCleared)
+    }
+
     static func metrics(_ value: MetricsSnapshot) throws -> SerializedEvent {
         guard value.metricsSchema == 2, isValidProducerInstance(value.producerInstance),
+              validatesSamplingRelations(value),
               value.metricsSampleEpochSeconds > 0,
               value.metricsSampleEpochSeconds <= maximumLuaExactInteger,
               value.cpuLogical > 0, value.cpuActive > 0, value.cpuActive <= value.cpuLogical,
@@ -333,7 +385,15 @@ enum ContractSerializer {
         let decimalValues = [value.cpuBusyPercent, value.cpuUserPercent, value.cpuNicePercent,
                              value.cpuSystemPercent, value.cpuIdlePercent, value.cpuLoad1,
                              value.cpuLoad5, value.cpuLoad15, value.storageUsedPercent].map(decimal)
-        guard decimalValues.allSatisfy({ $0 != nil }) else { throw ContractError.invalidValue }
+        guard decimalValues.allSatisfy({ $0 != nil }),
+              let serializedBusy = Double(decimalValues[0]!),
+              let serializedUser = Double(decimalValues[1]!),
+              let serializedNice = Double(decimalValues[2]!),
+              let serializedSystem = Double(decimalValues[3]!),
+              (!value.cpuValid || abs(serializedBusy - serializedUser - serializedNice - serializedSystem)
+                  <= serializedPercentageTolerance) else {
+            throw ContractError.invalidValue
+        }
         let important = value.importantAvailableBytes
         let fields: [(String, String)] = [
             ("METRICS_SCHEMA", String(value.metricsSchema)),
@@ -373,6 +433,44 @@ enum ContractSerializer {
         ]
         try validate(fields: fields, required: metricsRequiredKeys)
         return SerializedEvent(event: .metrics, fields: fields)
+    }
+
+    static func cpuDetail(_ value: CPUDetailSnapshot) throws -> SerializedEvent {
+        guard value.cpuDetailSchema == 1, isValidProducerInstance(value.producerInstance),
+              value.cpuDetailSampleEpochSeconds > 0,
+              value.cpuDetailSampleEpochSeconds <= maximumLuaExactInteger,
+              value.uptimeSeconds <= maximumLuaExactInteger,
+              (value.uptimeValid || value.uptimeSeconds == 0) else {
+            throw ContractError.invalidValue
+        }
+        let corePercentages: String
+        if value.coreValid {
+            guard !value.coreBusyPercentages.isEmpty, value.coreBusyPercentages.count <= 128 else {
+                throw ContractError.invalidValue
+            }
+            let serialized = value.coreBusyPercentages.map(decimal)
+            guard serialized.allSatisfy({ $0 != nil }),
+                  value.coreBusyPercentages.allSatisfy({ validatePercentage($0) }) else {
+                throw ContractError.invalidValue
+            }
+            corePercentages = serialized.map { $0! }.joined(separator: ",")
+        } else {
+            guard value.coreBusyPercentages.isEmpty else { throw ContractError.invalidValue }
+            corePercentages = "0"
+        }
+        let fields: [(String, String)] = [
+            ("CPU_DETAIL_SCHEMA", String(value.cpuDetailSchema)),
+            ("PRODUCER_INSTANCE", value.producerInstance),
+            ("CPU_DETAIL_SEQ", sequenceField(value.cpuDetailSequence)),
+            ("CPU_DETAIL_SAMPLE_EPOCH_S", String(value.cpuDetailSampleEpochSeconds)),
+            ("CPU_CORE_VALID", bit(value.coreValid)),
+            ("CPU_CORE_COUNT", String(value.coreValid ? value.coreBusyPercentages.count : 0)),
+            ("CPU_CORE_BUSY_PCTS", corePercentages),
+            ("UPTIME_VALID", bit(value.uptimeValid)),
+            ("UPTIME_S", String(value.uptimeSeconds)),
+        ]
+        try validate(fields: fields, required: cpuDetailRequiredKeys)
+        return SerializedEvent(event: .cpuDetail, fields: fields)
     }
 
     static func battery(_ value: BatterySnapshot) throws -> SerializedEvent {

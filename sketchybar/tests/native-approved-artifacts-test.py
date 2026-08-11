@@ -30,7 +30,6 @@ EXPECTED_RUNTIME_SURFACES = ('sketchybar/OPERATIONS.md',
  'sketchybar/bootstrap.lua',
  'sketchybar/colors.lua',
  'sketchybar/default.lua',
- 'sketchybar/deps/sketchybar-system-stats.rb',
  'sketchybar/init.lua',
  'sketchybar/install-deps.sh',
  'sketchybar/launch-agents/homebrew.mxcl.sketchybar.plist',
@@ -38,9 +37,9 @@ EXPECTED_RUNTIME_SURFACES = ('sketchybar/OPERATIONS.md',
  'sketchybar/items/battery.lua',
  'sketchybar/items/calendar.lua',
  'sketchybar/items/connectivity.lua',
+ 'sketchybar/items/display.lua',
  'sketchybar/items/front_window.lua',
  'sketchybar/items/init.lua',
- 'sketchybar/items/media.lua',
  'sketchybar/items/microphone.lua',
  'sketchybar/items/status.lua',
  'sketchybar/items/workspaces.lua',
@@ -52,6 +51,7 @@ EXPECTED_RUNTIME_SURFACES = ('sketchybar/OPERATIONS.md',
  'sketchybar/lib/icons.lua',
  'sketchybar/lib/popup.lua',
  'sketchybar/lib/shell.lua',
+ 'sketchybar/lib/stats_contract.lua',
  'sketchybar/lib/text.lua',
  'sketchybar/lib/text_ranges.lua',
  'sketchybar/lib/unicode_grapheme_ranges.lua',
@@ -66,12 +66,17 @@ EXPECTED_RUNTIME_SURFACES = ('sketchybar/OPERATIONS.md',
  'sketchybar/providers/public-stats/Sources/PublicStats/Main.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/MetalSampler.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/NetworkSampler.swift',
+ 'sketchybar/providers/public-stats/Sources/PublicStats/PerCoreCPUSampler.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/Resources/PrivacyInfo.xcprivacy',
  'sketchybar/providers/public-stats/Sources/PublicStats/SelfTest.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/VolumeSampler.swift',
  'sketchybar/providers/public-stats/audit-public-stats.sh',
  'sketchybar/providers/public-stats/run-tests.sh',
- 'sketchybar/scripts/data-disk.sh',
+ 'sketchybar/scripts/audio-state.py',
+ 'sketchybar/scripts/battery-state.py',
+ 'sketchybar/scripts/battery-state.swift',
+ 'sketchybar/scripts/connectivity-state.py',
+ 'sketchybar/scripts/display-state.py',
  'sketchybar/scripts/focus-space.sh',
  'sketchybar/scripts/focus-window.sh',
  'sketchybar/scripts/generate-unicode-grapheme-ranges.py',
@@ -89,6 +94,20 @@ EXPECTED_RUNTIME_SURFACES = ('sketchybar/OPERATIONS.md',
  'sketchybar/vendor/unicode/17.0.0/GraphemeBreakProperty.txt',
  'sketchybar/vendor/unicode/17.0.0/LICENSE.txt',
  'sketchybar/vendor/unicode/17.0.0/emoji-data.txt')
+
+
+# Exact reviewed runtime integration. The vendored power artifact remains
+# source-only; this independently reviewed helper may use only these closed
+# contract names, and any byte change invalidates the approval.
+APPROVED_RUNTIME_REFERENCE_PINS = {
+    "sketchybar/scripts/battery-state.swift": {
+        "sha256": "8c9b28b44b9021b30a14f57368d1e0898e82b73ea4ab34e5c60cd1f8a0a40838",
+        "allowed": frozenset({
+            "batteryhealth", "closedvalue", "inventorystate",
+            "strictcfbridge", "strictvalue", "valuestate",
+        }),
+    },
+}
 
 VENDOR_REFERENCE_TOKENS = ('actionregistration',
  'activepowersource',
@@ -1531,10 +1550,17 @@ def _check_no_runtime_references_or_adapters(repository_root, sketchybar_root, n
         "darwinsystemsettingsapplicationopener",
     ) + VENDOR_REFERENCE_TOKENS
     for repository_relative in _collect_runtime_surfaces(sketchybar_root, repository_root):
-        text = _read_repository_text(repository_root / repository_relative, repository_root, repository_relative)
+        path = repository_root / repository_relative
+        text = _read_repository_text(path, repository_root, repository_relative)
         lowered = text.lower()
+        approval = APPROVED_RUNTIME_REFERENCE_PINS.get(repository_relative)
+        allowed = frozenset()
+        if approval is not None:
+            if _sha256(text.encode("utf-8")) != approval["sha256"]:
+                fail(f"reviewed runtime integration byte pin changed: {repository_relative}")
+            allowed = approval["allowed"]
         for forbidden in forbidden_references:
-            if forbidden in lowered:
+            if forbidden in lowered and forbidden not in allowed:
                 fail(f"runtime surface {repository_relative} references a vendor destination or vendored module")
 
 

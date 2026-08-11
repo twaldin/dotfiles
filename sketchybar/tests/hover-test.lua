@@ -7,7 +7,8 @@ function popup.schedule_close() popup.close_count = popup.close_count + 1 end
 package.loaded["lib.popup"] = popup
 package.loaded.colors = {
   primary = 1, surface = 2, surface2 = 3, border = 4, accent = 5, hover = 6,
-  right_hover = 6, warning = 7, critical = 8,
+  right_hover = 6, warning = 7, critical = 8, red = 11,
+  state = { actionable = 10 },
 }
 sbar = {
   delay = function(seconds, callback)
@@ -79,6 +80,9 @@ equal(legacy.properties.icon.color, colors.primary, "legacy hover icon")
 equal(hover.foreground(legacy, 9), colors.primary, "provider render preserves normal hover foreground")
 equal(hover.foreground(legacy, colors.warning), colors.warning, "warning survives hover")
 equal(hover.foreground(legacy, colors.critical), colors.critical, "critical survives hover")
+equal(hover.foreground(legacy, colors.state.actionable), colors.state.actionable,
+  "actionable safety state survives hover")
+equal(hover.foreground(legacy, colors.red), colors.red, "red safety state survives hover")
 for _, update in ipairs(legacy.history) do
   if update.background then
     equal(update.background.border_color, nil, "legacy hover never changes border")

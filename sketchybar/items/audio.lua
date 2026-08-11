@@ -10,18 +10,20 @@ local active = nil
 local action_error = nil
 
 local item = sbar.add("item", "audio", {
-  position = "right",
+  position = "left",
   updates = true,
   update_freq = 30,
   width = settings.control_width,
+  padding_left = settings.spacing.item / 2,
+  padding_right = settings.spacing.item / 2,
   icon = {
-    string = "󰕾", color = colors.muted, width = settings.control_width,
+    string = "󰖁", color = colors.muted, width = settings.control_width,
     align = "center", padding_left = 0, padding_right = 0,
-    font = { family = settings.font, style = "Regular", size = 15.0 },
+    font = settings.type.bar_control,
   },
   label = { drawing = false, string = "Audio, state unavailable" },
   background = {
-    drawing = false, color = colors.surface2, height = 26, corner_radius = 0,
+    drawing = false, color = colors.surface2, height = settings.surface_height, corner_radius = 0,
   },
 })
 
@@ -48,7 +50,8 @@ local function boolean_value(capability)
   return nil
 end
 
-local function output_icon(level, muted)
+local function output_icon(level, muted, resolved)
+  if not resolved then return "󰖁" end
   if muted == true then return "󰝟" end
   if level == nil then return "󰕾" end
   if level <= 0 then return "󰝟" end
@@ -91,26 +94,29 @@ end
 
 local function action_row(token, suffix, label, selected, callback)
   local row = popup.row(item, token, suffix, {
-    label = { string = label, color = selected and colors.primary or colors.muted },
+    icon = { drawing = true, string = selected and "✓" or "", width = 24, color = selected and colors.green or colors.blue, padding_left = 8, padding_right = 0 },
+    label = { string = shell.ellipsis(label, 30), color = selected and colors.primary or colors.muted },
+    background = { drawing = selected, color = colors.surface2 },
   })
-  if not row or selected or state.busy then return row end
-  popup.action(row, { selected = false, idle_color = colors.muted })
-  popup.on_click(row, function(env)
+  if not row then return row end
+  popup.action(row, { selected = selected, idle_color = selected and colors.primary or colors.muted, idle_icon_color = selected and colors.green or colors.blue })
+  if not selected and not state.busy then popup.on_click(row, function(env)
     if left_click(env) and popup.is_current(item, token) then callback() end
-  end)
+  end) end
   return row
 end
 
 build_rows = function(token)
   if not popup.is_current(item, token) then return end
   local device, direction = role_state(state, "output")
+  local controls = audio.controls("output")
   local level = direction and percentage(direction.volume) or nil
   local mute = direction and direction.mute or nil
   local muted = boolean_value(mute)
   local heading = "SOUND OUTPUT"
   if level then heading = heading .. "  ·  " .. tostring(level) .. "%" end
   if muted == true then heading = heading .. "  ·  MUTED" end
-  popup.row(item, token, "heading", { label = { string = heading, color = colors.primary } })
+  popup.row(item, token, "heading", { label = { string = heading, align = "center", color = colors.primary } })
 
   if state.busy then
     popup.row(item, token, "working", {
@@ -122,35 +128,55 @@ build_rows = function(token)
     })
   end
 
-  if direction and direction.volume.available and direction.volume.settable and level then
+  if controls and direction and direction.volume.available
+     and direction.volume.settable and level then
     popup.slider(item, token, "level", level, function(env)
       local value = tonumber(env and env.PERCENTAGE)
       if left_click(env) and value and value == value and value >= 0 and value <= 100 then
-        invoke(function(done) return audio.set_volume("output", value, done) end)
+        invoke(function(done) return controls.set_volume(value, done) end)
       end
     end)
   else
+    local reason = not state.confirmed and "Audio state is unavailable"
+      or not direction and "Current sound output is unavailable"
+      or not controls and "Audio controls are unavailable"
+      or "Level is controlled by the device"
     popup.row(item, token, "level_unavailable", {
-      label = { string = "Level is controlled by the device", color = colors.muted },
+      label = { string = reason, color = colors.muted },
     })
   end
 
-  if mute and mute.available and mute.settable and type(mute.value) == "boolean" then
+  if controls and mute and mute.available and mute.settable
+     and type(mute.value) == "boolean" then
     local target = not mute.value
     action_row(token, "mute", target and "Turn output mute on" or "Turn output mute off", false, function()
-      invoke(function(done) return audio.set_mute("output", target, done) end)
+      invoke(function(done) return controls and controls.set_mute(target, done) or false end)
     end)
   else
+    local reason = not state.confirmed and "Audio state is unavailable"
+      or not direction and "Current sound output is unavailable"
+      or not controls and "Audio controls are unavailable"
+      or "Output mute is not supported by this device"
     popup.row(item, token, "mute_unavailable", {
-      label = { string = "Output mute is not supported by this device", color = colors.muted },
+      label = { string = reason, color = colors.muted },
     })
   end
 
-  popup.row(item, token, "output_heading", {
-    label = { string = "SOUND OUTPUT DEVICES", color = colors.primary },
-  })
+  popup.section(item, token, "output_heading", "Output devices")
   local output_choices = audio.choices("output")
-  if not audio.role_settable("output") then
+  if not state.confirmed then
+    popup.row(item, token, "output_state_unavailable", {
+      label = { string = "Audio state is unavailable", color = colors.muted },
+    })
+  elseif not state.defaults.output then
+    popup.row(item, token, "output_default_unavailable", {
+      label = { string = "Current sound output is unavailable", color = colors.muted },
+    })
+  elseif not state.actions_available then
+    popup.row(item, token, "output_controls_unavailable", {
+      label = { string = "Audio controls are unavailable", color = colors.muted },
+    })
+  elseif not audio.role_settable("output") then
     popup.row(item, token, "output_unsettable", {
       label = { string = "Sound output switching is not supported", color = colors.muted },
     })
@@ -162,17 +188,33 @@ build_rows = function(token)
   for index, choice in ipairs(output_choices) do
     local selected = state.defaults.output and state.defaults.output.ordinal == choice.ordinal
     local captured = choice
-    action_row(token, "output_choice_" .. index,
-      "Use " .. choice.name .. " for sound output", selected, function()
-        invoke(function(done) return captured.invoke(done) end)
-      end)
+    if type(choice.invoke) == "function" then
+      action_row(token, "output_choice_" .. index,
+        choice.name, selected, function()
+          invoke(function(done) return captured.invoke(done) end)
+        end)
+    else
+      popup.row(item, token, "output_choice_disabled_" .. index, {
+        label = { string = shell.ellipsis("Disabled: " .. choice.reason .. " · " .. choice.name, 80), color = colors.muted },
+      })
+    end
   end
 
-  popup.row(item, token, "alerts_heading", {
-    label = { string = "SYSTEM ALERTS", color = colors.primary },
-  })
+  popup.section(item, token, "alerts_heading", "System alerts")
   local alert_choices = audio.choices("system_output")
-  if not audio.role_settable("system_output") then
+  if not state.confirmed then
+    popup.row(item, token, "alerts_state_unavailable", {
+      label = { string = "Audio state is unavailable", color = colors.muted },
+    })
+  elseif not state.defaults.system_output then
+    popup.row(item, token, "alerts_default_unavailable", {
+      label = { string = "Current system alert device is unavailable", color = colors.muted },
+    })
+  elseif not state.actions_available then
+    popup.row(item, token, "alerts_controls_unavailable", {
+      label = { string = "Audio controls are unavailable", color = colors.muted },
+    })
+  elseif not audio.role_settable("system_output") then
     popup.row(item, token, "alerts_unsettable", {
       label = { string = "System alert switching is not supported", color = colors.muted },
     })
@@ -184,11 +226,21 @@ build_rows = function(token)
   for index, choice in ipairs(alert_choices) do
     local selected = state.defaults.system_output and state.defaults.system_output.ordinal == choice.ordinal
     local captured = choice
-    action_row(token, "alert_choice_" .. index,
-      "Use " .. choice.name .. " for system alerts", selected, function()
-        invoke(function(done) return captured.invoke(done) end)
-      end)
+    if type(choice.invoke) == "function" then
+      action_row(token, "alert_choice_" .. index,
+        choice.name, selected, function()
+          invoke(function(done) return captured.invoke(done) end)
+        end)
+    else
+      popup.row(item, token, "alert_choice_disabled_" .. index, {
+        label = { string = shell.ellipsis("Disabled: " .. choice.reason .. " · " .. choice.name, 80), color = colors.muted },
+      })
+    end
   end
+  popup.section(item, token, "settings_heading", "Open")
+  popup.link(item, token, "settings", "Open System Settings · select Sound", function()
+    shell.open(settings.links.sound)
+  end)
 end
 
 local function schedule_open_refresh(token)
@@ -203,9 +255,9 @@ local function schedule_open_refresh(token)
 end
 
 popup.bind(item, {
-  align = "right",
+  align = "left",
   right_click = function()
-    shell.open("x-apple.systempreferences:com.apple.Sound-Settings.extension")
+    shell.open(settings.links.sound)
   end,
   on_close = function() active = nil; action_error = nil end,
   build = function(token)
@@ -222,11 +274,13 @@ local function render(view)
   local _, direction = role_state(view, "output")
   local level = direction and percentage(direction.volume) or nil
   local muted = direction and boolean_value(direction.mute)
-  local idle_color = view.confirmed and (muted == true and colors.muted or colors.primary) or colors.muted
+  local resolved = view.confirmed and direction ~= nil
+  local idle_color = resolved and muted ~= nil
+    and (muted and colors.muted or colors.primary) or colors.muted
   local active_color = hover.foreground(item, idle_color)
   item:set({
     width = settings.control_width,
-    icon = { string = output_icon(level, muted), color = active_color },
+    icon = { string = output_icon(level, muted, resolved), color = active_color },
     label = { string = output_summary(view), drawing = false },
   })
   rebuild()
@@ -238,7 +292,9 @@ hover.bind(item, {
   idle_color = function()
     local _, direction = role_state(state, "output")
     local muted = direction and boolean_value(direction.mute)
-    return state.confirmed and (muted == true and colors.muted or colors.primary) or colors.muted
+    local resolved = state.confirmed and direction ~= nil
+    return resolved and muted ~= nil
+      and (muted and colors.muted or colors.primary) or colors.muted
   end,
 })
 audio.refresh()

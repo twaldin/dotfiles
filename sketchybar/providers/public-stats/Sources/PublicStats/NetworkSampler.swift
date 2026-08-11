@@ -187,6 +187,12 @@ func mapPath(_ path: NWPath) -> PathSelection {
                          expensive: path.isExpensive, constrained: path.isConstrained)
 }
 
+func resetNetworkObservation(_ selection: PathSelection) -> NetworkObservation {
+    NetworkObservation(sampled: true, valid: false, state: selection.state, type: selection.type,
+                       receiveBytesPerSecond: 0, transmitBytesPerSecond: 0,
+                       expensive: selection.expensive, constrained: selection.constrained)
+}
+
 struct NetworkSampler: Sendable {
     private(set) var selection: PathSelection?
     private(set) var baseline: LinkRateBaseline?
@@ -197,9 +203,7 @@ struct NetworkSampler: Sendable {
         clear()
         let next = mapPath(path)
         selection = next
-        return NetworkObservation(sampled: false, valid: false, state: next.state, type: next.type,
-                                  receiveBytesPerSecond: 0, transmitBytesPerSecond: 0,
-                                  expensive: next.expensive, constrained: next.constrained)
+        return resetNetworkObservation(next)
     }
 
     mutating func consume(path: NWPath, timeNanoseconds: UInt64) -> NetworkObservation {
