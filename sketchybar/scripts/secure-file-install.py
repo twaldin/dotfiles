@@ -70,7 +70,7 @@ def source_info(path):
     return info
 
 
-def copy_to_temp(source, parent, prefix, mode):
+def copy_to_temp(source, parent, prefix, mode, expected_source=None):
     descriptor, raw = tempfile.mkstemp(prefix=prefix, dir=parent)
     temporary = pathlib.Path(raw)
     source_descriptor = -1
@@ -78,7 +78,14 @@ def copy_to_temp(source, parent, prefix, mode):
         source_descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         opened_source = os.fstat(source_descriptor)
         path_source = source.lstat()
-        if not stat.S_ISREG(opened_source.st_mode) or opened_source.st_uid != os.getuid() or opened_source.st_nlink != 1 or opened_source.st_dev != path_source.st_dev or opened_source.st_ino != path_source.st_ino:
+        if (not stat.S_ISREG(opened_source.st_mode)
+                or opened_source.st_uid != os.getuid()
+                or opened_source.st_nlink != 1
+                or opened_source.st_dev != path_source.st_dev
+                or opened_source.st_ino != path_source.st_ino
+                or (expected_source is not None
+                    and (opened_source.st_dev, opened_source.st_ino) !=
+                        (expected_source.st_dev, expected_source.st_ino))):
             raise OSError("source validation failed")
         os.fchmod(descriptor, mode)
         with os.fdopen(source_descriptor, "rb", closefd=False) as input_file, os.fdopen(descriptor, "wb", closefd=False) as output_file:
@@ -331,10 +338,20 @@ def validate_native_provenance(binary, marker, source_hash, binary_name=None):
         ).encode("ascii")
         if marker_content != expected_content:
             fail("Installed native helper provenance does not match", 75)
-        architecture = subprocess.run(["/usr/bin/lipo", "-archs", str(binary)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+        execution = _validated_execution_copy(binary, binary_hash)
+        architecture_ok = execution is not None and _native_architecture(execution)
+        if execution is not None:
+            try:
+                execution.unlink()
+            except OSError:
+                architecture_ok = False
         binary_after = binary.lstat()
         marker_after = marker.lstat()
-        if architecture.returncode != 0 or architecture.stdout.strip() != "arm64" or binary_after.st_dev != binary_expected.st_dev or binary_after.st_ino != binary_expected.st_ino or marker_after.st_dev != marker_expected.st_dev or marker_after.st_ino != marker_expected.st_ino:
+        if (not architecture_ok
+                or binary_after.st_dev != binary_expected.st_dev
+                or binary_after.st_ino != binary_expected.st_ino
+                or marker_after.st_dev != marker_expected.st_dev
+                or marker_after.st_ino != marker_expected.st_ino):
             fail("Installed native helper provenance does not match", 75)
     except OSError:
         if binary_descriptor >= 0:
@@ -344,6 +361,35 @@ def validate_native_provenance(binary, marker, source_hash, binary_name=None):
         fail("Installed native helper provenance validation failed")
     os.close(binary_descriptor)
     os.close(marker_descriptor)
+    return binary_hash
+
+
+def validate_system_controls_release(binary, marker, source_hash, installed=False):
+    binary_hash = validate_native_provenance(
+        binary, marker, source_hash, "system-controls" if installed else None)
+    execution = _validated_execution_copy(binary, binary_hash)
+    if execution is None:
+        fail("System controls release validation failed", 75)
+    environment = {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": os.path.expanduser("~"),
+        "LANG": "C", "LC_ALL": "C",
+    }
+    try:
+        result = subprocess.run(
+            [str(execution), "--self-test"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
+            timeout=10, check=False)
+        if (result.returncode != 64 or len(result.stdout) > 4096
+                or b"\x00" in result.stdout or result.stderr != b""):
+            fail("Release system controls helper exposes a fixture backend", 75)
+    except (OSError, subprocess.SubprocessError):
+        fail("System controls release validation failed", 75)
+    finally:
+        try:
+            execution.unlink()
+        except OSError:
+            pass
 
 
 def prepare_sbarlua_structure(directory):
@@ -421,7 +467,7 @@ def ensure_private_directory(path):
         fail("Private install directory must have mode 0700")
 
 
-def install_executable(source, destination, expected_hash, verify_self_test=False):
+def install_executable(source, destination, expected_hash, verify_self_test=False, silent_self_test=False):
     if (len(expected_hash) != 64
             or any(character not in "0123456789abcdef" for character in expected_hash)):
         fail("Executable checksum is invalid", 64)
@@ -435,11 +481,13 @@ def install_executable(source, destination, expected_hash, verify_self_test=Fals
         if verify_self_test:
             verified = subprocess.run(
                 [str(temporary), "--self-test"], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE if silent_self_test else subprocess.DEVNULL,
+                stderr=subprocess.PIPE if silent_self_test else subprocess.DEVNULL,
                 env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                      "HOME": os.path.expanduser("~"), "LANG": "C", "LC_ALL": "C"},
                 timeout=30, check=False)
-            if verified.returncode != 0:
+            if (verified.returncode != 0
+                    or silent_self_test and (verified.stdout != b"" or verified.stderr != b"")):
                 raise OSError("candidate self-test failed")
         os.replace(temporary, destination)
         file_info(destination, {0o755}, optional=False)
@@ -450,6 +498,364 @@ def install_executable(source, destination, expected_hash, verify_self_test=Fals
         if temporary.exists() and not temporary.is_symlink():
             temporary.unlink()
         fail("Executable publication failed")
+
+
+def _validated_execution_copy(binary, expected_hash):
+    directory = binary.parent
+    temporary = copy_to_temp(binary, directory, ".native-exec.", 0o500)
+    try:
+        if hashlib.sha256(temporary.read_bytes()).hexdigest() != expected_hash:
+            raise OSError("native execution copy checksum changed")
+        os.chmod(temporary, 0o500)
+        return temporary
+    except OSError:
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+        return None
+
+
+def _native_pair_check(binary, check_mode, expected_hash):
+    environment = {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": os.path.expanduser("~"),
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+    execution = _validated_execution_copy(binary, expected_hash)
+    if execution is None:
+        return False
+    try:
+        if not _native_architecture(execution):
+            return False
+        result = subprocess.run(
+            [str(execution), "--self-test"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            timeout=30,
+            check=False,
+        )
+        if check_mode == "silent-state":
+            self_test_ok = result.returncode == 0 and result.stdout == b"" and result.stderr == b""
+        else:
+            self_test_ok = (result.returncode == 0
+                            and result.stdout == b'{"status":"self_test_passed"}\n'
+                            and result.stderr == b"")
+        if not self_test_ok:
+            return False
+        if check_mode != "silent-state":
+            return True
+        state = subprocess.run(
+            [str(execution), "state"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            timeout=30,
+            check=False,
+        )
+        return (state.returncode == 0 and state.stderr == b""
+                and 0 < len(state.stdout) <= 131072 and b"\x00" not in state.stdout)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        try:
+            execution.unlink()
+        except OSError:
+            pass
+
+
+def _same_identity(path, expected):
+    try:
+        current = path.lstat()
+    except OSError:
+        return False
+    return (stat.S_ISREG(current.st_mode)
+            and current.st_uid == os.getuid()
+            and current.st_nlink == 1
+            and (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino))
+
+
+def _native_pair_marker(contract, source_hash, bridge_hash, binary_hash):
+    values = [source_hash, binary_hash]
+    if bridge_hash is not None:
+        values.append(bridge_hash)
+    if any(len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
+           for value in values):
+        fail("Native pair source checksum is invalid", 64)
+    build_contract = "target=arm64-apple-macosx15.0\nbuild_mode=-O\n"
+    if contract == "display" and bridge_hash is None:
+        return ("version=2\nsource_sha256=" + source_hash + "\n" + build_contract
+                + "binary_sha256=" + binary_hash + "\n").encode("ascii")
+    if contract == "hardware" and bridge_hash is not None:
+        return ("version=2\nswift_sha256=" + source_hash +
+                "\nbridge_sha256=" + bridge_hash + "\n" + build_contract
+                + "binary_sha256=" + binary_hash + "\n").encode("ascii")
+    fail("Invalid native pair marker contract", 64)
+
+
+def _open_pair_lock(directory, name, label):
+    lock = directory / name
+    descriptor = -1
+    try:
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        os.fchmod(descriptor, 0o600)
+        opened = os.fstat(descriptor)
+        current = lock.lstat()
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
+                or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o600
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+            raise OSError("pair lock identity is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.fsync(descriptor)
+        sync_directory(directory)
+        return descriptor
+    except OSError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        fail(label + " transaction is busy or unsafe", 75)
+
+
+def _hash_open_descriptor(descriptor):
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_open_descriptor(descriptor, maximum):
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    value = bytearray()
+    while len(value) <= maximum:
+        chunk = os.read(descriptor, min(4096, maximum + 1 - len(value)))
+        if not chunk:
+            return bytes(value)
+        value.extend(chunk)
+    return None
+
+
+def _native_architecture(binary):
+    try:
+        result = subprocess.run(
+            ["/usr/bin/lipo", "-archs", str(binary)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0 and result.stdout == "arm64\n"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _validate_published_native_pair(binary, marker, binary_identity, marker_identity,
+                                    binary_hash, expected_marker):
+    binary_descriptor = -1
+    marker_descriptor = -1
+    try:
+        binary_descriptor = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        marker_descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        opened_binary = os.fstat(binary_descriptor)
+        opened_marker = os.fstat(marker_descriptor)
+
+        def exact_paths():
+            current_binary = binary.lstat()
+            current_marker = marker.lstat()
+            return (
+                stat.S_ISREG(opened_binary.st_mode)
+                and opened_binary.st_uid == os.getuid()
+                and opened_binary.st_nlink == 1
+                and stat.S_IMODE(opened_binary.st_mode) == 0o755
+                and (opened_binary.st_dev, opened_binary.st_ino) ==
+                    (binary_identity.st_dev, binary_identity.st_ino)
+                and (current_binary.st_dev, current_binary.st_ino) ==
+                    (binary_identity.st_dev, binary_identity.st_ino)
+                and current_binary.st_nlink == 1
+                and stat.S_ISREG(opened_marker.st_mode)
+                and opened_marker.st_uid == os.getuid()
+                and opened_marker.st_nlink == 1
+                and stat.S_IMODE(opened_marker.st_mode) == 0o644
+                and (opened_marker.st_dev, opened_marker.st_ino) ==
+                    (marker_identity.st_dev, marker_identity.st_ino)
+                and (current_marker.st_dev, current_marker.st_ino) ==
+                    (marker_identity.st_dev, marker_identity.st_ino)
+                and current_marker.st_nlink == 1
+            )
+
+        if (not exact_paths()
+                or _hash_open_descriptor(binary_descriptor) != binary_hash
+                or _read_open_descriptor(marker_descriptor, 512) != expected_marker):
+            return False
+        return (exact_paths()
+                and _hash_open_descriptor(binary_descriptor) == binary_hash
+                and _read_open_descriptor(marker_descriptor, 512) == expected_marker)
+    except OSError:
+        return False
+    finally:
+        if binary_descriptor >= 0:
+            os.close(binary_descriptor)
+        if marker_descriptor >= 0:
+            os.close(marker_descriptor)
+
+
+def install_native_pair(binary_source, marker_source, binary, marker,
+                        binary_hash, marker_hash, contract, source_hash, bridge_hash=None):
+    if binary.parent != marker.parent or binary == marker or contract not in {"hardware", "display"}:
+        fail("Invalid native pair arguments", 64)
+    for value in (binary_hash, marker_hash):
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            fail("Native pair checksum is invalid", 64)
+    expected_marker = _native_pair_marker(contract, source_hash, bridge_hash, binary_hash)
+    if hashlib.sha256(expected_marker).hexdigest() != marker_hash:
+        fail("Native pair marker checksum does not match its contract", 64)
+    check_mode = "silent-state" if contract == "hardware" else "json"
+    ensure_private_directory(binary.parent)
+    lock_descriptor = _open_pair_lock(binary.parent, ".native-pair.lock", "Native pair")
+    try:
+        _install_native_pair_locked(
+            binary_source, marker_source, binary, marker, binary_hash, marker_hash,
+            expected_marker, check_mode)
+    finally:
+        os.close(lock_descriptor)
+
+
+def _install_native_pair_locked(binary_source, marker_source, binary, marker,
+                                binary_hash, marker_hash, expected_marker, check_mode):
+    binary_existing = None
+    marker_existing = None
+    binary_stage = None
+    marker_stage = None
+    binary_backup = None
+    marker_backup = None
+    binary_published = None
+    marker_published = None
+    previous_handlers = {}
+
+    def interrupted(signum, _frame):
+        raise InterruptedError("Native pair publication interrupted by signal " + str(signum))
+
+    def restore_handlers():
+        for handled_signal, previous in previous_handlers.items():
+            signal.signal(handled_signal, previous)
+
+    def ignore_handlers():
+        for handled_signal in previous_handlers:
+            signal.signal(handled_signal, signal.SIG_IGN)
+
+    def safe_live_file(destination, mode):
+        try:
+            current = destination.lstat()
+        except FileNotFoundError:
+            return None
+        if (not stat.S_ISREG(current.st_mode) or current.st_uid != os.getuid()
+                or current.st_nlink != 1 or stat.S_IMODE(current.st_mode) != mode):
+            raise OSError("native pair live path became unsafe")
+        return current
+
+    def restore_one(destination, backup, existing, published, mode):
+        if backup is not None:
+            backup_info = backup.lstat()
+            try:
+                live_info = destination.lstat()
+            except FileNotFoundError:
+                live_info = None
+            if (live_info is not None
+                    and stat.S_ISREG(live_info.st_mode)
+                    and live_info.st_uid == os.getuid()
+                    and (live_info.st_dev, live_info.st_ino) ==
+                        (backup_info.st_dev, backup_info.st_ino)):
+                backup.unlink()
+                return None
+            safe_live_file(destination, mode)
+            if (published is None
+                    or live_info is None
+                    or (live_info.st_dev, live_info.st_ino) != (published.st_dev, published.st_ino)):
+                raise OSError("native pair existing path changed before rollback")
+            os.replace(backup, destination)
+            return None
+        if existing is None and published is not None:
+            live_info = safe_live_file(destination, mode)
+            if live_info is not None:
+                if (live_info.st_dev, live_info.st_ino) != (published.st_dev, published.st_ino):
+                    raise OSError("native pair first-install path changed before rollback")
+                destination.unlink()
+        return None
+
+    def cleanup(paths):
+        for path in paths:
+            if path is not None and path.exists() and not path.is_symlink():
+                path.unlink()
+
+    try:
+        for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            previous_handlers[handled_signal] = signal.signal(handled_signal, interrupted)
+        binary_existing = file_info(binary, {0o755})
+        marker_existing = file_info(marker, {0o644})
+        binary_source_identity = source_info(binary_source)
+        marker_source_identity = source_info(marker_source)
+        binary_stage = copy_to_temp(
+            binary_source, binary.parent, ".native-binary.stage.", 0o755, binary_source_identity)
+        marker_stage = copy_to_temp(
+            marker_source, binary.parent, ".native-marker.stage.", 0o644, marker_source_identity)
+        if (hashlib.sha256(binary_stage.read_bytes()).hexdigest() != binary_hash
+                or hashlib.sha256(marker_stage.read_bytes()).hexdigest() != marker_hash
+                or marker_stage.read_bytes() != expected_marker
+                or not _native_pair_check(binary_stage, check_mode, binary_hash)):
+            raise OSError("native pair candidate validation failed")
+        binary_backup = (hardlink_backup(binary, ".native-binary.backup.", {0o755})
+                         if binary_existing is not None else None)
+        marker_backup = (hardlink_backup(marker, ".native-marker.backup.", {0o644})
+                         if marker_existing is not None else None)
+        os.replace(binary_stage, binary)
+        binary_published = binary.lstat()
+        os.replace(marker_stage, marker)
+        marker_published = marker.lstat()
+        if (not _validate_published_native_pair(
+                    binary, marker, binary_published, marker_published,
+                    binary_hash, expected_marker)
+                or not _native_pair_check(binary, check_mode, binary_hash)
+                or not _validate_published_native_pair(
+                    binary, marker, binary_published, marker_published,
+                    binary_hash, expected_marker)):
+            raise OSError("native pair published validation failed")
+        sync_directory(binary.parent)
+        ignore_handlers()
+    except (OSError, subprocess.SubprocessError, InterruptedError, SystemExit):
+        ignore_handlers()
+        rollback_failed = False
+        try:
+            binary_backup = restore_one(
+                binary, binary_backup, binary_existing, binary_published, 0o755)
+        except OSError:
+            rollback_failed = True
+        try:
+            marker_backup = restore_one(
+                marker, marker_backup, marker_existing, marker_published, 0o644)
+        except OSError:
+            rollback_failed = True
+        try:
+            cleanup((binary_backup, marker_backup, binary_stage, marker_stage))
+            sync_directory(binary.parent)
+        except OSError:
+            rollback_failed = True
+        restore_handlers()
+        if rollback_failed:
+            fail("Native pair publication and rollback failed")
+        fail("Native pair publication failed")
+    try:
+        cleanup((binary_backup, marker_backup, binary_stage, marker_stage))
+        sync_directory(binary.parent)
+    except OSError:
+        restore_handlers()
+        fail("Native pair cleanup failed")
+    restore_handlers()
 
 
 def prepare_asset(destination):
@@ -478,7 +884,16 @@ def install_sbarlua(source, commit, directory, test_fixtures=False):
         fail("SbarLua test fixture environment requires --test-fixtures", 64)
     if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
         fail("SbarLua commit is invalid", 64)
-    prepare_sbarlua_structure(directory)
+    ensure_directory(directory)
+    lock_descriptor = _open_pair_lock(directory, ".sbarlua-pair.lock", "SbarLua pair")
+    try:
+        prepare_sbarlua_structure(directory)
+        _install_sbarlua_locked(source, commit, directory, test_fixtures)
+    finally:
+        os.close(lock_descriptor)
+
+
+def _install_sbarlua_locked(source, commit, directory, test_fixtures=False):
     source_info(source)
     module = directory / "sketchybar.so"
     marker = directory / "COMMIT"
@@ -517,11 +932,39 @@ def install_sbarlua(source, commit, directory, test_fixtures=False):
                 staged.unlink()
         restore_handlers()
         fail("SbarLua backup creation failed")
-    module_published = False
-    marker_published = False
+    module_published = None
+    marker_published = None
+
+    def restore_published(destination, backup, published, mode):
+        try:
+            live = destination.lstat()
+        except FileNotFoundError:
+            live = None
+        if backup is not None:
+            backup_info = backup.lstat()
+            if (live is not None and stat.S_ISREG(live.st_mode)
+                    and live.st_uid == os.getuid()
+                    and (live.st_dev, live.st_ino) == (backup_info.st_dev, backup_info.st_ino)):
+                backup.unlink()
+                return None
+            if (published is None or live is None or not stat.S_ISREG(live.st_mode)
+                    or live.st_uid != os.getuid() or live.st_nlink != 1
+                    or stat.S_IMODE(live.st_mode) != mode
+                    or (live.st_dev, live.st_ino) != (published.st_dev, published.st_ino)):
+                raise OSError("SbarLua live path changed before rollback")
+            os.replace(backup, destination)
+            return None
+        if published is not None and live is not None:
+            if (not stat.S_ISREG(live.st_mode) or live.st_uid != os.getuid()
+                    or live.st_nlink != 1 or stat.S_IMODE(live.st_mode) != mode
+                    or (live.st_dev, live.st_ino) != (published.st_dev, published.st_ino)):
+                raise OSError("SbarLua first-install path changed before rollback")
+            destination.unlink()
+        return None
+
     try:
         os.replace(module_stage, module)
-        module_published = True
+        module_published = module.lstat()
         signal_ready = (os.environ.get("SKETCHYBAR_SBARLUA_SIGNAL_READY")
                         if test_fixtures else None)
         if signal_ready:
@@ -536,7 +979,7 @@ def install_sbarlua(source, commit, directory, test_fixtures=False):
         if test_fixtures and os.environ.get("SKETCHYBAR_SBARLUA_FAIL_MARKER") == "1":
             raise OSError("synthetic marker failure")
         os.replace(marker_stage, marker)
-        marker_published = True
+        marker_published = marker.lstat()
         file_info(module, {0o755}, optional=False)
         file_info(marker, {0o600}, optional=False)
         if marker.read_text() != commit + "\n" + module_hash + "\n":
@@ -545,36 +988,28 @@ def install_sbarlua(source, commit, directory, test_fixtures=False):
         ignore_handlers()
     except (OSError, SystemExit):
         ignore_handlers()
+        rollback_failed = False
         try:
-            if module_backup is not None:
-                backup_info = module_backup.lstat()
-                live_info = module.lstat() if module.exists() and not module.is_symlink() else None
-                if live_info is not None and live_info.st_dev == backup_info.st_dev and live_info.st_ino == backup_info.st_ino:
-                    module_backup.unlink()
-                else:
-                    os.replace(module_backup, module)
-                module_backup = None
-            elif module.exists() and not module.is_symlink():
-                module.unlink()
-            if marker_backup is not None:
-                backup_info = marker_backup.lstat()
-                live_info = marker.lstat() if marker.exists() and not marker.is_symlink() else None
-                if live_info is not None and live_info.st_dev == backup_info.st_dev and live_info.st_ino == backup_info.st_ino:
-                    marker_backup.unlink()
-                else:
-                    os.replace(marker_backup, marker)
-                marker_backup = None
-            elif marker.exists() and not marker.is_symlink():
-                marker.unlink()
+            module_backup = restore_published(module, module_backup, module_published, 0o755)
+        except OSError:
+            rollback_failed = True
+        try:
+            marker_backup = restore_published(marker, marker_backup, marker_published, 0o600)
+        except OSError:
+            rollback_failed = True
+        for path in (module_backup, marker_backup, module_stage, marker_stage):
+            try:
+                if path is not None and path.exists() and not path.is_symlink():
+                    path.unlink()
+            except OSError:
+                rollback_failed = True
+        try:
             sync_directory(directory)
         except OSError:
-            restore_handlers()
-            fail("SbarLua publication and rollback failed")
-        for path in (module_backup, marker_backup, module_stage, marker_stage):
-            if path is not None and path.exists() and not path.is_symlink():
-                path.unlink()
-        sync_directory(directory)
+            rollback_failed = True
         restore_handlers()
+        if rollback_failed:
+            fail("SbarLua publication and rollback failed")
         fail("SbarLua publication failed")
     success_ready = (os.environ.get("SKETCHYBAR_SBARLUA_SUCCESS_READY")
                      if test_fixtures else None)
@@ -617,15 +1052,31 @@ def main():
             fail("Invalid sync file mode", 64)
         sync_file(pathlib.Path(sys.argv[2]), expected_mode)
     elif mode == "system-controls-provenance" and len(sys.argv) == 5:
-        validate_native_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4], "system-controls")
+        validate_system_controls_release(
+            pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4], installed=True)
     elif mode == "system-controls-candidate-provenance" and len(sys.argv) == 5:
-        validate_native_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4])
+        validate_system_controls_release(
+            pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4])
     elif mode == "prepare-sbarlua" and len(sys.argv) == 5:
         prepare_sbarlua_runtime(pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4])
-    elif mode == "executable" and len(sys.argv) == 6 and sys.argv[5] == "--self-test":
+    elif mode == "native-pair":
+        if len(sys.argv) == 10 and sys.argv[8] == "--display":
+            install_native_pair(
+                pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]),
+                pathlib.Path(sys.argv[4]), pathlib.Path(sys.argv[5]),
+                sys.argv[6], sys.argv[7], "display", sys.argv[9])
+        elif len(sys.argv) == 11 and sys.argv[8] == "--hardware":
+            install_native_pair(
+                pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]),
+                pathlib.Path(sys.argv[4]), pathlib.Path(sys.argv[5]),
+                sys.argv[6], sys.argv[7], "hardware", sys.argv[9], sys.argv[10])
+        else:
+            fail("Invalid native pair arguments", 64)
+    elif (mode == "executable" and len(sys.argv) == 6
+          and sys.argv[5] in {"--self-test", "--self-test-silent"}):
         install_executable(
             pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4],
-            verify_self_test=True)
+            verify_self_test=True, silent_self_test=sys.argv[5] == "--self-test-silent")
     elif mode == "prepare-asset" and len(sys.argv) == 3:
         prepare_asset(pathlib.Path(sys.argv[2]))
     elif mode == "asset" and len(sys.argv) == 4:

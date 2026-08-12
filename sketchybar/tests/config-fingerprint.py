@@ -15,7 +15,7 @@ def runtime_paths():
         values.extend(path for path in directory.rglob("*.lua") if path.is_file())
     scripts = root / "scripts"
     values.extend(path for path in scripts.rglob("*")
-                  if path.is_file() and path.suffix in {".py", ".sh", ".swift"})
+                  if path.is_file() and path.suffix in {".py", ".sh", ".swift", ".h"})
     provider = root / "providers" / "public-stats"
     values.append(provider / "Package.swift")
     values.extend(path for path in (provider / "Sources").rglob("*") if path.is_file())
@@ -25,12 +25,20 @@ def runtime_paths():
 required_runtime_paths = {
     root / "install-deps.sh",
     root / "scripts/audio-state.py",
+    root / "scripts/battery-hardware-state.py",
+    root / "scripts/battery-hardware.swift",
     root / "scripts/battery-state.py",
     root / "scripts/battery-state.swift",
+    root / "scripts/betterdisplay-control.swift",
     root / "scripts/connectivity-state.py",
+    root / "scripts/connectivity-state.swift",
+    root / "scripts/hardware-metrics-bridge.h",
+    root / "scripts/hardware-metrics.swift",
+    root / "scripts/hardware-state.py",
     root / "scripts/provider-launch.sh",
     root / "scripts/provider-log.py",
     root / "scripts/secure-file-install.py",
+    root / "scripts/sketchybar-launch-agent.py",
     root / "scripts/system-controls.swift",
     root / "providers/public-stats/Package.swift",
     root / "launch-agents/homebrew.mxcl.sketchybar.plist",

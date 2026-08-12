@@ -94,15 +94,17 @@ end
 
 local function action_row(token, suffix, label, selected, callback)
   local row = popup.row(item, token, suffix, {
-    icon = { drawing = true, string = selected and "✓" or "", width = 24, color = selected and colors.green or colors.blue, padding_left = 8, padding_right = 0 },
+    icon = { drawing = true, string = selected and "✓" or "", width = 24, color = selected and colors.green or state.busy and colors.muted or colors.blue, padding_left = 8, padding_right = 0 },
     label = { string = shell.ellipsis(label, 30), color = selected and colors.primary or colors.muted },
     background = { drawing = selected, color = colors.surface2 },
   })
   if not row then return row end
-  popup.action(row, { selected = selected, idle_color = selected and colors.primary or colors.muted, idle_icon_color = selected and colors.green or colors.blue })
-  if not selected and not state.busy then popup.on_click(row, function(env)
-    if left_click(env) and popup.is_current(item, token) then callback() end
-  end) end
+  if not state.busy then
+    popup.action(row, { selected = selected, idle_color = selected and colors.primary or colors.muted, idle_icon_color = selected and colors.green or colors.blue })
+    if not selected then popup.on_click(row, function(env)
+      if left_click(env) and popup.is_current(item, token) then callback() end
+    end) end
+  end
   return row
 end
 
@@ -128,7 +130,13 @@ build_rows = function(token)
     })
   end
 
-  if controls and direction and direction.volume.available
+  if state.confirmed and type(state.warning_count) == "number" and state.warning_count > 0 then
+    popup.note(item, token, "state_incomplete", "Some audio state could not be read", {
+      color = colors.warning, max_chars = 40,
+    })
+  end
+
+  if not state.busy and controls and direction and direction.volume.available
      and direction.volume.settable and level then
     popup.slider(item, token, "level", level, function(env)
       local value = tonumber(env and env.PERCENTAGE)
@@ -140,6 +148,7 @@ build_rows = function(token)
     local reason = not state.confirmed and "Audio state is unavailable"
       or not direction and "Current sound output is unavailable"
       or not controls and "Audio controls are unavailable"
+      or state.busy and "Level control is inactive while audio controls are busy"
       or "Level is controlled by the device"
     popup.row(item, token, "level_unavailable", {
       label = { string = reason, color = colors.muted },

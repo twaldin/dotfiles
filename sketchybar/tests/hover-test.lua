@@ -83,6 +83,16 @@ equal(hover.foreground(legacy, colors.critical), colors.critical, "critical surv
 equal(hover.foreground(legacy, colors.state.actionable), colors.state.actionable,
   "actionable safety state survives hover")
 equal(hover.foreground(legacy, colors.red), colors.red, "red safety state survives hover")
+equal(hover.foreground(legacy, 12), colors.primary,
+  "ordinary domain color keeps the shared hover cue")
+equal(hover.foreground(legacy, 12, true), 12,
+  "explicit semantic role preserves its idle color")
+local semantic = fake("semantic")
+hover.bind(semantic, { idle_color = 12, preserve_hover_color = true })
+fire(semantic, "mouse.entered")
+equal(semantic.properties.icon.color, 12,
+  "role-bound semantic color survives hover repaint")
+fire(semantic, "mouse.exited")
 for _, update in ipairs(legacy.history) do
   if update.background then
     equal(update.background.border_color, nil, "legacy hover never changes border")

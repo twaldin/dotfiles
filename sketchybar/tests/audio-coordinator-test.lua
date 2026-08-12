@@ -59,6 +59,7 @@ local function make_doc(overrides)
         input = {
           volume = { available = true, settable = true, value = 80 },
           mute   = { available = true, settable = true, value = false },
+          active = false,
         },
       },
     },
@@ -174,6 +175,19 @@ local hostile_mutations = {
   { tag = "mute value is number", mutate = function(d)
       d.devices[1].output.mute.value = 1
     end },
+  { tag = "active use is number", mutate = function(d)
+      d.devices[2].input.active = 1
+    end },
+  { tag = "active use on output", mutate = function(d)
+      d.devices[1].output.active = false
+    end },
+  { tag = "active use on duplex device", mutate = function(d)
+      d.devices[2].directions = { "input", "output" }
+      d.devices[2].output = {
+        volume = { available = true, settable = true, value = 25 },
+        mute = { available = true, settable = true, value = false },
+      }
+    end },
   { tag = "empty handle", mutate = function(d)
       d.devices[1].key = ""
     end },
@@ -268,6 +282,8 @@ do
   check(v.devices[1].name == "Test Speakers", "device 1 name")
   check(v.devices[2].name == "Test Microphone", "device 2 name")
   check(v.devices[1].output.mute.value == false, "confirmed false mute must be preserved")
+  check(v.devices[2].input.active == false,
+        "confirmed false input active-use state must be preserved")
 
   -- Choice objects must contain zero handles.
   local choices = audio.choices("output")
@@ -301,7 +317,28 @@ do
   deep_no_key(view, KEYS, "redacted-view")
 end
 
-print("  opaque handle boundary: passed")
+do
+  local audio = fresh()
+  local doc = make_doc()
+  doc.devices[2].input.active = true
+  audio.refresh()
+  complete(1, doc, 0)
+  check(audio.view().devices[2].input.active == true,
+        "confirmed true input active-use state must be preserved")
+end
+
+do
+  local audio = fresh()
+  local doc = make_doc()
+  doc.devices[2].input.active = nil
+  audio.refresh()
+  complete(1, doc, 0)
+  check(audio.view().confirmed
+        and audio.view().devices[2].input.active == nil,
+        "absent input active-use state must remain omitted")
+end
+
+print("  opaque handle and active-use boundary: passed")
 
 do
   local audio = fresh()
@@ -358,6 +395,42 @@ do
   check(#exec_calls == 1, "coalesced to one exec call")
   complete(1, make_doc(), 0)
   check(called.a == 1 and called.b == 1, "both waiters called exactly once")
+end
+
+do
+  local audio = fresh()
+  audio.refresh()
+  check(audio.refresh(nil, true) == false,
+        "busy freshness request must coalesce")
+  complete(1, make_doc(), 0)
+  check(#exec_calls == 2
+        and exec_calls[2].command == shell.command(
+          { settings.paths.audio_state, "audio", "state" }),
+        "coalesced freshness request must retry immediately")
+  complete(2, make_doc(), 0)
+  check(#exec_calls == 2 and audio.view().confirmed,
+        "freshness retry must settle without a loop")
+end
+
+do
+  local audio = fresh()
+  local doc = make_doc()
+  doc.devices[2].input.active = true
+  audio.refresh()
+  complete(1, doc, 0)
+  audio.refresh()
+  check(audio.refresh(nil, true) == false,
+        "busy time-sensitive refresh must coalesce")
+  local cleared = audio.view()
+  check(cleared.confirmed and cleared.devices[2].name == "Test Microphone"
+        and cleared.devices[2].input.active == nil,
+        "busy freshness tick must hide only the time-sensitive claim")
+  complete(2, doc, 0)
+  check(#exec_calls == 3 and audio.view().devices[2].input.active == true,
+        "completed read must restore confirmed active-use state and retry")
+  complete(3, doc, 0)
+  check(#exec_calls == 3 and audio.view().devices[2].input.active == true,
+        "busy freshness retry must settle with confirmed state")
 end
 
 do
@@ -705,6 +778,8 @@ do
   check(type(v2.error) == "string", "error must be set after failure")
   check(v2.devices[1].name == "Test Speakers",
         "device data must survive failure")
+  check(v2.devices[2].input.active == nil,
+        "failed refresh must clear stale microphone active-use claims")
   check(v2.actions_available == false and #audio.choices("output") == 0
         and audio.controls("output") == nil,
         "failed refresh must disable newly resolved actions until session recovery")

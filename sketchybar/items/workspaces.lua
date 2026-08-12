@@ -2,6 +2,7 @@ local colors = require("colors")
 local settings = require("settings")
 local shell = require("lib.shell")
 local hover = require("lib.hover")
+local popup = require("lib.popup")
 local icons = require("lib.icons")
 local spaces = {}
 local selected = {}
@@ -11,6 +12,7 @@ local apps_by_space = {}
 local selected_space = nil
 local focused_app = ""
 local yabai_available = false
+local availability_reason = "Checking Yabai query"
 local refresh_apps
 
 local function visible_apps(index)
@@ -80,8 +82,8 @@ local function configured_space_ids()
 end
 
 local function valid_space_id(value)
-  value = tonumber(value)
-  return value and value >= 1 and value <= 9 and value == math.floor(value) and value or nil
+  return type(value) == "number" and value >= 1 and value <= 9
+    and value == math.floor(value) and value or nil
 end
 
 local function apply_space_ids(ids)
@@ -96,6 +98,12 @@ end
 
 
 local function render_availability(available)
+  if available and spaces[1] and popup.is_open(spaces[1]) then popup.close() end
+  if not available then
+    for _, item in ipairs(spaces) do
+      if hover.is_active(item) then hover.clear(); break end
+    end
+  end
   for index, item in ipairs(spaces) do
     item:set({
       icon = { color = available and (selected[index] and colors.accent or colors.muted)
@@ -111,10 +119,18 @@ local function refresh_availability()
   local token = refresh_generation
   shell.exec_quiet({ settings.paths.yabai, "-m", "query", "--spaces" }, function(yabai_spaces, yabai_exit)
     if token ~= refresh_generation then return end
+    local failure_reason = "Yabai topology does not match"
+    if yabai_exit ~= 0 then
+      failure_reason = "Yabai query failed"
+    elseif type(yabai_spaces) ~= "table" then
+      failure_reason = "Yabai query response is invalid"
+    elseif #yabai_spaces == 0 then
+      failure_reason = "Yabai query returned no Spaces"
+    end
     if yabai_exit == 0 and type(yabai_spaces) == "table" and #yabai_spaces > 0 then
       local ids, seen, valid = {}, {}, true
       for _, space in ipairs(yabai_spaces) do
-        if type(space) == "table" and tonumber(space.display) == 1 then
+        if type(space) == "table" and space.display == 1 then
           local id = valid_space_id(space.index)
           if not id or seen[id] or #ids >= 9 then valid = false; break end
           seen[id] = true
@@ -131,6 +147,7 @@ local function refresh_availability()
       end
       if valid then
         yabai_available = true
+        availability_reason = "Yabai query and topology are healthy"
         apply_space_ids(ids)
         render_availability(true)
         refresh_apps(token)
@@ -138,6 +155,7 @@ local function refresh_availability()
       end
     end
     yabai_available = false
+    availability_reason = failure_reason
     windows_generation = windows_generation + 1
     apps_by_space = {}
     selected_space = nil
@@ -187,6 +205,27 @@ local function refresh_all()
   refresh_availability()
 end
 
+local recovery_popup_options = {
+  align = "left",
+  idle_background = false,
+  build = function(token)
+    local host = spaces[1]
+    popup.header(host, token, "SPACES", "YABAI UNAVAILABLE", { color = colors.state.actionable })
+    popup.note(host, token, "reason", availability_reason, {
+      align = "center", color = colors.state.actionable, max_chars = 48,
+    })
+    popup.section(host, token, "requirements_heading", "Required setup")
+    popup.note(host, token, "version", "Signed Yabai app version: 7.1.25")
+    popup.note(host, token, "path", "App path: $HOME/Applications/Yabai.app")
+    popup.note(host, token, "topology", "Spaces: exactly 9 global indices 1–9")
+    popup.note(host, token, "display", "Display: all nine Spaces on display 1")
+    popup.section(host, token, "open_heading", "Open")
+    popup.link(host, token, "setup_guide", "Open official Yabai setup guide", function()
+      shell.open("https://github.com/asmvik/yabai/wiki/Installing-yabai-(latest-release)")
+    end)
+  end,
+}
+
 -- Standard left-position ordering keeps Space 1 at the outside edge.
 for index = 1, 9 do
   local item = sbar.add("space", "space." .. index, {
@@ -213,6 +252,17 @@ for index = 1, 9 do
       font = settings.type.bar_space_app,
     },
     background = { drawing = false, color = colors.surface, height = settings.surface_height, corner_radius = 0 },
+    popup = index == 1 and {
+      align = "left",
+      topmost = true,
+      blur_radius = 0,
+      background = {
+        color = colors.popup,
+        border_width = 1,
+        border_color = colors.border,
+        corner_radius = 0,
+      },
+    } or nil,
   })
   spaces[index] = item
   item:set({ background = { drawing = false } })
@@ -235,9 +285,17 @@ for index = 1, 9 do
       if not yabai_available then return colors.state.actionable end
       return selected[index] and colors.accent or colors.muted
     end,
+    on_change = function(active)
+      if active and not yabai_available then hover.clear() end
+    end,
   })
   item:subscribe("mouse.clicked", function()
-    if yabai_available then shell.exec({ settings.config_dir .. "/scripts/focus-space.sh", tostring(index) }) end
+    if yabai_available then
+      shell.exec({ settings.config_dir .. "/scripts/focus-space.sh", tostring(index) })
+    else
+      popup.open(spaces[1], recovery_popup_options)
+      hover.set_popup_open(spaces[1], false)
+    end
   end)
   item:subscribe("mouse.scrolled", function(env)
     if not yabai_available then return end

@@ -4,13 +4,13 @@ struct ContractTests {
     private let instance = "0123456789abcdef0123456789abcdef"
     private let replacementInstance = "fedcba9876543210fedcba9876543210"
 
-    func testInitialMetricsHasExactV2KeysAndFixedValues() throws {
+    func testInitialMetricsHasExactV3KeysAndFixedValues() throws {
         let event = try ContractSerializer.metrics(
             MetricsSnapshot(producerInstance: instance, logicalProcessors: 8, activeProcessors: 6)
         )
         XCTAssertEqual(event.event, .metrics)
         XCTAssertEqual(event.fields.map(\.0), ContractSerializer.metricsRequiredKeys)
-        XCTAssertEqual(value("METRICS_SCHEMA", in: event), "2")
+        XCTAssertEqual(value("METRICS_SCHEMA", in: event), "3")
         XCTAssertEqual(value("PRODUCER_INSTANCE", in: event), instance)
         XCTAssertEqual(value("METRICS_SEQ", in: event), "00000000000000000000")
         XCTAssertEqual(value("METRICS_SAMPLE_EPOCH_S", in: event), "1")
@@ -24,7 +24,9 @@ struct ContractTests {
         XCTAssertEqual(value("GPU_ACTIVITY_VALID", in: event), "0")
         XCTAssertFalse(event.fields.contains { $0.0.contains("GPU_ACTIVITY") && $0.0 != "GPU_ACTIVITY_VALID" })
         XCTAssertFalse(event.fields.contains { $0.0.hasPrefix("CPU_CORE_") })
-        XCTAssertFalse(event.fields.contains { $0.0.hasPrefix("SSD_IO") || $0.0 == "SSD_READ_BPS" || $0.0 == "SSD_WRITE_BPS" })
+        XCTAssertEqual(value("SSD_IO_SAMPLED", in: event), "0")
+        XCTAssertEqual(value("SSD_IO_VALID", in: event), "0")
+        XCTAssertEqual(value("NET_SESSION_VALID", in: event), "0")
     }
 
     func testCPUDetailHasExactFixedV1ShapeAndValidatesRelations() throws {
@@ -169,12 +171,19 @@ struct ContractTests {
         snapshot.storageUsedBytes = 75
         snapshot.storageUsedPercent = 75
         snapshot.importantAvailableBytes = 40
+        snapshot.storageIOSampled = true
+        snapshot.storageIOValid = true
+        snapshot.storageReadBytesPerSecond = 30
+        snapshot.storageWriteBytesPerSecond = 40
         snapshot.networkSampled = true
         snapshot.networkValid = true
         snapshot.networkState = .satisfied
         snapshot.networkPathType = .wifi
         snapshot.networkReceiveBytesPerSecond = 10
         snapshot.networkTransmitBytesPerSecond = 20
+        snapshot.networkSessionValid = true
+        snapshot.networkSessionReceiveBytes = 100
+        snapshot.networkSessionTransmitBytes = 200
         snapshot.networkExpensive = true
         snapshot.networkConstrained = true
         snapshot.thermalValid = true
@@ -188,11 +197,59 @@ struct ContractTests {
         snapshot.gpuLowPower = true
         snapshot.gpuRecommendedMaximumBytes = 1_024
         let event = try ContractSerializer.metrics(snapshot)
-        for key in ["CPU_VALID", "MEM_VALID", "SWAP_VALID", "SSD_VALID", "NET_VALID",
-                    "THERMAL_VALID", "PRESSURE_VALID", "GPU_CAPS_VALID", "GPU_PRESENT"] {
+        for key in ["CPU_VALID", "MEM_VALID", "SWAP_VALID", "SSD_VALID", "SSD_IO_VALID",
+                    "NET_VALID", "NET_SESSION_VALID", "THERMAL_VALID", "PRESSURE_VALID", "GPU_CAPS_VALID", "GPU_PRESENT"] {
             XCTAssertEqual(value(key, in: event), "1")
         }
         XCTAssertEqual(value("LOW_POWER_STATE", in: event), "on")
+    }
+
+    func testMetricsV3IndependentRateSessionAndStorageIORelations() throws {
+        var baseline = MetricsSnapshot(producerInstance: instance, logicalProcessors: 4, activeProcessors: 4)
+        baseline.networkSampled = true
+        baseline.networkState = .satisfied
+        baseline.networkPathType = .wifi
+        baseline.networkSessionValid = true
+        var event = try ContractSerializer.metrics(baseline)
+        XCTAssertEqual(value("NET_VALID", in: event), "0")
+        XCTAssertEqual(value("NET_SESSION_VALID", in: event), "1")
+        XCTAssertEqual(value("NET_SESSION_RX_B", in: event), "0")
+        XCTAssertEqual(value("NET_SESSION_TX_B", in: event), "0")
+
+        baseline.storageIOSampled = true
+        baseline.storageIOValid = true
+        baseline.storageReadBytesPerSecond = maximumLuaExactInteger
+        baseline.storageWriteBytesPerSecond = maximumLuaExactInteger
+        baseline.networkValid = true
+        baseline.networkReceiveBytesPerSecond = maximumLuaExactInteger
+        baseline.networkTransmitBytesPerSecond = maximumLuaExactInteger
+        baseline.networkSessionReceiveBytes = maximumLuaExactInteger
+        baseline.networkSessionTransmitBytes = maximumLuaExactInteger
+        event = try ContractSerializer.metrics(baseline)
+        XCTAssertEqual(value("SSD_READ_BPS", in: event), String(maximumLuaExactInteger))
+        XCTAssertEqual(value("NET_SESSION_RX_B", in: event), String(maximumLuaExactInteger))
+
+        var invalid = baseline
+        invalid.storageReadBytesPerSecond = maximumLuaExactInteger + 1
+        XCTAssertThrowsError(try ContractSerializer.metrics(invalid))
+        invalid = baseline
+        invalid.networkSessionReceiveBytes = maximumLuaExactInteger + 1
+        XCTAssertThrowsError(try ContractSerializer.metrics(invalid))
+        invalid = baseline
+        invalid.networkReceiveBytesPerSecond = maximumLuaExactInteger + 1
+        XCTAssertThrowsError(try ContractSerializer.metrics(invalid))
+        invalid = baseline
+        invalid.storageIOValid = false
+        XCTAssertThrowsError(try ContractSerializer.metrics(invalid))
+        invalid = baseline
+        invalid.networkSessionValid = false
+        XCTAssertThrowsError(try ContractSerializer.metrics(invalid))
+        invalid = baseline
+        invalid.storageIOSampled = false
+        XCTAssertThrowsError(try ContractSerializer.metrics(invalid))
+        invalid = baseline
+        invalid.networkSampled = false
+        XCTAssertThrowsError(try ContractSerializer.metrics(invalid))
     }
 
     func testSerializerRejectsInvalidBatteryRelationsAndRanges() {
@@ -253,7 +310,7 @@ struct ContractTests {
         let detail = try ContractSerializer.cpuDetail(CPUDetailSnapshot(producerInstance: instance))
         let arguments = EventEmitter.arguments(for: metrics)
         XCTAssertEqual(EventEmitter.executableURL.path, "/opt/homebrew/bin/sketchybar")
-        XCTAssertEqual(Array(arguments.prefix(2)), ["--trigger", "system_metrics_v2"])
+        XCTAssertEqual(Array(arguments.prefix(2)), ["--trigger", "system_metrics_v3"])
         XCTAssertEqual(Array(EventEmitter.arguments(for: detail).prefix(2)),
                        ["--trigger", "system_cpu_detail_v1"])
         XCTAssertTrue(arguments.dropFirst(2).allSatisfy { argument in

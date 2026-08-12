@@ -13,9 +13,11 @@ let package = Package(
             resources: [.copy("Resources/PrivacyInfo.xcprivacy")],
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("DiskArbitration"),
                 .linkedFramework("IOKit"),
                 .linkedFramework("Metal"),
                 .linkedFramework("Network"),
+                .linkedFramework("SystemConfiguration"),
             ]
         ),
     ],

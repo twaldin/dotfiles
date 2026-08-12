@@ -317,6 +317,14 @@ private struct BooleanCapability: Encodable, Equatable {
 private struct DirectionState: Encodable, Equatable {
     let volume: ScalarCapability
     let mute: BooleanCapability
+    let active: Bool?
+    private enum CodingKeys: String, CodingKey { case volume, mute, active }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(volume, forKey: .volume)
+        try container.encode(mute, forKey: .mute)
+        if let active { try container.encode(active, forKey: .active) }
+    }
 }
 
 private struct AudioDeviceState: Encodable, Equatable {
@@ -365,6 +373,7 @@ private struct AudioStateDocument: Encodable, Equatable {
     let defaults: AudioDefaults
     let default_settable: AudioDefaultSettable
     let devices: [AudioDeviceState]
+    // Count of non-fatal audio facts that could not be read or published.
     let warning_count: Int
 }
 
@@ -402,6 +411,7 @@ private protocol AudioBackend {
     func setDefault(role: AudioRole, device: AudioObjectID) throws
     func volume(device: AudioObjectID, direction: AudioDirection) throws -> ScalarCapability
     func mute(device: AudioObjectID, direction: AudioDirection) throws -> BooleanCapability
+    func activeUse(device: AudioObjectID) throws -> Bool?
     func setVolume(device: AudioObjectID, direction: AudioDirection, value: Double) throws
     func setMute(device: AudioObjectID, direction: AudioDirection, value: Bool) throws
 }
@@ -439,6 +449,42 @@ private func validatedBooleanState(_ capability: BooleanCapability) throws -> Bo
     return capability
 }
 
+private enum ActiveUsePropertyScope: Hashable {
+    case input
+    case global
+
+    var coreAudio: AudioObjectPropertyScope {
+        switch self {
+        case .input: return kAudioDevicePropertyScopeInput
+        case .global: return kAudioObjectPropertyScopeGlobal
+        }
+    }
+}
+
+private struct ActiveUsePropertySample {
+    let raw: UInt32
+    let size: UInt32
+}
+
+private func activeUsePropertyValue(
+    hasProperty: (ActiveUsePropertyScope) -> Bool,
+    readProperty: (ActiveUsePropertyScope) throws -> ActiveUsePropertySample
+) throws -> Bool? {
+    let propertyScope: ActiveUsePropertyScope
+    if hasProperty(.input) {
+        propertyScope = .input
+    } else {
+        guard hasProperty(.global) else { return nil }
+        propertyScope = .global
+    }
+    let sample = try readProperty(propertyScope)
+    guard sample.size == UInt32(MemoryLayout<UInt32>.size),
+          sample.raw == 0 || sample.raw == 1 else {
+        throw SafeError(70, "audio_read_failed", "Audio active-use state is malformed")
+    }
+    return sample.raw == 1
+}
+
 private final class CoreAudioBackend: AudioBackend {
     private func address(_ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: mainElement)
@@ -460,8 +506,10 @@ private final class CoreAudioBackend: AudioBackend {
         var property = property
         guard AudioObjectHasProperty(object, &property) else { throw SafeError(70, "audio_read_failed", "Audio state is unavailable") }
         var value: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
+        let expectedSize = UInt32(MemoryLayout<UInt32>.size)
+        var size = expectedSize
         try checkedStatus(AudioObjectGetPropertyData(object, &property, 0, nil, &size, &value), code: "audio_read_failed", message: "Audio state is unavailable")
+        guard size == expectedSize else { throw SafeError(70, "audio_read_failed", "Audio state is malformed") }
         return value
     }
 
@@ -536,9 +584,9 @@ private final class CoreAudioBackend: AudioBackend {
         return size > 0 && size % elementSize == 0
     }
 
-    private func booleanProperty(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector, _ propertyScope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) throws -> Bool {
+    private func booleanProperty(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector, _ propertyScope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal, malformedMessage: String = "Audio device eligibility is malformed") throws -> Bool {
         let raw = try getUInt32(device, address(selector, propertyScope))
-        guard raw == 0 || raw == 1 else { throw SafeError(70, "audio_read_failed", "Audio device eligibility is malformed") }
+        guard raw == 0 || raw == 1 else { throw SafeError(70, "audio_read_failed", malformedMessage) }
         return raw == 1
     }
 
@@ -614,6 +662,32 @@ private final class CoreAudioBackend: AudioBackend {
         return try booleanCapability(raw: getUInt32(device, property), settable: canSet)
     }
 
+    func activeUse(device: AudioObjectID) throws -> Bool? {
+        try activeUsePropertyValue(
+            hasProperty: { propertyScope in
+                var property = address(
+                    kAudioDevicePropertyDeviceIsRunningSomewhere,
+                    propertyScope.coreAudio)
+                return AudioObjectHasProperty(device, &property)
+            },
+            readProperty: { propertyScope in
+                var property = address(
+                    kAudioDevicePropertyDeviceIsRunningSomewhere,
+                    propertyScope.coreAudio)
+                var raw: UInt32 = 0
+                // CoreAudio treats ioDataSize as the destination capacity and
+                // does not write more than the supplied UInt32 buffer size.
+                var size = UInt32(MemoryLayout<UInt32>.size)
+                try checkedStatus(
+                    AudioObjectGetPropertyData(
+                        device, &property, 0, nil, &size, &raw),
+                    code: "audio_read_failed",
+                    message: "Audio active-use state is unavailable")
+                return ActiveUsePropertySample(raw: raw, size: size)
+            }
+        )
+    }
+
     func setVolume(device: AudioObjectID, direction: AudioDirection, value: Double) throws {
         var property = address(kAudioDevicePropertyVolumeScalar, scope(direction))
         guard AudioObjectHasProperty(device, &property), try settable(device, &property) else { throw SafeError(69, "control_unavailable", "Audio volume is unavailable") }
@@ -677,6 +751,14 @@ private final class AudioService {
     init(backend: AudioBackend, sleeper: @escaping (useconds_t) -> Void = { usleep($0) }) {
         self.backend = backend
         self.sleeper = sleeper
+    }
+
+    private func optionalActiveUse(device: AudioObjectID) -> Bool? {
+        do {
+            return try backend.activeUse(device: device)
+        } catch {
+            return nil
+        }
     }
 
     private func uniqueDevice(uid: String) throws -> AudioObjectID {
@@ -756,8 +838,16 @@ private final class AudioService {
                     directions: AudioDirection.allCases.filter { $0 == .input ? hasInput : hasOutput },
                     eligible_roles: eligible.sorted { $0.rawValue < $1.rawValue },
                     roles: (rolesByID[id] ?? []).sorted { $0.rawValue < $1.rawValue },
-                    input: hasInput ? DirectionState(volume: try validatedScalarState(backend.volume(device: id, direction: .input)), mute: try validatedBooleanState(backend.mute(device: id, direction: .input))) : nil,
-                    output: hasOutput ? DirectionState(volume: try validatedScalarState(backend.volume(device: id, direction: .output)), mute: try validatedBooleanState(backend.mute(device: id, direction: .output))) : nil
+                    input: hasInput ? DirectionState(
+                        volume: try validatedScalarState(backend.volume(device: id, direction: .input)),
+                        mute: try validatedBooleanState(backend.mute(device: id, direction: .input)),
+                        active: hasOutput ? nil : optionalActiveUse(device: id)
+                    ) : nil,
+                    output: hasOutput ? DirectionState(
+                        volume: try validatedScalarState(backend.volume(device: id, direction: .output)),
+                        mute: try validatedBooleanState(backend.mute(device: id, direction: .output)),
+                        active: nil
+                    ) : nil
                 )
                 devices.append(device)
                 includedIDs.insert(id)
@@ -959,8 +1049,9 @@ private func association(for evidence: WiFiEvidence) -> WiFiAssociation {
     case .ibss: return .ibss
     case .host_ap: return .host_ap
     case .station:
-        let corroborated = (evidence.rssi ?? 0) != 0 || (evidence.rate ?? 0) > 0 || evidence.security != "unknown"
-        return corroborated ? .associated : .link_unverified
+        let active = evidence.radio == .on && evidence.serviceActive == true
+        let corroborated = (evidence.rssi ?? 0) != 0 || (evidence.rate ?? 0) > 0
+        return active && corroborated ? .associated : .link_unverified
     }
 }
 
@@ -1211,6 +1302,17 @@ private final class FakeAudioBackend: AudioBackend {
     var defaults: [AudioRole: AudioObjectID] = [.input: 1, .output: 2, .system_output: 2]
     var volumes: [String: ScalarCapability] = ["1-input": ScalarCapability(available: true, settable: true, value: 50), "2-output": ScalarCapability(available: true, settable: true, value: 25)]
     var mutes: [String: BooleanCapability] = ["1-input": BooleanCapability(available: true, settable: true, value: false), "2-output": BooleanCapability(available: true, settable: true, value: false)]
+    var activeUses: [AudioObjectID: Bool] = [1: false]
+    var activeUseReadIDs: [AudioObjectID] = []
+    var activeUseErrorIDs: Set<AudioObjectID> = []
+    var usesScopedActiveUseFixture = false
+    var activeUseProperties: Set<ActiveUsePropertyScope> = [.input]
+    var activeUsePropertySamples: [ActiveUsePropertyScope: ActiveUsePropertySample] = [
+        .input: ActiveUsePropertySample(
+            raw: 0, size: UInt32(MemoryLayout<UInt32>.size)),
+    ]
+    var activeUsePropertyErrorScopes: Set<ActiveUsePropertyScope> = []
+    var activeUsePropertyReadScopes: [ActiveUsePropertyScope] = []
     var quantizedVolume: Double?
     var timeout = false
     var raceDefault: AudioObjectID?
@@ -1258,6 +1360,32 @@ private final class FakeAudioBackend: AudioBackend {
     }
     func volume(device: AudioObjectID, direction: AudioDirection) throws -> ScalarCapability { volumes[key(device, direction)] ?? ScalarCapability(available: false, settable: false, value: nil) }
     func mute(device: AudioObjectID, direction: AudioDirection) throws -> BooleanCapability { mutes[key(device, direction)] ?? BooleanCapability(available: false, settable: false, value: nil) }
+    func activeUse(device: AudioObjectID) throws -> Bool? {
+        activeUseReadIDs.append(device)
+        if usesScopedActiveUseFixture {
+            return try activeUsePropertyValue(
+                hasProperty: { self.activeUseProperties.contains($0) },
+                readProperty: { propertyScope in
+                    self.activeUsePropertyReadScopes.append(propertyScope)
+                    if self.activeUsePropertyErrorScopes.contains(propertyScope) {
+                        throw SafeError(
+                            70, "audio_read_failed",
+                            "Audio active-use state is unavailable")
+                    }
+                    guard let sample = self.activeUsePropertySamples[propertyScope] else {
+                        throw SafeError(
+                            70, "audio_read_failed",
+                            "Audio active-use state is unavailable")
+                    }
+                    return sample
+                }
+            )
+        }
+        if activeUseErrorIDs.contains(device) {
+            throw SafeError(70, "audio_read_failed", "Audio active-use state is unavailable")
+        }
+        return activeUses[device]
+    }
     func setVolume(device: AudioObjectID, direction: AudioDirection, value: Double) throws {
         volumeSetCalls += 1
         if !timeout { volumes[key(device, direction)] = ScalarCapability(available: true, settable: true, value: quantizedVolume ?? value) }
@@ -1344,9 +1472,182 @@ private func selfTest() throws {
     try expect(70, "nonfinite scalar capability") { _ = try scalarCapability(raw: .nan, settable: true) }
     try expect(70, "out of range scalar capability") { _ = try scalarCapability(raw: 1.1, settable: true) }
     try expect(70, "nonboolean mute capability") { _ = try booleanCapability(raw: 2, settable: true) }
+
+    func scopedActiveUseDocument(
+        _ backend: FakeAudioBackend) throws -> AudioStateDocument {
+        try AudioService(backend: backend, sleeper: { _ in }).state()
+    }
+    func scopedInputState(
+        _ document: AudioStateDocument) -> DirectionState? {
+        document.devices.first(where: { $0.uid == "input-uid" })?.input
+    }
+    let exactUInt32Size = UInt32(MemoryLayout<UInt32>.size)
+
+    let inputPrecedenceBackend = FakeAudioBackend()
+    inputPrecedenceBackend.usesScopedActiveUseFixture = true
+    inputPrecedenceBackend.activeUseProperties = [.input, .global]
+    inputPrecedenceBackend.activeUsePropertySamples = [
+        .input: ActiveUsePropertySample(raw: 1, size: exactUInt32Size),
+        .global: ActiveUsePropertySample(raw: 0, size: exactUInt32Size),
+    ]
+    let inputPrecedenceValue = try inputPrecedenceBackend.activeUse(device: 1)
+    try check(inputPrecedenceValue == true
+        && inputPrecedenceBackend.activeUsePropertyReadScopes == [.input],
+        "audio active-use input property takes precedence")
+
+    let globalFallbackBackend = FakeAudioBackend()
+    globalFallbackBackend.usesScopedActiveUseFixture = true
+    globalFallbackBackend.activeUseProperties = [.global]
+    globalFallbackBackend.activeUsePropertySamples = [
+        .global: ActiveUsePropertySample(raw: 1, size: exactUInt32Size),
+    ]
+    let globalFallbackDocument = try scopedActiveUseDocument(
+        globalFallbackBackend)
+    try check(scopedInputState(globalFallbackDocument)?.active == true
+        && globalFallbackBackend.activeUsePropertyReadScopes == [.global],
+        "audio active-use falls back to a valid global property")
+
+    let inputMalformedSizeBackend = FakeAudioBackend()
+    inputMalformedSizeBackend.usesScopedActiveUseFixture = true
+    inputMalformedSizeBackend.activeUseProperties = [.input, .global]
+    inputMalformedSizeBackend.activeUsePropertySamples = [
+        .input: ActiveUsePropertySample(raw: 1, size: exactUInt32Size - 1),
+        .global: ActiveUsePropertySample(raw: 1, size: exactUInt32Size),
+    ]
+    let inputMalformedSizeDocument = try scopedActiveUseDocument(
+        inputMalformedSizeBackend)
+    try check(scopedInputState(inputMalformedSizeDocument)?.active == nil
+        && scopedInputState(inputMalformedSizeDocument)?.volume.value == 50
+        && inputMalformedSizeBackend.activeUsePropertyReadScopes == [.input],
+        "malformed input active-use size omits state without global fallback")
+
+    let inputMalformedValueBackend = FakeAudioBackend()
+    inputMalformedValueBackend.usesScopedActiveUseFixture = true
+    inputMalformedValueBackend.activeUseProperties = [.input, .global]
+    inputMalformedValueBackend.activeUsePropertySamples = [
+        .input: ActiveUsePropertySample(raw: 2, size: exactUInt32Size),
+        .global: ActiveUsePropertySample(raw: 1, size: exactUInt32Size),
+    ]
+    let inputMalformedValueDocument = try scopedActiveUseDocument(
+        inputMalformedValueBackend)
+    try check(scopedInputState(inputMalformedValueDocument)?.active == nil
+        && inputMalformedValueBackend.activeUsePropertyReadScopes == [.input],
+        "malformed input active-use value omits state without global fallback")
+
+    let inputReadErrorBackend = FakeAudioBackend()
+    inputReadErrorBackend.usesScopedActiveUseFixture = true
+    inputReadErrorBackend.activeUseProperties = [.input, .global]
+    inputReadErrorBackend.activeUsePropertySamples = [
+        .global: ActiveUsePropertySample(raw: 1, size: exactUInt32Size),
+    ]
+    inputReadErrorBackend.activeUsePropertyErrorScopes = [.input]
+    let inputReadErrorDocument = try scopedActiveUseDocument(inputReadErrorBackend)
+    try check(scopedInputState(inputReadErrorDocument)?.active == nil
+        && scopedInputState(inputReadErrorDocument)?.mute.value == false
+        && inputReadErrorBackend.activeUsePropertyReadScopes == [.input],
+        "input active-use read error omits state without global fallback")
+
+    let globalMalformedSizeBackend = FakeAudioBackend()
+    globalMalformedSizeBackend.usesScopedActiveUseFixture = true
+    globalMalformedSizeBackend.activeUseProperties = [.global]
+    globalMalformedSizeBackend.activeUsePropertySamples = [
+        .global: ActiveUsePropertySample(
+            raw: 1, size: exactUInt32Size + 1),
+    ]
+    let globalMalformedSizeDocument = try scopedActiveUseDocument(
+        globalMalformedSizeBackend)
+    try check(scopedInputState(globalMalformedSizeDocument)?.active == nil
+        && globalMalformedSizeBackend.activeUsePropertyReadScopes == [.global],
+        "malformed global active-use size is omitted")
+
+    let globalMalformedValueBackend = FakeAudioBackend()
+    globalMalformedValueBackend.usesScopedActiveUseFixture = true
+    globalMalformedValueBackend.activeUseProperties = [.global]
+    globalMalformedValueBackend.activeUsePropertySamples = [
+        .global: ActiveUsePropertySample(raw: 2, size: exactUInt32Size),
+    ]
+    let globalMalformedValueDocument = try scopedActiveUseDocument(
+        globalMalformedValueBackend)
+    try check(scopedInputState(globalMalformedValueDocument)?.active == nil
+        && globalMalformedValueBackend.activeUsePropertyReadScopes == [.global],
+        "malformed global active-use value is omitted")
+
+    let globalReadErrorBackend = FakeAudioBackend()
+    globalReadErrorBackend.usesScopedActiveUseFixture = true
+    globalReadErrorBackend.activeUseProperties = [.global]
+    globalReadErrorBackend.activeUsePropertyErrorScopes = [.global]
+    let globalReadErrorDocument = try scopedActiveUseDocument(
+        globalReadErrorBackend)
+    try check(scopedInputState(globalReadErrorDocument)?.active == nil
+        && scopedInputState(globalReadErrorDocument)?.volume.value == 50
+        && globalReadErrorBackend.activeUsePropertyReadScopes == [.global],
+        "global active-use read error is omitted without losing controls")
+
     try check(state.devices.first(where: { $0.uid == "output-uid" })?.roles == [.output, .system_output], "audio role merge")
     try check(state.devices.first(where: { $0.uid == "output-uid" })?.eligible_roles == [.output, .system_output], "audio eligibility properties")
     try check(state.default_settable == AudioDefaultSettable(input: true, output: true, system_output: true), "audio default capability state")
+    let activeUseBackend = FakeAudioBackend()
+    activeUseBackend.activeUses[1] = true
+    let activeUseDocument = try AudioService(
+        backend: activeUseBackend, sleeper: { _ in }).state()
+    try check(activeUseDocument.devices.first(where: {
+        $0.uid == "input-uid"
+    })?.input?.active == true, "audio input active-use true state")
+    let activeUseData = try JSONEncoder().encode(activeUseDocument)
+    let activeUseJSON = try JSONSerialization.jsonObject(
+        with: activeUseData) as? [String: Any]
+    let activeUseDevices = activeUseJSON?["devices"] as? [[String: Any]]
+    let encodedActiveInput = activeUseDevices?.first(where: {
+        $0["uid"] as? String == "input-uid"
+    })?["input"] as? [String: Any]
+    let encodedActiveOutput = activeUseDevices?.first(where: {
+        $0["uid"] as? String == "output-uid"
+    })?["output"] as? [String: Any]
+    try check(activeUseDocument.devices.first(where: {
+        $0.uid == "output-uid"
+    })?.output?.active == nil && encodedActiveInput?["active"] as? Bool == true
+        && encodedActiveOutput?["active"] == nil
+        && activeUseBackend.activeUseReadIDs == [1],
+        "audio active-use is an input-only JSON Boolean")
+    let duplexActiveUseBackend = FakeAudioBackend()
+    duplexActiveUseBackend.ids.append(3)
+    duplexActiveUseBackend.uids[3] = "duplex-uid"
+    duplexActiveUseBackend.names[3] = "Duplex device"
+    duplexActiveUseBackend.streams[3] = [.input, .output]
+    duplexActiveUseBackend.activeUses[3] = true
+    let duplexActiveUseDocument = try AudioService(
+        backend: duplexActiveUseBackend, sleeper: { _ in }).state()
+    try check(duplexActiveUseDocument.devices.first(where: {
+        $0.uid == "duplex-uid"
+    })?.input?.active == nil && duplexActiveUseBackend.activeUseReadIDs == [1],
+        "device-wide running state must not become a duplex microphone claim")
+    let absentActiveUseBackend = FakeAudioBackend()
+    absentActiveUseBackend.activeUses.removeValue(forKey: 1)
+    let absentActiveUseDocument = try AudioService(
+        backend: absentActiveUseBackend, sleeper: { _ in }).state()
+    let absentActiveUseData = try JSONEncoder().encode(absentActiveUseDocument)
+    let absentActiveUseJSON = try JSONSerialization.jsonObject(
+        with: absentActiveUseData) as? [String: Any]
+    let absentActiveUseDevices = absentActiveUseJSON?["devices"] as? [[String: Any]]
+    let absentInputState = absentActiveUseDevices?.first(where: {
+        $0["uid"] as? String == "input-uid"
+    })?["input"] as? [String: Any]
+    try check(absentActiveUseDocument.devices.first(where: {
+        $0.uid == "input-uid"
+    })?.input?.active == nil && absentInputState?["active"] == nil,
+        "absent audio active-use property is omitted")
+    let failedActiveUseBackend = FakeAudioBackend()
+    failedActiveUseBackend.activeUseErrorIDs.insert(1)
+    let failedActiveUseDocument = try AudioService(
+        backend: failedActiveUseBackend, sleeper: { _ in }).state()
+    let failedActiveInput = failedActiveUseDocument.devices.first(where: {
+        $0.uid == "input-uid"
+    })?.input
+    try check(failedActiveUseDocument.defaults.input == "input-uid"
+        && failedActiveInput?.active == nil
+        && failedActiveInput?.volume.value == 50
+        && failedActiveInput?.mute.value == false,
+        "failed optional active-use read preserves the input device and controls")
     let restrictedDefaults = FakeAudioBackend()
     restrictedDefaults.defaultSettableByRole[.output] = false
     restrictedDefaults.defaultSettableReadErrors.insert(.input)
@@ -1450,7 +1751,7 @@ private func selfTest() throws {
         (WiFiEvidence(radio: .on, mode: .none, serviceActive: true, rssi: nil, noise: nil, rate: nil, security: "unknown"), .unknown),
         (WiFiEvidence(radio: .on, mode: .station, serviceActive: true, rssi: nil, noise: nil, rate: nil, security: "unknown"), .link_unverified),
         (WiFiEvidence(radio: .on, mode: .station, serviceActive: true, rssi: -50, noise: -90, rate: 100, security: "wpa3_personal"), .associated),
-        (WiFiEvidence(radio: .on, mode: .station, serviceActive: true, rssi: nil, noise: nil, rate: nil, security: "wpa2_personal"), .associated),
+        (WiFiEvidence(radio: .on, mode: .station, serviceActive: true, rssi: nil, noise: nil, rate: nil, security: "wpa2_personal"), .link_unverified),
         (WiFiEvidence(radio: .on, mode: .ibss, serviceActive: true, rssi: -40, noise: nil, rate: 10, security: "none"), .ibss),
         (WiFiEvidence(radio: .on, mode: .host_ap, serviceActive: true, rssi: nil, noise: nil, rate: nil, security: "unknown"), .host_ap)
     ]
@@ -1460,14 +1761,14 @@ private func selfTest() throws {
     try check(cachedDocument.association == .link_unverified && cachedDocument.interface == nil && cachedDocument.ssid == nil && cachedDocument.bssid == nil && cachedDocument.rssi == nil && cachedDocument.noise == nil && cachedDocument.transmit_rate_mbps == nil, "wifi cached values redacted")
     let staleSecurityWiFi = WiFiReading(interfaceName: "en0", radio: .unknown, mode: .station, serviceActive: nil, ssid: "cached identity", bssid: "aa:bb:cc:dd:ee:ff", rssi: nil, noise: -90, rate: nil, security: "none")
     let staleSecurityDocument = wifiState(reader: FakeWiFiReader(value: staleSecurityWiFi))
-    try check(staleSecurityDocument.association == .associated && staleSecurityDocument.ssid == nil && staleSecurityDocument.bssid == nil && staleSecurityDocument.rssi == nil && staleSecurityDocument.noise == nil, "wifi security-only identity redacted")
+    try check(staleSecurityDocument.association == .link_unverified && staleSecurityDocument.ssid == nil && staleSecurityDocument.bssid == nil && staleSecurityDocument.rssi == nil && staleSecurityDocument.noise == nil, "wifi inactive security-only identity remains unverified")
     let linkedWiFi = WiFiReading(interfaceName: "en0", radio: .on, mode: .station, serviceActive: true, ssid: "Safe\u{202e} Network", bssid: "AA:BB:CC:DD:EE:FF", rssi: -50, noise: -90, rate: 1200, security: "wpa3_personal")
     let linkedDocument = wifiState(reader: FakeWiFiReader(value: linkedWiFi))
     try check(linkedDocument.association == .associated && linkedDocument.interface == "en0" && linkedDocument.ssid == "Safe Network" && linkedDocument.bssid == "aa:bb:cc:dd:ee:ff" && linkedDocument.rssi == -50 && linkedDocument.transmit_rate_mbps == 1200, "wifi linked values sanitized")
     let malformedBSSID = wifiDocument(WiFiReading(interfaceName: "en1", radio: .on, mode: .station, serviceActive: true, ssid: "Visible", bssid: "not-an-address", rssi: -40, noise: -80, rate: 100, security: "none"))
     try check(malformedBSSID.association == .associated && malformedBSSID.bssid == nil && malformedBSSID.ssid == "Visible", "wifi malformed address suppressed")
     let openEvidence = association(for: WiFiEvidence(radio: .on, mode: .station, serviceActive: true, rssi: nil, noise: nil, rate: nil, security: "none"))
-    try check(openEvidence == .associated, "wifi open-network security evidence")
+    try check(openEvidence == .link_unverified, "wifi open-network security alone remains unverified")
     try check(wifiState(reader: FakeWiFiReader(value: nil)).association == .unknown, "wifi deterministic no-interface fallback")
     try check(bluetoothState(reader: FakeBluetoothReader(value: .on)).power == .on, "public Bluetooth power reader contract")
     try check(bluetoothState(reader: FakeBluetoothReader(value: .unknown)).power == .unknown, "Bluetooth unknown power contract")

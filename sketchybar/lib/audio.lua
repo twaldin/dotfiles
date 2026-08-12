@@ -11,6 +11,8 @@ local request_token    = {}    -- unique async state-read callback token
 local action_token     = {}    -- unique async write callback token
 local in_flight        = false -- refresh coalescing gate
 local action_in_flight = false -- single concurrent action gate
+local refresh_pending  = false -- latest-state retry requested during busy work
+local active_claims_cleared = false -- hide time-sensitive use after a failed read
 local waiters          = {}    -- one-shot refresh callbacks
 local listeners        = {}    -- persistent subscribers
 local last_error       = "Audio state unavailable"
@@ -97,12 +99,17 @@ local function bool_cap(v)
   }
 end
 
-local function dir_state(v)
-  if not exact_keys(v, { volume = true, mute = true }) then return nil end
+local function dir_state(v, direction)
+  local allowed = { volume = true, mute = true }
+  if direction == "input" then allowed.active = true end
+  if not exact_keys(v, allowed) then return nil end
   local vol  = scalar_cap(v.volume)
   local mute = bool_cap(v.mute)
-  if not vol or not mute then return nil end
-  return { volume = vol, mute = mute }
+  if not vol or not mute
+     or (v.active ~= nil and type(v.active) ~= "boolean") then return nil end
+  local result = { volume = vol, mute = mute }
+  if v.active ~= nil then result.active = v.active end
+  return result
 end
 
 -- ── Schema 1 parser (private; result contains handles) ───────────────────
@@ -162,12 +169,13 @@ local function parse_state(doc)
       if not dirs[direction] then return nil end
     end
 
-    local inp = raw.input  == nil and nil or dir_state(raw.input)
-    local out = raw.output == nil and nil or dir_state(raw.output)
+    local inp = raw.input  == nil and nil or dir_state(raw.input, "input")
+    local out = raw.output == nil and nil or dir_state(raw.output, "output")
     if (dirs.input  and not inp)
        or (not dirs.input  and raw.input  ~= nil) then return nil end
     if (dirs.output and not out)
        or (not dirs.output and raw.output ~= nil) then return nil end
+    if inp and inp.active ~= nil and dirs.output then return nil end
 
     if type(raw.name) ~= "string" then return nil end
     local visible_name = shell.display(raw.name)
@@ -257,9 +265,11 @@ local function copy_cap(c)
   return { available = c.available, settable = c.settable, value = c.value }
 end
 
-local function copy_dir(d)
+local function copy_dir(d, include_active)
   if not d then return nil end
-  return { volume = copy_cap(d.volume), mute = copy_cap(d.mute) }
+  local result = { volume = copy_cap(d.volume), mute = copy_cap(d.mute) }
+  if include_active and d.active ~= nil then result.active = d.active end
+  return result
 end
 
 local function build_view()
@@ -297,8 +307,8 @@ local function build_view()
         output        = dev.roles.output        or false,
         system_output = dev.roles.system_output or false,
       },
-      input  = copy_dir(dev.input),
-      output = copy_dir(dev.output),
+      input  = copy_dir(dev.input, not active_claims_cleared),
+      output = copy_dir(dev.output, false),
     }
   end
 
@@ -434,7 +444,7 @@ function M.subscribe(fn)
   return true
 end
 
-function M.refresh(callback)
+function M.refresh(callback, retry_if_busy)
   if type(callback) == "function" then
     if #waiters >= 64 then
       callback(build_view(), false, "Audio refresh queue is full")
@@ -442,7 +452,18 @@ function M.refresh(callback)
     end
     waiters[#waiters + 1] = callback
   end
-  if action_in_flight or in_flight then return false end
+  if action_in_flight or in_flight then
+    if retry_if_busy == true then
+      refresh_pending = true
+      -- Keep this fail-closed flag until a later response parses successfully.
+      if not active_claims_cleared then
+        active_claims_cleared = true
+        notify()
+      end
+    end
+    return false
+  end
+  refresh_pending = false
   in_flight = true
   local token = next_request()
   local argv = { settings.paths.audio_state, "audio", "state" }
@@ -455,10 +476,12 @@ function M.refresh(callback)
       if parsed then
         next_gen()
         confirmed_state = parsed
+        active_claims_cleared = false
         session_started = true
         last_error      = nil
       else
         next_gen()
+        active_claims_cleared = true
         session_started = false
         last_error = safe_error(exit_code)
       end
@@ -469,6 +492,9 @@ function M.refresh(callback)
       local view = build_view()
       local ok   = parsed ~= nil
       for _, w in ipairs(batch) do w(view, ok, last_error) end
+      if refresh_pending and not action_in_flight and not in_flight then
+        M.refresh(nil, true)
+      end
     end
   )
   return true

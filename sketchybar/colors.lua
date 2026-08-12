@@ -39,7 +39,7 @@ M.domain = {
   sound = M.purple, mic = M.magenta, display = M.orange, battery = M.green,
 }
 M.severity = { normal = M.primary, elevated = M.warning, critical = M.red }
-M.state = { normal = M.primary, selected = M.accent, busy = M.warning, missing = M.muted, actionable = M.orange }
+M.state = { normal = M.primary, selected = M.accent, busy = M.warning, missing = M.muted, unresolved = M.slate, actionable = M.orange, recording = M.magenta }
 
 M.background = M.bar
 M.popup = M.surface

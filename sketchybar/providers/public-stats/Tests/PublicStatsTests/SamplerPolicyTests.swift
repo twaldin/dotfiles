@@ -22,11 +22,34 @@ struct SamplerPolicyTests {
                                         cellular: false, other: false, loopback: false), .unknown)
     }
 
-    func testPressurePrecedence() {
+    func testPressurePrecedenceAndStrictSynchronousRead() {
         XCTAssertEqual(mapPressure([.normal]), .normal)
         XCTAssertEqual(mapPressure([.normal, .warning]), .warning)
         XCTAssertEqual(mapPressure([.normal, .warning, .critical]), .critical)
         XCTAssertNil(mapPressure([]))
+        XCTAssertEqual(mapMemoryPressureRaw(1), .normal)
+        XCTAssertEqual(mapMemoryPressureRaw(2), .warning)
+        XCTAssertEqual(mapMemoryPressureRaw(4), .critical)
+        XCTAssertNil(mapMemoryPressureRaw(0))
+        XCTAssertNil(mapMemoryPressureRaw(3))
+
+        func reader(raw: Int32, status: Int32 = 0, size: Int? = nil) -> MemoryPressureReader {
+            { value, outputSize in
+                value.pointee = raw
+                if let size { outputSize.pointee = size }
+                return status
+            }
+        }
+        XCTAssertEqual(readMemoryPressure(reader: reader(raw: 1)), .normal)
+        XCTAssertEqual(readMemoryPressure(reader: reader(raw: 2)), .warning)
+        XCTAssertEqual(readMemoryPressure(reader: reader(raw: 4)), .critical)
+        XCTAssertNil(readMemoryPressure(reader: reader(raw: 7)))
+        XCTAssertNil(readMemoryPressure(reader: reader(raw: 1, status: -1)))
+        XCTAssertNil(readMemoryPressure(reader: reader(raw: 1, size: 8)))
+        XCTAssertEqual(resolvedMemoryPressure(fallback: [.critical], reader: reader(raw: 1)), .normal)
+        XCTAssertEqual(resolvedMemoryPressure(fallback: [.critical], reader: reader(raw: 1, status: -1)),
+                       .critical)
+        XCTAssertNil(resolvedMemoryPressure(reader: reader(raw: 1, status: -1)))
     }
 
     func testThermalAndLowPowerStates() {
@@ -319,6 +342,10 @@ struct SamplerPolicyTests {
         XCTAssertTrue(source.contains("battery.batterySequence = next"))
         XCTAssertTrue(source.contains("cpuDetail.cpuDetailSequence = next"))
         XCTAssertTrue(source.contains("metrics.metricsSequence = next"))
+        XCTAssertTrue(source.contains("sampleConditions(pressureFallback: retained.data)"))
+        XCTAssertTrue(source.components(separatedBy: "sampleConditions()").count - 1 >= 3)
+        XCTAssertTrue(source.contains("storageIOSampler.reset()"))
+        XCTAssertTrue(source.contains("sampleStorageIO()"))
     }
 
     func testBatteryWatcherFailureHasFixedDegradedDiagnostic() {
@@ -375,11 +402,18 @@ struct SamplerPolicyTests {
         snapshot.storageUsedBytes = 80
         snapshot.storageUsedPercent = 80
         snapshot.importantAvailableBytes = 15
+        snapshot.storageIOSampled = true
+        snapshot.storageIOValid = true
+        snapshot.storageReadBytesPerSecond = 8
+        snapshot.storageWriteBytesPerSecond = 7
         snapshot.networkSampled = true
         snapshot.networkValid = true
         snapshot.networkState = .satisfied
         snapshot.networkPathType = .wifi
         snapshot.networkReceiveBytesPerSecond = 9
+        snapshot.networkSessionValid = true
+        snapshot.networkSessionReceiveBytes = 90
+        snapshot.networkSessionTransmitBytes = 80
         snapshot.thermalValid = true
         snapshot.thermalState = .nominal
         snapshot.pressureValid = true
@@ -400,7 +434,12 @@ struct SamplerPolicyTests {
         XCTAssertEqual(snapshot.swapTotalBytes, 0)
         XCTAssertFalse(snapshot.storageSampled || snapshot.storageValid)
         XCTAssertNil(snapshot.importantAvailableBytes)
-        XCTAssertFalse(snapshot.networkSampled || snapshot.networkValid)
+        XCTAssertFalse(snapshot.storageIOSampled || snapshot.storageIOValid)
+        XCTAssertEqual(snapshot.storageReadBytesPerSecond, 0)
+        XCTAssertEqual(snapshot.storageWriteBytesPerSecond, 0)
+        XCTAssertFalse(snapshot.networkSampled || snapshot.networkValid || snapshot.networkSessionValid)
+        XCTAssertEqual(snapshot.networkSessionReceiveBytes, 0)
+        XCTAssertEqual(snapshot.networkSessionTransmitBytes, 0)
         XCTAssertEqual(snapshot.networkState, .unknown)
         XCTAssertEqual(snapshot.networkPathType, .unknown)
         XCTAssertFalse(snapshot.conditionSampled || snapshot.thermalValid || snapshot.pressureValid)
@@ -411,14 +450,19 @@ struct SamplerPolicyTests {
     }
 
     func testNetworkResetObservationSerializesAsSampledInvalidPath() throws {
-        let selection = PathSelection(state: .satisfied, type: .wifi, names: ["en0"],
+        let selection = PathSelection(state: .satisfied, type: .wifi,
                                       expensive: true, constrained: false)
-        let observation = resetNetworkObservation(selection)
+        var sampler = NetworkSampler()
+        let observation = sampler.consume(
+            selection: selection, timeNanoseconds: 1,
+            reader: { LinkCounterSample(index: 1, totals: LinkTotals(receive: 0, transmit: 0)) }
+        )
         XCTAssertTrue(observation.sampled)
         XCTAssertFalse(observation.valid)
         XCTAssertEqual(observation.state, .satisfied)
         XCTAssertEqual(observation.type, .wifi)
         XCTAssertTrue(observation.expensive)
+        XCTAssertTrue(observation.sessionValid)
         XCTAssertEqual(observation.receiveBytesPerSecond, 0)
         XCTAssertEqual(observation.transmitBytesPerSecond, 0)
 
@@ -431,6 +475,9 @@ struct SamplerPolicyTests {
         snapshot.networkPathType = observation.type
         snapshot.networkReceiveBytesPerSecond = observation.receiveBytesPerSecond
         snapshot.networkTransmitBytesPerSecond = observation.transmitBytesPerSecond
+        snapshot.networkSessionValid = observation.sessionValid
+        snapshot.networkSessionReceiveBytes = observation.sessionReceiveBytes
+        snapshot.networkSessionTransmitBytes = observation.sessionTransmitBytes
         snapshot.networkExpensive = observation.expensive
         snapshot.networkConstrained = observation.constrained
         _ = try ContractSerializer.metrics(snapshot)

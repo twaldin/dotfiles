@@ -3,7 +3,7 @@ require("default")
 
 -- Public and documented distributed notifications only.
 sbar.add("event", "network_connect", "com.apple.networkConnect")
-sbar.add("event", "system_metrics_v2")
+sbar.add("event", "system_metrics_v3")
 sbar.add("event", "system_battery_v2")
 sbar.add("event", "sketchybar_test_popup")
 sbar.add("event", "sketchybar_test_popup_exit")

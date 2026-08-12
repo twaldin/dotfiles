@@ -7,8 +7,9 @@ enum PrototypeTestRunner {
         let contract = ContractTests()
         let delta = DeltaTests()
         let policy = SamplerPolicyTests()
+        let storageIO = StorageIOTests()
         let tests: [(String, () throws -> Void)] = [
-            ("contract.metrics-v2", contract.testInitialMetricsHasExactV2KeysAndFixedValues),
+            ("contract.metrics-v3", contract.testInitialMetricsHasExactV3KeysAndFixedValues),
             ("contract.cpu-detail-v1", contract.testCPUDetailHasExactFixedV1ShapeAndValidatesRelations),
             ("contract.ssd-explicit", contract.testImportantAvailabilityHasExplicitRequiredFields),
             ("contract.battery-v2", contract.testBatteryHasExactUnavailableV2Schema),
@@ -16,6 +17,7 @@ enum PrototypeTestRunner {
             ("contract.decimal", contract.testDecimalIsPOSIXBoundedAndNonExponent),
             ("contract.metrics-invalid", contract.testSerializerRejectsInvalidMetricsRelationsAndEnvelope),
             ("contract.metrics-valid", contract.testMetricsSerializerAcceptsEveryValidDomainShape),
+            ("contract.metrics-v3-relations", contract.testMetricsV3IndependentRateSessionAndStorageIORelations),
             ("contract.battery-invalid", contract.testSerializerRejectsInvalidBatteryRelationsAndRanges),
             ("contract.closed", contract.testClosedFieldValidatorRejectsOrderMissingDuplicateUnexpectedAndNonASCII),
             ("contract.argv", contract.testEmitterArgumentsUseFixedEventGrammar),
@@ -34,12 +36,16 @@ enum PrototypeTestRunner {
             ("delta.vm", delta.testMemoryFormulaForPageSizesPurgeableAndClamp),
             ("delta.vm-invalid", delta.testMemoryAndSwapRejectInvalidArithmetic),
             ("delta.volume", delta.testVolumeValidation),
-            ("delta.network", delta.testNetworkRateFirstEqualDecreaseGapAndOverflow),
-            ("delta.network-selection", delta.testNetworkSelectionChangeAndMaskedLaneResetRejectDelta),
-            ("delta.network-rollover", delta.testLegacyNetworkCounterRolloverIsTruthfullyUnavailable),
-            ("delta.network-abi", delta.testReviewedLinkCounterABI),
+            ("delta.network-rate", delta.testNetworkRateUses64BitCheckedRoundedArithmetic),
+            ("delta.network-buffer", delta.testNetworkRouteBufferParserIsBoundedAndUses64BitCounters),
+            ("delta.network-route", delta.testNetworkUsesOnlyExactPrimaryIPv4Selection),
+            ("delta.network-session", delta.testNetworkSessionTotalsPreserveGapsAndLatchInvalid),
+            ("storage.types", storageIO.testExactStorageCounterTypes),
+            ("storage.target", storageIO.testStatsTargetWalkFindsFirstCounterNodeAndReleasesEveryHandle),
+            ("storage.rate", storageIO.testStorageIORateBaselineResetGapTargetAndCounterRules),
+            ("storage.reset", storageIO.testStorageIORatesRejectLuaOverflowAndResetEstablishesBaseline),
             ("policy.path", policy.testAllPathTypes),
-            ("policy.pressure", policy.testPressurePrecedence),
+            ("policy.pressure", policy.testPressurePrecedenceAndStrictSynchronousRead),
             ("policy.conditions", policy.testThermalAndLowPowerStates),
             ("policy.battery-bridge", policy.testStrictBatteryCFTypeBridges),
             ("policy.inventory-empty", policy.testInventoryEmptyAbsentAndInvalidInventoryUnavailable),

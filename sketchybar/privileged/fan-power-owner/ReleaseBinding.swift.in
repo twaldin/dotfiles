@@ -1,0 +1,4 @@
+enum ReleaseBinding {
+    static let clientUID: UInt32 = @CLIENT_UID@
+    static let clientCDHashHex = "@CLIENT_CDHASH@"
+}

@@ -11,6 +11,7 @@ private struct SelfTestChecks: Codable, Sendable {
     let metal: String
     let networkCounters: String
     let networkPath: String
+    let storageIO: String
     let swap: String
     let vm: String
     let volume: String
@@ -21,6 +22,7 @@ private struct SelfTestChecks: Codable, Sendable {
         case memoryPressure = "memory_pressure"
         case networkCounters = "network_counters"
         case networkPath = "network_path"
+        case storageIO = "storage_io"
     }
 }
 
@@ -37,9 +39,9 @@ private final class PathSelfTestBox: @unchecked Sendable {
     let semaphore = DispatchSemaphore(value: 0)
 
     func accept(_ path: NWPath) {
-        _ = mapPath(path).state
+        let active = mapPath(path).state == .satisfied
         lock.lock()
-        received = true
+        received = active
         lock.unlock()
         semaphore.signal()
     }
@@ -67,11 +69,14 @@ enum SelfTest {
         case .failure: volumeOK = false
         }
         let pathOK = testPath()
-        let countersState = hasReadableLinkCounter() ? "ok" : "unavailable"
+        let countersOK = hasReadablePrimaryLinkCounter()
+        let countersState = countersOK ? "ok" : "unavailable"
+        let storageIOOK = hasReadableStorageCounters()
+        let storageIOState = storageIOOK ? "ok" : "unavailable"
         let conditions = readConditions()
         let conditionsClosed = ThermalValue.allCases.contains(conditions.thermal) &&
             LowPowerValue.allCases.contains(conditions.lowPower)
-        let pressureOK = testPressureSource()
+        let pressureOK = testMemoryPressure()
         let metalReading = readMetalCapabilities()
         let metalState = metalReading.present ? "ok" : "absent"
         let batteryReading = readBattery()
@@ -80,24 +85,25 @@ enum SelfTest {
         // native battery reader, so an unavailable provider battery must not
         // hide failures in the metric domains that this daemon serves.
         let contractOK = testContract()
-        let ok = cpuOK && cpuDetailOK && vmOK && volumeOK && pathOK && conditionsClosed &&
-            pressureOK && contractOK
+        let ok = cpuOK && cpuDetailOK && vmOK && volumeOK &&
+            conditionsClosed && pressureOK && contractOK
         let document = SelfTestDocument(
             checks: SelfTestChecks(
                 battery: batteryState,
                 conditions: conditionsClosed ? "closed_read" : "unavailable",
                 cpu: cpuOK ? "ok" : "unavailable",
                 cpuDetail: cpuDetailOK ? "ok" : "unavailable",
-                memoryPressure: pressureOK ? "source_created" : "unavailable",
+                memoryPressure: pressureOK ? "ok" : "unavailable",
                 metal: metalState,
                 networkCounters: countersState,
                 networkPath: pathOK ? "ok" : "unavailable",
+                storageIO: storageIOState,
                 swap: swapState,
                 vm: vmOK ? "ok" : "unavailable",
                 volume: volumeOK ? "ok" : "unavailable"
             ),
             ok: ok,
-            schema: 2
+            schema: 3
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -167,7 +173,8 @@ enum SelfTest {
         return completed && box.result()
     }
 
-    private static func testPressureSource() -> Bool {
+    private static func testMemoryPressure() -> Bool {
+        guard readMemoryPressure() != nil else { return false }
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.normal, .warning, .critical],
             queue: DispatchQueue(label: "public-stats.self-test.pressure")

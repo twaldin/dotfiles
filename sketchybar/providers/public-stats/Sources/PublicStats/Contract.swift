@@ -42,7 +42,7 @@ enum EstimateState: String, Sendable, CaseIterable {
 }
 
 enum FixedEvent: String, Equatable, Sendable {
-    case metrics = "system_metrics_v2"
+    case metrics = "system_metrics_v3"
     case cpuDetail = "system_cpu_detail_v1"
     case battery = "system_battery_v2"
 }
@@ -161,7 +161,7 @@ struct ProducerCursor: Sendable {
 }
 
 struct MetricsSnapshot: Equatable, Sendable {
-    var metricsSchema: UInt64 = 2
+    var metricsSchema: UInt64 = 3
     var producerInstance: String
     var metricsSequence: UInt64 = 0
     var metricsSampleEpochSeconds: UInt64 = 1
@@ -197,6 +197,10 @@ struct MetricsSnapshot: Equatable, Sendable {
     var storageUsedBytes: UInt64 = 0
     var storageUsedPercent = 0.0
     var importantAvailableBytes: UInt64?
+    var storageIOSampled = false
+    var storageIOValid = false
+    var storageReadBytesPerSecond: UInt64 = 0
+    var storageWriteBytesPerSecond: UInt64 = 0
 
     var networkSampled = false
     var networkValid = false
@@ -204,6 +208,9 @@ struct MetricsSnapshot: Equatable, Sendable {
     var networkPathType = PathType.unknown
     var networkReceiveBytesPerSecond: UInt64 = 0
     var networkTransmitBytesPerSecond: UInt64 = 0
+    var networkSessionValid = false
+    var networkSessionReceiveBytes: UInt64 = 0
+    var networkSessionTransmitBytes: UInt64 = 0
     var networkExpensive = false
     var networkConstrained = false
 
@@ -282,7 +289,9 @@ enum ContractSerializer {
         "MEM_COMPRESSED_B", "MEM_WIRED_B", "SWAP_VALID", "SWAP_TOTAL_B", "SWAP_USED_B",
         "SSD_SAMPLED", "SSD_VALID", "SSD_TOTAL_B", "SSD_FREE_B", "SSD_USED_B", "SSD_USED_PCT",
         "SSD_IMPORTANT_AVAILABLE_VALID", "SSD_IMPORTANT_AVAILABLE_B",
+        "SSD_IO_SAMPLED", "SSD_IO_VALID", "SSD_READ_BPS", "SSD_WRITE_BPS",
         "NET_SAMPLED", "NET_VALID", "NET_STATE", "NET_PATH_TYPE", "NET_RX_BPS", "NET_TX_BPS",
+        "NET_SESSION_VALID", "NET_SESSION_RX_B", "NET_SESSION_TX_B",
         "NET_EXPENSIVE", "NET_CONSTRAINED",
         "CONDITION_SAMPLED", "THERMAL_VALID", "PRESSURE_VALID",
         "THERMAL_STATE", "PRESSURE_STATE", "LOW_POWER_STATE",
@@ -321,21 +330,26 @@ enum ContractSerializer {
         let storageCleared = !value.storageValid && value.storageTotalBytes == 0 &&
             value.storageFreeBytes == 0 && value.storageUsedBytes == 0 &&
             value.storageUsedPercent == 0 && value.importantAvailableBytes == nil
-        let networkCleared = !value.networkValid && value.networkState == .unknown &&
-            value.networkPathType == .unknown && value.networkReceiveBytesPerSecond == 0 &&
-            value.networkTransmitBytesPerSecond == 0 && !value.networkExpensive && !value.networkConstrained
+        let storageIOCleared = !value.storageIOValid && value.storageReadBytesPerSecond == 0 &&
+            value.storageWriteBytesPerSecond == 0
+        let networkCleared = !value.networkValid && !value.networkSessionValid &&
+            value.networkState == .unknown && value.networkPathType == .unknown &&
+            value.networkReceiveBytesPerSecond == 0 && value.networkTransmitBytesPerSecond == 0 &&
+            value.networkSessionReceiveBytes == 0 && value.networkSessionTransmitBytes == 0 &&
+            !value.networkExpensive && !value.networkConstrained
         let conditionsCleared = !value.thermalValid && !value.pressureValid &&
             value.thermalState == .unknown && value.pressureState == .unknown &&
             value.lowPowerState == .offOrUnsupported
         return (value.cpuSampled || cpuCleared) &&
             (value.memorySampled || memoryCleared) &&
             (value.storageSampled || storageCleared) &&
+            (value.storageIOSampled || storageIOCleared) &&
             (value.networkSampled || networkCleared) &&
             (value.conditionSampled || conditionsCleared)
     }
 
     static func metrics(_ value: MetricsSnapshot) throws -> SerializedEvent {
-        guard value.metricsSchema == 2, isValidProducerInstance(value.producerInstance),
+        guard value.metricsSchema == 3, isValidProducerInstance(value.producerInstance),
               validatesSamplingRelations(value),
               value.metricsSampleEpochSeconds > 0,
               value.metricsSampleEpochSeconds <= maximumLuaExactInteger,
@@ -353,7 +367,16 @@ enum ContractSerializer {
               (!value.swapValid || value.swapUsedBytes <= value.swapTotalBytes),
               (!value.storageValid || (value.storageTotalBytes > 0 &&
                                        value.storageFreeBytes <= value.storageTotalBytes &&
-                                       value.storageUsedBytes == value.storageTotalBytes - value.storageFreeBytes)) else {
+                                       value.storageUsedBytes == value.storageTotalBytes - value.storageFreeBytes)),
+              (!value.storageIOValid || value.storageIOSampled),
+              (!value.networkValid || value.networkSampled),
+              (!value.networkSessionValid || value.networkSampled),
+              value.storageReadBytesPerSecond <= maximumLuaExactInteger,
+              value.storageWriteBytesPerSecond <= maximumLuaExactInteger,
+              value.networkReceiveBytesPerSecond <= maximumLuaExactInteger,
+              value.networkTransmitBytesPerSecond <= maximumLuaExactInteger,
+              value.networkSessionReceiveBytes <= maximumLuaExactInteger,
+              value.networkSessionTransmitBytes <= maximumLuaExactInteger else {
             throw ContractError.invalidValue
         }
         let cpuComponents = value.cpuUserPercent + value.cpuNicePercent + value.cpuSystemPercent
@@ -371,8 +394,12 @@ enum ContractSerializer {
                                       value.storageUsedBytes == 0 && value.storageUsedPercent == 0 &&
                                       value.importantAvailableBytes == nil)),
               (!value.storageValid || abs(value.storageUsedPercent - expectedStoragePercent) <= 0.000_001),
+              (value.storageIOValid || (value.storageReadBytesPerSecond == 0 &&
+                                        value.storageWriteBytesPerSecond == 0)),
               (value.networkValid || (value.networkReceiveBytesPerSecond == 0 &&
                                       value.networkTransmitBytesPerSecond == 0)),
+              (value.networkSessionValid || (value.networkSessionReceiveBytes == 0 &&
+                                              value.networkSessionTransmitBytes == 0)),
               (value.thermalValid || value.thermalState == .unknown),
               (value.pressureValid || value.pressureState == .unknown),
               (value.gpuCapabilitiesValid || (!value.gpuPresent && !value.gpuUnified &&
@@ -417,10 +444,17 @@ enum ContractSerializer {
             ("SSD_USED_B", String(value.storageUsedBytes)), ("SSD_USED_PCT", decimalValues[8]!),
             ("SSD_IMPORTANT_AVAILABLE_VALID", bit(important != nil)),
             ("SSD_IMPORTANT_AVAILABLE_B", String(important ?? 0)),
+            ("SSD_IO_SAMPLED", bit(value.storageIOSampled)),
+            ("SSD_IO_VALID", bit(value.storageIOValid)),
+            ("SSD_READ_BPS", String(value.storageReadBytesPerSecond)),
+            ("SSD_WRITE_BPS", String(value.storageWriteBytesPerSecond)),
             ("NET_SAMPLED", bit(value.networkSampled)), ("NET_VALID", bit(value.networkValid)),
             ("NET_STATE", value.networkState.rawValue), ("NET_PATH_TYPE", value.networkPathType.rawValue),
             ("NET_RX_BPS", String(value.networkReceiveBytesPerSecond)),
             ("NET_TX_BPS", String(value.networkTransmitBytesPerSecond)),
+            ("NET_SESSION_VALID", bit(value.networkSessionValid)),
+            ("NET_SESSION_RX_B", String(value.networkSessionReceiveBytes)),
+            ("NET_SESSION_TX_B", String(value.networkSessionTransmitBytes)),
             ("NET_EXPENSIVE", bit(value.networkExpensive)), ("NET_CONSTRAINED", bit(value.networkConstrained)),
             ("CONDITION_SAMPLED", bit(value.conditionSampled)), ("THERMAL_VALID", bit(value.thermalValid)),
             ("PRESSURE_VALID", bit(value.pressureValid)), ("THERMAL_STATE", value.thermalState.rawValue),

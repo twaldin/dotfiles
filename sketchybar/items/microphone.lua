@@ -13,7 +13,7 @@ local item = sbar.add("item", "microphone", {
   position = "left",
   drawing = true,
   updates = true,
-  update_freq = 30,
+  update_freq = 2,
   width = settings.control_width,
   padding_left = settings.spacing.item / 2,
   padding_right = settings.spacing.item / 2,
@@ -22,6 +22,8 @@ local item = sbar.add("item", "microphone", {
     align = "center", padding_left = 0, padding_right = 0,
     font = settings.type.bar_control,
   },
+  -- The hidden label keeps a semantic diagnostic available through `sketchybar --query`.
+  -- The popup heading and state row are the visible text channels.
   label = { drawing = false, string = "Microphone, state unavailable" },
   background = {
     drawing = false, color = colors.surface2, height = settings.surface_height, corner_radius = 0,
@@ -50,6 +52,33 @@ local function boolean_value(capability)
   return nil
 end
 
+local function use_value(direction)
+  if direction and type(direction.active) == "boolean" then return direction.active end
+  return nil
+end
+
+local function icon_color(direction, muted)
+  local in_use = use_value(direction)
+  if in_use == true then return colors.state.recording end
+  return muted and colors.muted or colors.primary
+end
+
+local function icon_string(direction, mute_resolved, muted)
+  local base = not mute_resolved and "󰍮" or muted and "󰍭" or "󰍬"
+  local in_use = use_value(direction)
+  if in_use == true then return base .. "•" end
+  if in_use == false then return base .. "○" end
+  return base
+end
+
+local function bar_color(view, direction, muted)
+  if not view.confirmed or not direction then return colors.state.missing end
+  if muted ~= nil or use_value(direction) ~= nil then
+    return icon_color(direction, muted)
+  end
+  return colors.state.unresolved
+end
+
 local function semantic_label(view)
   if not view.confirmed then return "Microphone, state unavailable" end
   local device, direction = input_state(view)
@@ -61,6 +90,8 @@ local function semantic_label(view)
   if mute and mute.available and mute.value == true then parts[#parts + 1] = "muted"
   elseif mute and mute.available and mute.value == false then parts[#parts + 1] = "not muted"
   else parts[#parts + 1] = "mute unavailable" end
+  local in_use = use_value(direction)
+  if in_use ~= nil then parts[#parts + 1] = in_use and "active" or "idle" end
   parts[#parts + 1] = device.name
   return table.concat(parts, ", ")
 end
@@ -84,15 +115,17 @@ end
 
 local function action_row(token, suffix, label, selected, callback)
   local row = popup.row(item, token, suffix, {
-    icon = { drawing = true, string = selected and "✓" or "", width = 24, color = selected and colors.green or colors.blue, padding_left = 8, padding_right = 0 },
+    icon = { drawing = true, string = selected and "✓" or "", width = 24, color = selected and colors.green or state.busy and colors.muted or colors.blue, padding_left = 8, padding_right = 0 },
     label = { string = shell.ellipsis(label, 30), color = selected and colors.primary or colors.muted },
     background = { drawing = selected, color = colors.surface2 },
   })
   if not row then return row end
-  popup.action(row, { selected = selected, idle_color = selected and colors.primary or colors.muted, idle_icon_color = selected and colors.green or colors.blue })
-  if not selected and not state.busy then popup.on_click(row, function(env)
-    if left_click(env) and popup.is_current(item, token) then callback() end
-  end) end
+  if not state.busy then
+    popup.action(row, { selected = selected, idle_color = selected and colors.primary or colors.muted, idle_icon_color = selected and colors.green or colors.blue })
+    if not selected then popup.on_click(row, function(env)
+      if left_click(env) and popup.is_current(item, token) then callback() end
+    end) end
+  end
   return row
 end
 
@@ -102,10 +135,19 @@ build_rows = function(token)
   local controls = audio.controls("input")
   local level = direction and percentage(direction.volume) or nil
   local mute = direction and direction.mute or nil
+  local in_use = use_value(direction)
   local heading = "MICROPHONE"
+  if in_use ~= nil then heading = heading .. (in_use and "  ·  ACTIVE" or "  ·  IDLE") end
   if level then heading = heading .. "  ·  " .. tostring(level) .. "%" end
   if mute and mute.available and mute.value == true then heading = heading .. "  ·  MUTED" end
   popup.row(item, token, "heading", { label = { string = heading, align = "center", color = colors.primary } })
+
+  if in_use ~= nil then
+    popup.row(item, token, "active_state", {
+      icon = { drawing = true, string = "●", color = in_use and colors.state.recording or colors.muted },
+      label = { string = in_use and "Microphone is active" or "Microphone is idle", color = in_use and colors.state.recording or colors.primary },
+    })
+  end
 
   if state.busy then
     popup.row(item, token, "working", {
@@ -117,7 +159,13 @@ build_rows = function(token)
     })
   end
 
-  if controls and direction and direction.volume.available
+  if state.confirmed and type(state.warning_count) == "number" and state.warning_count > 0 then
+    popup.note(item, token, "state_incomplete", "Some audio state could not be read", {
+      color = colors.warning, max_chars = 40,
+    })
+  end
+
+  if not state.busy and controls and direction and direction.volume.available
      and direction.volume.settable and level then
     popup.slider(item, token, "level", level, function(env)
       local value = tonumber(env and env.PERCENTAGE)
@@ -129,6 +177,7 @@ build_rows = function(token)
     local reason = not state.confirmed and "Microphone state is unavailable"
       or not direction and "Current microphone is unavailable"
       or not controls and "Microphone controls are unavailable"
+      or state.busy and "Level control is inactive while audio controls are busy"
       or "Level is controlled by the device"
     popup.row(item, token, "level_unavailable", {
       label = { string = reason, color = colors.muted },
@@ -225,13 +274,13 @@ local function render(view)
   local _, direction = input_state(view)
   local mute = direction and direction.mute or nil
   local muted = boolean_value(mute)
-  local resolved = view.confirmed and direction ~= nil and muted ~= nil
+  local mute_resolved = view.confirmed and direction ~= nil and muted ~= nil
   item:set({
     width = settings.control_width,
     icon = {
-      string = not resolved and "󰍮" or muted and "󰍭" or "󰍬",
-      color = hover.foreground(item,
-        resolved and (muted and colors.muted or colors.primary) or colors.muted),
+      string = icon_string(direction, mute_resolved, muted),
+      color = hover.foreground(
+        item, bar_color(view, direction, muted), view.confirmed and direction ~= nil),
     },
     label = { string = semantic_label(view), drawing = false },
   })
@@ -239,14 +288,19 @@ local function render(view)
 end
 
 audio.subscribe(render)
-item:subscribe({ "routine", "system_woke" }, function() audio.refresh() end)
+item:subscribe({ "routine", "system_woke" }, function()
+  audio.refresh(nil, true)
+end)
 hover.bind(item, {
+  preserve_hover_color = function()
+    local _, direction = input_state(state)
+    return state.confirmed and direction ~= nil
+  end,
   idle_color = function()
     local _, direction = input_state(state)
     local mute = direction and direction.mute or nil
     local muted = boolean_value(mute)
-    local resolved = state.confirmed and direction ~= nil and muted ~= nil
-    return resolved and (muted and colors.muted or colors.primary) or colors.muted
+    return bar_color(state, direction, muted)
   end,
 })
 audio.refresh()

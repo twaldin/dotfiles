@@ -4,6 +4,8 @@ local popup = require("lib.popup")
 local shell = require("lib.shell")
 local settings = require("settings")
 local stats_contract = require("lib.stats_contract")
+local hardware_contract = require("lib.hardware_contract")
+local fan_power = require("lib.fan_power_control")
 
 local definitions = {
   cpu = { icon = "󰍛", title = "CPU", color = colors.domain.cpu },
@@ -15,11 +17,13 @@ local definitions = {
 }
 local order = { "cpu", "gpu", "ram", "net", "ssd", "tmp" }
 local items, active = {}, {}
-local histories = { cpu = {}, ram = {}, net = {} }
-local history_reset = { cpu = 0, ram = 0, net = 0 }
+local histories = { cpu = {}, gpu = {}, ram = {}, net = {}, ssd = {} }
+local history_reset = { cpu = 0, gpu = 0, ram = 0, net = 0, ssd = 0 }
 local current = {}
 local cursor = { retired = {} }
 local render_all
+local update_hardware_cadence
+local fan_power_control
 
 local function finite(value, minimum, maximum)
   value = tonumber(value)
@@ -46,6 +50,27 @@ end
 local function percent(value)
   value = bound(value, 0, 100)
   return value and string.format("%.0f%%", value) or "—"
+end
+
+local function temperature(value)
+  value = finite(value, 0, 130)
+  return value and string.format("%.0f °C", value) or "—"
+end
+
+local function watts(value)
+  value = finite(value, 0, 1000)
+  return value and string.format(value < 10 and "%.2f W" or "%.1f W", value) or "—"
+end
+
+local function frequency(value)
+  value = finite(value, 1, 10000)
+  if not value then return "—" end
+  return value >= 1000 and string.format("%.2f GHz", value / 1000) or string.format("%.0f MHz", value)
+end
+
+local function rpm(value)
+  value = finite(value, 0, 30000)
+  return value and string.format("%.0f RPM", value) or "—"
 end
 
 local function append(name, value)
@@ -117,13 +142,23 @@ local function row(host, token, suffix, label, value, color)
   return popup.field(host, token, suffix, label, value, { value_color = color or colors.primary })
 end
 
+local function hardware_freshness(host, token)
+  if current.hardware_stale then
+    popup.note(host, token, "hardware_stale", "Refresh delayed · showing a recent sample", {
+      align = "center", color = colors.warning,
+    })
+  end
+end
+
 local function gpu_headline()
-  if current.gpu_caps_valid ~= true then return "Unavailable" end
+  if current.gpu_activity ~= nil then return percent(current.gpu_activity) end
+  if current.gpu_caps_valid ~= true then return "—" end
   if current.gpu_present ~= true then return "Not present" end
   return current.gpu_unified and "Unified" or "Present"
 end
 
 local function gpu_bar_label()
+  if current.gpu_activity ~= nil then return percent(current.gpu_activity) end
   if current.gpu_caps_valid ~= true or current.gpu_present ~= true then return "—" end
   return current.gpu_unified and "UMA" or "GPU"
 end
@@ -161,9 +196,9 @@ end
 local function graph(host, token, name, options)
   options = options or {}
   local values = histories[name]
-  if name == "net" then
+  if name == "net" or name == "ssd" then
     values = {}
-    for index, value in ipairs(histories.net) do values[index] = normalize_net(value) end
+    for index, value in ipairs(histories[name]) do values[index] = normalize_net(value) end
   end
   popup.graph(host, token, "history_graph", values, values[#values] or 0, {
     color = options.color or definitions[name].color,
@@ -212,12 +247,20 @@ local function build_metric(name, token)
     or name == "ram" and percent(current.ram_percent)
     or name == "net" and ((current.net_rx and current.net_tx) and (bytes(current.net_rx + current.net_tx) .. "/s") or "—")
     or name == "ssd" and percent(current.ssd_percent)
-    or title_case(current.thermal_state)
+    or (current.thermal_state and title_case(current.thermal_state) or "—")
   popup.header(host, token, heading, headline, {
     color = name == "tmp" and (thermal_color(current.thermal_state) or colors.primary) or colors.primary,
   })
 
   if name == "cpu" then
+    popup.section(host, token, "hardware_heading", "Hardware telemetry · unsupported interfaces")
+    hardware_freshness(host, token)
+    row(host, token, "temperature", "Highest recognized sensor", temperature(current.cpu_temp))
+    row(host, token, "frequency", "Weighted frequency", frequency(current.cpu_frequency))
+    if current.cpu_efficiency_frequency ~= nil then row(host, token, "efficiency_frequency", "Efficiency cluster", frequency(current.cpu_efficiency_frequency)) end
+    if current.cpu_performance_frequency ~= nil then row(host, token, "performance_frequency", "Performance cluster", frequency(current.cpu_performance_frequency)) end
+    if current.cpu_super_frequency ~= nil then row(host, token, "super_frequency", "Super cluster", frequency(current.cpu_super_frequency)) end
+    row(host, token, "power", "CPU power", watts(current.cpu_power))
     popup.section(host, token, "history_heading", "Recent utilization · up to 6 min")
     graph(host, token, "cpu", { color = colors.blue, fill_color = colors.blue_fill })
     percent_scale(host, token)
@@ -238,6 +281,15 @@ local function build_metric(name, token)
     row(host, token, "processors", "Active / logical", processors)
     row(host, token, "uptime", "Uptime", uptime(current.uptime))
   elseif name == "gpu" then
+    popup.section(host, token, "activity_heading", "Hardware telemetry · unsupported interfaces")
+    hardware_freshness(host, token)
+    graph(host, token, "gpu", { color = colors.domain.gpu, fill_color = colors.blue_fill })
+    percent_scale(host, token)
+    row(host, token, "activity", "Device utilization", percent(current.gpu_activity))
+    if current.gpu_renderer ~= nil then row(host, token, "renderer", "Renderer utilization", percent(current.gpu_renderer)) end
+    if current.gpu_tiler ~= nil then row(host, token, "tiler", "Tiler utilization", percent(current.gpu_tiler)) end
+    row(host, token, "temperature", "Highest recognized sensor", temperature(current.gpu_temp))
+    row(host, token, "power", "GPU power", watts(current.gpu_power))
     popup.section(host, token, "capabilities_heading", "Public capabilities")
     row(host, token, "present", "Metal device", current.gpu_caps_valid and yes_no(current.gpu_present) or "—")
     row(host, token, "unified", "Unified memory", yes_no(current.gpu_unified))
@@ -245,10 +297,11 @@ local function build_metric(name, token)
     row(host, token, "headless", "Headless", yes_no(current.gpu_headless))
     row(host, token, "removable", "Removable", yes_no(current.gpu_removable))
     row(host, token, "recommended", "Recommended working set", bytes(current.gpu_recommended))
-    popup.note(host, token, "activity_note", "System-wide GPU activity is unavailable from public APIs")
   elseif name == "ram" then
-    popup.section(host, token, "pressure_heading", "Memory pressure")
-    row(host, token, "pressure", "State", title_case(current.pressure_state), pressure_color(current.pressure_state))
+    if current.pressure_state then
+      popup.section(host, token, "pressure_heading", "Memory pressure")
+      row(host, token, "pressure", "State", title_case(current.pressure_state), pressure_color(current.pressure_state))
+    end
     popup.section(host, token, "history_heading", "Recent utilization · up to 6 min")
     graph(host, token, "ram", { color = colors.green, fill_color = colors.green_fill })
     percent_scale(host, token)
@@ -272,6 +325,10 @@ local function build_metric(name, token)
     row(host, token, "combined", "Combined",
       current.net_rx ~= nil and current.net_tx ~= nil
         and bytes(current.net_rx + current.net_tx) .. "/s" or "—")
+    popup.section(host, token, "session_heading", "Provider session")
+    row(host, token, "session_download", "Provider session download", bytes(current.net_session_rx))
+    row(host, token, "session_upload", "Provider session upload", bytes(current.net_session_tx))
+    popup.note(host, token, "session_note", "Measured lower bounds · gaps are not inferred")
     popup.section(host, token, "path_heading", "Path")
     row(host, token, "route", "Connection", title_case(current.net_type) .. " · " .. title_case(current.net_state))
     row(host, token, "cost", "Cost", current.net_expensive == nil and "—" or (current.net_expensive and "Expensive" or "Standard"))
@@ -279,22 +336,52 @@ local function build_metric(name, token)
   elseif name == "ssd" then
     local value = current.ssd_percent
     popup.meter(host, token, "meter", value or 0, warning_color(value) or colors.domain.ssd)
+    popup.section(host, token, "io_heading", "Data backing device I/O")
+    graph(host, token, "ssd", { color = colors.domain.ssd, fill_color = colors.blue_fill })
+    popup.axis(host, token, "history_scale", "0 B/s", "1 GB/s")
+    row(host, token, "read", "Read", current.ssd_read and bytes(current.ssd_read) .. "/s" or "—")
+    row(host, token, "write", "Write", current.ssd_write and bytes(current.ssd_write) .. "/s" or "—")
+    row(host, token, "combined", "Combined",
+      current.ssd_read and current.ssd_write and bytes(current.ssd_read + current.ssd_write) .. "/s" or "—")
+    popup.note(host, token, "io_note",
+      "Shared APFS backing-target rates · invalid gaps are not inferred")
     popup.section(host, token, "capacity_heading", "Data volume capacity")
     row(host, token, "used", "Used", bytes(current.ssd_used), warning_color(value))
     row(host, token, "free", "Free", bytes(current.ssd_free), warning_color(value))
     row(host, token, "total", "Total", bytes(current.ssd_total))
     row(host, token, "available", "Available for use", bytes(current.ssd_important))
-    popup.note(host, token, "io_note", "Volume-to-device I/O attribution is not shown")
   else
-    local thermal = title_case(current.thermal_state)
-    local pressure = title_case(current.pressure_state)
-    popup.section(host, token, "condition_heading", "Public conditions")
-    row(host, token, "thermal", "Thermal state", thermal, thermal_color(current.thermal_state))
-    row(host, token, "pressure", "Memory pressure", pressure, pressure_color(current.pressure_state))
-    row(host, token, "power", "Low Power Mode", title_case(current.low_power_state))
-    popup.section(host, token, "temperature_heading", "Numeric sensors")
-    popup.note(host, token, "temperature_note", "Public hardware temperatures and sensor rails are unavailable")
-    popup.note(host, token, "fans_note", "Fans are managed by macOS")
+    popup.section(host, token, "condition_heading", "System conditions")
+    hardware_freshness(host, token)
+    if current.thermal_state then
+      row(host, token, "thermal", "Thermal state", title_case(current.thermal_state), thermal_color(current.thermal_state))
+    end
+    if current.pressure_state then
+      row(host, token, "pressure", "Memory pressure", title_case(current.pressure_state), pressure_color(current.pressure_state))
+    end
+    row(host, token, "cpu_temperature", "Highest recognized CPU", temperature(current.cpu_temp))
+    row(host, token, "gpu_temperature", "Highest recognized GPU", temperature(current.gpu_temp))
+    popup.section(host, token, "power_heading", "Power")
+    local mode = current.power_mode and title_case(current.power_mode.mode) or title_case(current.low_power_state)
+    local source = current.power_mode and title_case(current.power_mode.source) or "—"
+    row(host, token, "power_mode", "Mode", mode)
+    row(host, token, "power_source", "Active source", source)
+    row(host, token, "cpu_power", "CPU", watts(current.cpu_power))
+    row(host, token, "gpu_power", "GPU", watts(current.gpu_power))
+    row(host, token, "ram_power", "Memory", watts(current.ram_power))
+    row(host, token, "ane_power", "Neural Engine", watts(current.ane_power))
+    popup.section(host, token, "fans_heading", "Fans")
+    if type(current.fans) ~= "table" or #current.fans == 0 then
+      popup.note(host, token, "fans_unavailable", "Fan telemetry unavailable")
+    else
+      for _, fan in ipairs(current.fans) do
+        row(host, token, "fan_" .. fan.index, "Fan " .. fan.index,
+          rpm(fan.rpm) .. " · " .. title_case(fan.mode))
+        row(host, token, "fan_" .. fan.index .. "_range", "Target / range",
+          rpm(fan.target_rpm) .. " · " .. rpm(fan.min_rpm) .. "–" .. rpm(fan.max_rpm))
+      end
+    end
+    if fan_power_control then fan_power_control:build(host, token, popup, colors) end
   end
   tool_links(host, token, name)
 end
@@ -306,17 +393,31 @@ local function rebuild(name)
   end
 end
 
+fan_power_control = fan_power.new({
+  run = function(arguments, callback)
+    local command = { settings.config_dir .. "/scripts/fan-power-client.sh" }
+    for _, argument in ipairs(arguments) do command[#command + 1] = argument end
+    shell.exec(command, callback)
+  end,
+  changed = function() rebuild("tmp") end,
+  recovery = function()
+    shell.open(settings.config_dir .. "/privileged/fan-power-owner/README.md")
+  end,
+})
+
 local function make_item(name)
   local definition = definitions[name]
+  local width = name == "tmp" and settings.right_layout.tmp_width or settings.right_layout.stat_width
   local item = sbar.add("item", name, {
-    position = "right", width = settings.right_layout.stat_width,
+    position = "right", width = width,
     padding_left = settings.spacing.item / 2,
     padding_right = settings.spacing.item / 2,
     icon = { string = definition.icon, color = definition.color, width = 18, align = "center", padding_left = 0, padding_right = settings.spacing.icon_label / 2, font = settings.type.bar_icon },
-    label = { string = "—", color = colors.primary, width = settings.right_layout.stat_width - 18, align = "center", padding_left = settings.spacing.icon_label / 2, padding_right = 0, font = settings.type.bar_value },
+    label = { string = "—", color = colors.primary, width = width - 18, align = "center", padding_left = settings.spacing.icon_label / 2, padding_right = 0, font = settings.type.bar_value },
     background = { drawing = false },
   })
   items[name] = item
+  if name == "tmp" then item:set({ updates = true, update_freq = 5 }) end
   hover.bind(item, { idle_color = definition.color })
   popup.bind(item, {
     align = "right",
@@ -324,9 +425,14 @@ local function make_item(name)
       if name == "ssd" then shell.exec({ "/usr/bin/open", "-b", settings.bundles.disk_utility })
       else shell.exec({ "/usr/bin/open", "-b", settings.bundles.activity_monitor }) end
     end,
-    on_close = function() active[name] = nil end,
+    on_close = function()
+      active[name] = nil
+      if name == "tmp" then fan_power_control:closed() end
+      if update_hardware_cadence then update_hardware_cadence() end
+    end,
     build = function(token)
       active[name] = token
+      if update_hardware_cadence then update_hardware_cadence() end
       build_metric(name, token)
     end,
   })
@@ -355,14 +461,69 @@ end
 
 render_all = function()
   items.cpu:set({ label = { string = bar_percent(current.cpu_busy), color = warning_color(current.cpu_busy) or colors.primary } })
-  items.gpu:set({ label = { string = gpu_bar_label(), color = colors.primary } })
+  items.gpu:set({ label = { string = gpu_bar_label(), color = warning_color(current.gpu_activity) or colors.primary } })
   items.ram:set({ label = { string = bar_percent(current.ram_percent), color = warning_color(current.ram_percent) or colors.primary } })
   local net_total = current.net_rx and current.net_tx and current.net_rx + current.net_tx or nil
   items.net:set({ label = { string = compact_rate(net_total), color = colors.primary } })
   items.ssd:set({ label = { string = bar_percent(current.ssd_percent), color = warning_color(current.ssd_percent) or colors.primary } })
-  local thermal = current.thermal_state
-  local thermal_label = ({ nominal = "OK", fair = "FAIR", serious = "HIGH", critical = "CRIT" })[thermal] or "—"
-  items.tmp:set({ label = { string = thermal_label, color = thermal_color(thermal) or colors.primary } })
+  local cpu_temp = finite(current.cpu_temp, 0, 130)
+  local gpu_temp = finite(current.gpu_temp, 0, 130)
+  local thermal_label = string.format("C%s G%s",
+    cpu_temp and string.format("%.0f", cpu_temp) or "—",
+    gpu_temp and string.format("%.0f", gpu_temp) or "—")
+  local cpu_warning = cpu_temp and warning_color(100 * cpu_temp / 105) or nil
+  local gpu_warning = gpu_temp and warning_color(100 * gpu_temp / 105) or nil
+  local thermal_warning = (cpu_warning == colors.red or gpu_warning == colors.red) and colors.red
+    or cpu_warning or gpu_warning
+  local thermal_font = ((cpu_temp and cpu_temp >= 99.5) or (gpu_temp and gpu_temp >= 99.5))
+    and settings.type.bar_value_compact or settings.type.bar_value
+  items.tmp:set({ label = {
+    string = thermal_label, color = thermal_warning or colors.primary, font = thermal_font,
+  } })
+end
+
+local hardware_state = nil
+local hardware_success_at = nil
+local hardware_stale = false
+local hardware_sample_sequence = 0
+local hardware_expiry_generation = 0
+local hardware_stale_after = 20
+local function apply_hardware()
+  local value = hardware_state
+  current.hardware_stale = hardware_stale
+  current.gpu_sequence = hardware_sample_sequence > 0 and hardware_sample_sequence or nil
+  current.cpu_temp = value and value.temperatures.cpu_temp_c or nil
+  current.gpu_temp = value and value.temperatures.gpu_temp_c or nil
+  current.fans = value and value.fans or nil
+  current.gpu_activity = value and value.gpu.utilization_pct or nil
+  current.gpu_renderer = value and value.gpu.renderer_pct or nil
+  current.gpu_tiler = value and value.gpu.tiler_pct or nil
+  current.cpu_power = value and value.power.cpu_w or nil
+  current.gpu_power = value and value.power.gpu_w or nil
+  current.ane_power = value and value.power.ane_w or nil
+  current.ram_power = value and value.power.ram_w or nil
+  current.cpu_frequency = value and value.frequency.average_mhz or nil
+  current.cpu_efficiency_frequency = value and value.frequency.efficiency_mhz or nil
+  current.cpu_performance_frequency = value and value.frequency.performance_mhz or nil
+  current.cpu_super_frequency = value and value.frequency.super_mhz or nil
+  current.power_mode = value and value.power_mode or nil
+end
+
+local function schedule_hardware_expiry()
+  hardware_expiry_generation = hardware_expiry_generation + 1
+  local generation = hardware_expiry_generation
+  sbar.delay(hardware_stale_after, function()
+    if generation ~= hardware_expiry_generation then return end
+    hardware_expiry_generation = hardware_expiry_generation + 1
+    hardware_state, hardware_success_at, hardware_stale = nil, nil, false
+    apply_hardware()
+    reset_history("gpu")
+    update_hardware_cadence()
+    render_all()
+    rebuild("cpu")
+    rebuild("gpu")
+    rebuild("tmp")
+  end)
 end
 
 local function accept_metrics(env)
@@ -371,6 +532,7 @@ local function accept_metrics(env)
   if accepted.reset then
     clear_histories()
     current = {}
+    apply_hardware()
   end
   current.sequence = accepted.sequence
   local sampled = { gpu = true }
@@ -413,6 +575,8 @@ local function accept_metrics(env)
     current.net_tx = env.NET_VALID == "1" and finite(env.NET_TX_BPS, 0) or nil
     current.net_state = env.NET_STATE
     current.net_type = env.NET_PATH_TYPE
+    current.net_session_rx = env.NET_SESSION_VALID == "1" and finite(env.NET_SESSION_RX_B, 0) or nil
+    current.net_session_tx = env.NET_SESSION_VALID == "1" and finite(env.NET_SESSION_TX_B, 0) or nil
     current.net_expensive = env.NET_EXPENSIVE == "1"
     current.net_constrained = env.NET_CONSTRAINED == "1"
     if current.net_rx and current.net_tx then append("net", current.net_rx + current.net_tx) else reset_history("net") end
@@ -428,11 +592,20 @@ local function accept_metrics(env)
     current.ssd_important = env.SSD_IMPORTANT_AVAILABLE_VALID == "1" and finite(env.SSD_IMPORTANT_AVAILABLE_B, 0) or nil
   end
 
+  if env.SSD_IO_SAMPLED == "1" then
+    sampled.ssd = true
+    current.ssd_sequence = accepted.sequence
+    current.ssd_read = env.SSD_IO_VALID == "1" and finite(env.SSD_READ_BPS, 0) or nil
+    current.ssd_write = env.SSD_IO_VALID == "1" and finite(env.SSD_WRITE_BPS, 0) or nil
+    if current.ssd_read and current.ssd_write then append("ssd", current.ssd_read + current.ssd_write)
+    else reset_history("ssd") end
+  end
+
   if env.CONDITION_SAMPLED == "1" then
     sampled.tmp, sampled.ram = true, true
     current.tmp_sequence = accepted.sequence
-    current.thermal_state = env.THERMAL_VALID == "1" and env.THERMAL_STATE or "unknown"
-    current.pressure_state = env.PRESSURE_VALID == "1" and env.PRESSURE_STATE or "unavailable"
+    current.thermal_state = env.THERMAL_VALID == "1" and env.THERMAL_STATE or nil
+    current.pressure_state = env.PRESSURE_VALID == "1" and env.PRESSURE_STATE or nil
     current.low_power_state = env.LOW_POWER_STATE
   end
 
@@ -463,6 +636,7 @@ local function accept_cpu_detail(env)
   if accepted.reset then
     clear_histories()
     current = {}
+    apply_hardware()
   end
   current.cpu_detail_sequence = accepted.sequence
   current.cpu_cores = accepted.cores
@@ -471,7 +645,45 @@ local function accept_cpu_detail(env)
   rebuild("cpu")
 end
 
+update_hardware_cadence = function()
+  local visible = active.cpu ~= nil or active.gpu ~= nil or active.tmp ~= nil
+  local reduced = current.power_mode and (current.power_mode.source == "battery" or current.power_mode.mode == "low")
+  items.tmp:set({ update_freq = visible and 2 or reduced and 15 or 5 })
+end
+
+local hardware_in_flight = false
+local function refresh_hardware()
+  if hardware_in_flight then return end
+  hardware_in_flight = true
+  shell.exec({ settings.config_dir .. "/scripts/hardware-state.py" }, function(output, exit_code)
+    hardware_in_flight = false
+    local value = exit_code == 0 and hardware_contract.validate(output) or nil
+    local now = os.time()
+    if value then
+      hardware_sample_sequence = hardware_sample_sequence + 1
+      hardware_state, hardware_success_at, hardware_stale = value, now, false
+      schedule_hardware_expiry()
+    elseif hardware_state and hardware_success_at and now >= hardware_success_at
+        and now - hardware_success_at <= hardware_stale_after then
+      hardware_stale = true
+    else
+      hardware_expiry_generation = hardware_expiry_generation + 1
+      hardware_state, hardware_success_at, hardware_stale = nil, nil, false
+    end
+    apply_hardware()
+    update_hardware_cadence()
+    if value and current.gpu_activity then append("gpu", current.gpu_activity)
+    elseif not hardware_stale then reset_history("gpu") end
+    render_all()
+    rebuild("cpu")
+    rebuild("gpu")
+    rebuild("tmp")
+  end)
+end
+
 sbar.add("event", "system_cpu_detail_v1")
-items.cpu:subscribe("system_metrics_v2", accept_metrics)
+items.cpu:subscribe("system_metrics_v3", accept_metrics)
 items.cpu:subscribe("system_cpu_detail_v1", accept_cpu_detail)
+items.tmp:subscribe({ "routine", "system_woke" }, refresh_hardware)
 render_all()
+refresh_hardware()

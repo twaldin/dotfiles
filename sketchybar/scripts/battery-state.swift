@@ -23,6 +23,7 @@ private enum ActiveSource: String, Codable {
     case ac
     case battery
     case ups
+    case offline
     case unknown
 }
 
@@ -345,12 +346,11 @@ private enum BatteryEvaluator {
 
     private static func activeSource(_ raw: StrictValue?) -> ActiveSource {
         guard case let .string(value)? = raw else { return .unknown }
-        // IOPowerSources.h documents these three exact values for
-        // IOPSGetProvidingPowerSourceType.
         switch value {
         case kIOPMACPowerKey: return .ac
         case kIOPMBatteryPowerKey: return .battery
         case kIOPMUPSPowerKey: return .ups
+        case kIOPSOffLineValue: return .offline
         default: return .unknown
         }
     }
@@ -374,10 +374,15 @@ private enum BatteryEvaluator {
     private static func chargeState(_ battery: PowerSource, activeSource: ActiveSource) -> ChargeState {
         guard case let .boolean(charging)? = battery.fields[.charging],
               case let .boolean(charged)? = battery.fields[.charged],
-              case let .boolean(finishing)? = battery.fields[.finishingCharge],
               case let .string(source)? = battery.fields[.sourceState],
               let current = nonnegativeInteger(battery.fields[.currentCapacity]) else {
             return .unavailable
+        }
+        let finishing: Bool
+        switch battery.fields[.finishingCharge] {
+        case let .boolean(value)?: finishing = value
+        case nil: finishing = false
+        default: return .unavailable
         }
         if charging && charged { return .unavailable }
         if finishing && !charging { return .unavailable }
@@ -432,8 +437,12 @@ private enum BatteryEvaluator {
     }
 
     private static func condition(_ battery: PowerSource) -> ConditionState {
+        // macOS can publish these condition values in BatteryHealth instead of
+        // BatteryHealthCondition. Accept only the two documented fixed values.
+        if case .string(kIOPSCheckBatteryValue)? = battery.fields[.health] { return .checkBattery }
+        if case .string(kIOPSPermanentFailureValue)? = battery.fields[.health] { return .permanentBatteryFailure }
         switch battery.fields[.condition] {
-        case nil: return .noReportedCondition
+        case nil, .string("")?: return .noReportedCondition
         case .string(kIOPSCheckBatteryValue)?: return .checkBattery
         case .string(kIOPSPermanentFailureValue)?: return .permanentBatteryFailure
         case .string?: return .unknown
@@ -502,6 +511,37 @@ private enum SelfTest {
             lowPower: .offOrUnsupported
         )
         guard ups.inventory == .absent, ups.source == .ups else { return false }
+
+        var offlineFields = base
+        offlineFields[.sourceState] = .string(kIOPSOffLineValue)
+        offlineFields[.charging] = .boolean(false)
+        let offline = BatteryEvaluator.document(
+            snapshot: Snapshot(
+                sources: [PowerSource(fields: offlineFields)],
+                providingSource: .string(kIOPSOffLineValue)
+            ),
+            cycles: .unavailable,
+            lowPower: .offOrUnsupported
+        )
+        guard offline.inventory == .present,
+              offline.source == .offline,
+              offline.charge == .offline,
+              offline.time == .notApplicable else { return false }
+
+        var optionalFinishing = base
+        optionalFinishing.removeValue(forKey: .finishingCharge)
+        let withoutFinishing = BatteryEvaluator.document(
+            snapshot: snapshot(optionalFinishing), cycles: .unavailable, lowPower: .offOrUnsupported
+        )
+        guard withoutFinishing.charge == .charging, withoutFinishing.time == .available(30) else { return false }
+
+        var healthCondition = base
+        healthCondition[.health] = .string(kIOPSCheckBatteryValue)
+        healthCondition[.condition] = .string("")
+        let conditionFromHealth = BatteryEvaluator.document(
+            snapshot: snapshot(healthCondition), cycles: .unavailable, lowPower: .offOrUnsupported
+        )
+        guard conditionFromHealth.condition == .checkBattery else { return false }
 
         let duplicate = Snapshot(
             sources: [PowerSource(fields: base), PowerSource(fields: base)],

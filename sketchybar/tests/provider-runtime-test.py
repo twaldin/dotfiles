@@ -313,7 +313,8 @@ with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     owned_process = subprocess.Popen([sys.executable, str(helper), 'exec-owned', str(owned_log), str(owned_pidfile), str(owned_intent), str(os.getpid()), '/bin/sleep', '5'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         for _ in range(500):
-            if owned_pidfile.exists() or owned_process.poll() is not None:
+            if ((owned_pidfile.exists() and not owned_intent.exists())
+                    or owned_process.poll() is not None):
                 break
             time.sleep(0.01)
         check(owned_pidfile.read_text() == str(owned_process.pid) + '\n' and not owned_intent.exists() and stat.S_IMODE(owned_pidfile.stat().st_mode) == 0o600 and owned_process.poll() is None, 'exec-owned child must atomically publish its own PID and clear durable intent before exact command survives')

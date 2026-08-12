@@ -120,13 +120,21 @@ def validate_capability(value, kind):
     return {"available": available, "settable": settable, "value": observed}
 
 
-def validate_direction(value):
-    if not exact_dict(value, {"volume", "mute"}):
+def validate_direction(value, direction):
+    keys = {"volume", "mute"}
+    if direction == "input" and isinstance(value, dict) and "active" in value:
+        keys.add("active")
+    if not exact_dict(value, keys):
         raise ContractError()
-    return {
+    validated = {
         "volume": validate_capability(value["volume"], "volume"),
         "mute": validate_capability(value["mute"], "mute"),
     }
+    if "active" in value:
+        if not exact_bool(value["active"]):
+            raise ContractError()
+        validated["active"] = value["active"]
+    return validated
 
 
 def name_character_rejected(character):
@@ -235,11 +243,14 @@ def validate_audio_state(value):
             if direction in direction_set:
                 if raw_state is None:
                     raise ContractError()
-                states[direction] = validate_direction(raw_state)
+                states[direction] = validate_direction(raw_state, direction)
             else:
                 if raw_state is not None:
                     raise ContractError()
                 states[direction] = None
+        if (states["input"] is not None and "active" in states["input"]
+                and "output" in direction_set):
+            raise ContractError()
         name = clean_name(raw["name"])
         device = {
             "uid": uid,
@@ -542,7 +553,8 @@ def state_document(begin=False):
             if mapping is None:
                 mapping = new_mapping()
                 publish_mapping = True
-        raw = validate_audio_state(json_process([SYSTEM_CONTROLS, "audio", "state"]))
+        raw = validate_audio_state(json_process(
+            [SYSTEM_CONTROLS, "audio", "state"], timeout=2))
         uids = [device["uid"] for device in raw["devices"]]
         entries = {handle_for(mapping, uid): uid for uid in uids}
         if len(entries) != len(uids):

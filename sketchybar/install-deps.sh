@@ -9,9 +9,21 @@ CONFIG_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 SECURE_INSTALLER="$CONFIG_DIR/scripts/secure-file-install.py"
 SYSTEM_CONTROLS_HELPER_DIR="$HOME/.local/share/sketchybar-controls"
 SYSTEM_CONTROLS_SOURCE="$CONFIG_DIR/scripts/system-controls.swift"
-SYSTEM_CONTROLS_SOURCE_SHA256=bb2e07839781cd5a5cc7a68e3c4855ef4a3e1cc78de585f2086af278ff41461b
+SYSTEM_CONTROLS_SOURCE_SHA256=616ddedb9f89c0b0caa5fdf4aadb542c9411701855026fce2b57cbbbd29c2b45
 AUDIO_COORDINATOR_SOURCE="$CONFIG_DIR/scripts/audio-state.py"
-AUDIO_COORDINATOR_SOURCE_SHA256=e20c622aa87372a941a01bec76a0815074c2d2350ca67a32d3032ce834b166fb
+AUDIO_COORDINATOR_SOURCE_SHA256=ea5dd5631a3d9c3d23313dba1da08703c1edebe5667567c8e3b43f63986d4021
+HARDWARE_METRICS_DIR="$HOME/.local/share/sketchybar-hardware"
+HARDWARE_METRICS_BINARY="$HARDWARE_METRICS_DIR/hardware-metrics"
+HARDWARE_METRICS_MARKER="$HARDWARE_METRICS_DIR/SOURCE_SHA256"
+HARDWARE_METRICS_SOURCE="$CONFIG_DIR/scripts/hardware-metrics.swift"
+HARDWARE_METRICS_SOURCE_SHA256=f1ba601e09a759dfce3c5802b6a469d5cf1acdb75da38b9c3c23c640f4d032aa
+HARDWARE_METRICS_BRIDGE="$CONFIG_DIR/scripts/hardware-metrics-bridge.h"
+HARDWARE_METRICS_BRIDGE_SHA256=cbc25b518590636f4594456f8ce9ed8037bd74dfbcfb804a7cdcd70801670e70
+DISPLAY_CONTROL_DIR="$HOME/.local/share/sketchybar-display"
+DISPLAY_CONTROL_BINARY="$DISPLAY_CONTROL_DIR/betterdisplay-control"
+DISPLAY_CONTROL_MARKER="$DISPLAY_CONTROL_DIR/SOURCE_SHA256"
+DISPLAY_CONTROL_SOURCE="$CONFIG_DIR/scripts/betterdisplay-control.swift"
+DISPLAY_CONTROL_SOURCE_SHA256=e9cab6d9f619f1d76747112482b916ec42ddf7f44cc3ded003cd7a3fd270875b
 
 uid=$(/usr/bin/id -u)
 runtime_base_input=${TMPDIR:-}
@@ -25,18 +37,27 @@ PUBLIC_STATS_BINARY="$HOME/.local/share/sketchybar-provider/sketchybar-public-st
 host_arch=$(/usr/bin/uname -m)
 host_macos_version=$(/usr/bin/sw_vers -productVersion)
 "$SECURE_INSTALLER" host-contract "$host_arch" "$host_macos_version"
+check_native_source_pins() {
+  [ "$(/usr/bin/shasum -a 256 "$HARDWARE_METRICS_SOURCE" | /usr/bin/awk '{print $1}')" = "$HARDWARE_METRICS_SOURCE_SHA256" ] || { echo "Immutable hardware metrics source checksum failed" >&2; exit 1; }
+  [ "$(/usr/bin/shasum -a 256 "$HARDWARE_METRICS_BRIDGE" | /usr/bin/awk '{print $1}')" = "$HARDWARE_METRICS_BRIDGE_SHA256" ] || { echo "Immutable hardware bridge source checksum failed" >&2; exit 1; }
+  [ "$(/usr/bin/shasum -a 256 "$DISPLAY_CONTROL_SOURCE" | /usr/bin/awk '{print $1}')" = "$DISPLAY_CONTROL_SOURCE_SHA256" ] || { echo "Immutable display control source checksum failed" >&2; exit 1; }
+}
+check_native_source_pins
+/usr/bin/python3 "$CONFIG_DIR/tests/config-fingerprint.py" "$CONFIG_DIR"
 [ "$(/usr/bin/shasum -a 256 "$SYSTEM_CONTROLS_SOURCE" | /usr/bin/awk '{print $1}')" = "$SYSTEM_CONTROLS_SOURCE_SHA256" ] || { echo "Immutable system controls source checksum failed" >&2; exit 1; }
 [ "$(/usr/bin/shasum -a 256 "$AUDIO_COORDINATOR_SOURCE" | /usr/bin/awk '{print $1}')" = "$AUDIO_COORDINATOR_SOURCE_SHA256" ] || { echo "Immutable audio coordinator source checksum failed" >&2; exit 1; }
-SKETCHYBAR_LOG_DIR="$HOME/Library/Logs/sketchybar"
-if [ ! -e "$SKETCHYBAR_LOG_DIR" ] && [ ! -L "$SKETCHYBAR_LOG_DIR" ]; then
-  /bin/mkdir -m 0700 "$SKETCHYBAR_LOG_DIR"
-fi
-[ -d "$SKETCHYBAR_LOG_DIR" ] && [ ! -L "$SKETCHYBAR_LOG_DIR" ]   && [ "$(/usr/bin/stat -f %u "$SKETCHYBAR_LOG_DIR")" = "$(/usr/bin/id -u)" ]   && [ "$(/usr/bin/stat -f %Lp "$SKETCHYBAR_LOG_DIR")" = 700 ]   || { echo "SketchyBar launch log directory is unsafe" >&2; exit 73; }
 /opt/homebrew/bin/brew install lua ical-buddy
+
+# Gate the complete immutable source tree before any release helper is published.
+# Each later native build is self-tested again and each publication is transactional.
+"$CONFIG_DIR/scripts/smoke-config.sh"
 
 public_stats_build=$(/usr/bin/mktemp -d "$runtime_base/sketchybar-public-stats-build.XXXXXX")
 public_stats_build_cleanup() { /bin/rm -rf "$public_stats_build"; }
-trap public_stats_build_cleanup EXIT HUP INT TERM
+trap public_stats_build_cleanup EXIT
+trap 'trap - EXIT HUP INT TERM; public_stats_build_cleanup; exit 129' HUP
+trap 'trap - EXIT HUP INT TERM; public_stats_build_cleanup; exit 130' INT
+trap 'trap - EXIT HUP INT TERM; public_stats_build_cleanup; exit 143' TERM
 /usr/bin/swift build -c release --package-path "$PUBLIC_STATS_DIR" --scratch-path "$public_stats_build"
 public_stats_candidate="$public_stats_build/release/sketchybar-public-stats"
 public_stats_candidate_sha256=$(/usr/bin/shasum -a 256 "$public_stats_candidate" | /usr/bin/awk '{print $1}')
@@ -45,6 +66,79 @@ public_stats_candidate_sha256=$(/usr/bin/shasum -a 256 "$public_stats_candidate"
 "$SECURE_INSTALLER" executable "$public_stats_candidate" "$PUBLIC_STATS_BINARY" "$public_stats_candidate_sha256" --self-test
 [ "$(/usr/bin/shasum -a 256 "$PUBLIC_STATS_BINARY" | /usr/bin/awk '{print $1}')" = "$public_stats_candidate_sha256" ] || { echo "Installed public stats checksum mismatch" >&2; exit 75; }
 public_stats_build_cleanup
+trap - EXIT HUP INT TERM
+
+hardware_build=$(/usr/bin/mktemp -d "$runtime_base/sketchybar-hardware-build.XXXXXX")
+hardware_snapshot_dir="$hardware_build/source"
+hardware_build_cleanup() { [ ! -d "$hardware_snapshot_dir" ] || /bin/chmod 0700 "$hardware_snapshot_dir"; /bin/rm -rf "$hardware_build"; }
+trap hardware_build_cleanup EXIT
+trap 'trap - EXIT HUP INT TERM; hardware_build_cleanup; exit 129' HUP
+trap 'trap - EXIT HUP INT TERM; hardware_build_cleanup; exit 130' INT
+trap 'trap - EXIT HUP INT TERM; hardware_build_cleanup; exit 143' TERM
+/bin/mkdir -m 0700 "$hardware_snapshot_dir"
+hardware_source_snapshot="$hardware_snapshot_dir/hardware-metrics.swift"
+hardware_bridge_snapshot="$hardware_snapshot_dir/hardware-metrics-bridge.h"
+"$SECURE_INSTALLER" asset "$HARDWARE_METRICS_SOURCE" "$hardware_source_snapshot"
+"$SECURE_INSTALLER" asset "$HARDWARE_METRICS_BRIDGE" "$hardware_bridge_snapshot"
+[ "$(/usr/bin/shasum -a 256 "$hardware_source_snapshot" | /usr/bin/awk '{print $1}')" = "$HARDWARE_METRICS_SOURCE_SHA256" ] || { echo "Hardware source snapshot checksum failed" >&2; exit 1; }
+[ "$(/usr/bin/shasum -a 256 "$hardware_bridge_snapshot" | /usr/bin/awk '{print $1}')" = "$HARDWARE_METRICS_BRIDGE_SHA256" ] || { echo "Hardware bridge snapshot checksum failed" >&2; exit 1; }
+/bin/chmod 0444 "$hardware_source_snapshot" "$hardware_bridge_snapshot"
+/bin/chmod 0500 "$hardware_snapshot_dir"
+hardware_candidate="$hardware_build/hardware-metrics"
+/usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -O -warnings-as-errors   -import-objc-header "$hardware_bridge_snapshot" -lIOReport   "$hardware_source_snapshot" -o "$hardware_candidate"
+[ "$(/usr/bin/shasum -a 256 "$hardware_source_snapshot" | /usr/bin/awk '{print $1}')" = "$HARDWARE_METRICS_SOURCE_SHA256" ] || { echo "Hardware source snapshot changed during compilation" >&2; exit 1; }
+[ "$(/usr/bin/shasum -a 256 "$hardware_bridge_snapshot" | /usr/bin/awk '{print $1}')" = "$HARDWARE_METRICS_BRIDGE_SHA256" ] || { echo "Hardware bridge snapshot changed during compilation" >&2; exit 1; }
+/bin/chmod 0755 "$hardware_candidate"
+hardware_binary_sha256=$(/usr/bin/shasum -a 256 "$hardware_candidate" | /usr/bin/awk '{print $1}')
+hardware_marker_candidate="$hardware_build/SOURCE_SHA256"
+{
+  printf '%s\n' 'version=2'
+  printf 'swift_sha256=%s\n' "$HARDWARE_METRICS_SOURCE_SHA256"
+  printf 'bridge_sha256=%s\n' "$HARDWARE_METRICS_BRIDGE_SHA256"
+  printf '%s\n' 'target=arm64-apple-macosx15.0' 'build_mode=-O'
+  printf 'binary_sha256=%s\n' "$hardware_binary_sha256"
+} >"$hardware_marker_candidate"
+/bin/chmod 0644 "$hardware_marker_candidate"
+hardware_marker_sha256=$(/usr/bin/shasum -a 256 "$hardware_marker_candidate" | /usr/bin/awk '{print $1}')
+"$SECURE_INSTALLER" native-pair "$hardware_candidate" "$hardware_marker_candidate" \
+  "$HARDWARE_METRICS_BINARY" "$HARDWARE_METRICS_MARKER" \
+  "$hardware_binary_sha256" "$hardware_marker_sha256" --hardware \
+  "$HARDWARE_METRICS_SOURCE_SHA256" "$HARDWARE_METRICS_BRIDGE_SHA256"
+hardware_build_cleanup
+trap - EXIT HUP INT TERM
+
+display_control_build=$(/usr/bin/mktemp -d "$runtime_base/sketchybar-display-control-build.XXXXXX")
+display_control_snapshot_dir="$display_control_build/source"
+display_control_build_cleanup() { [ ! -d "$display_control_snapshot_dir" ] || /bin/chmod 0700 "$display_control_snapshot_dir"; /bin/rm -rf "$display_control_build"; }
+trap display_control_build_cleanup EXIT
+trap 'trap - EXIT HUP INT TERM; display_control_build_cleanup; exit 129' HUP
+trap 'trap - EXIT HUP INT TERM; display_control_build_cleanup; exit 130' INT
+trap 'trap - EXIT HUP INT TERM; display_control_build_cleanup; exit 143' TERM
+/bin/mkdir -m 0700 "$display_control_snapshot_dir"
+display_control_source_snapshot="$display_control_snapshot_dir/betterdisplay-control.swift"
+"$SECURE_INSTALLER" asset "$DISPLAY_CONTROL_SOURCE" "$display_control_source_snapshot"
+[ "$(/usr/bin/shasum -a 256 "$display_control_source_snapshot" | /usr/bin/awk '{print $1}')" = "$DISPLAY_CONTROL_SOURCE_SHA256" ] || { echo "Display control source snapshot checksum failed" >&2; exit 1; }
+/bin/chmod 0444 "$display_control_source_snapshot"
+/bin/chmod 0500 "$display_control_snapshot_dir"
+display_control_candidate="$display_control_build/betterdisplay-control"
+/usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -O -warnings-as-errors   "$display_control_source_snapshot" -o "$display_control_candidate"
+[ "$(/usr/bin/shasum -a 256 "$display_control_source_snapshot" | /usr/bin/awk '{print $1}')" = "$DISPLAY_CONTROL_SOURCE_SHA256" ] || { echo "Display control source snapshot changed during compilation" >&2; exit 1; }
+/bin/chmod 0755 "$display_control_candidate"
+display_control_binary_sha256=$(/usr/bin/shasum -a 256 "$display_control_candidate" | /usr/bin/awk '{print $1}')
+display_control_marker_candidate="$display_control_build/SOURCE_SHA256"
+{
+  printf '%s\n' 'version=2'
+  printf 'source_sha256=%s\n' "$DISPLAY_CONTROL_SOURCE_SHA256"
+  printf '%s\n' 'target=arm64-apple-macosx15.0' 'build_mode=-O'
+  printf 'binary_sha256=%s\n' "$display_control_binary_sha256"
+} >"$display_control_marker_candidate"
+/bin/chmod 0644 "$display_control_marker_candidate"
+display_control_marker_sha256=$(/usr/bin/shasum -a 256 "$display_control_marker_candidate" | /usr/bin/awk '{print $1}')
+"$SECURE_INSTALLER" native-pair "$display_control_candidate" "$display_control_marker_candidate" \
+  "$DISPLAY_CONTROL_BINARY" "$DISPLAY_CONTROL_MARKER" \
+  "$display_control_binary_sha256" "$display_control_marker_sha256" --display \
+  "$DISPLAY_CONTROL_SOURCE_SHA256"
+display_control_build_cleanup
 trap - EXIT HUP INT TERM
 
 lua_version=$(/opt/homebrew/bin/lua -v 2>&1)
@@ -95,22 +189,46 @@ if [ -f "$controls_binary" ] && [ -f "$controls_marker" ]; then
   fi
 fi
 if [ "$controls_install_valid" != true ]; then
+  controls_build=$(/usr/bin/mktemp -d "$runtime_base/sketchybar-system-controls-build.XXXXXX")
+  controls_snapshot_dir="$controls_build/source"
+  controls_candidate=
+  controls_marker_candidate=
+  controls_fixture_debug=
+  controls_fixture_optimized=
+  controls_install_cleanup() {
+    [ -z "$controls_candidate" ] || /bin/rm -f "$controls_candidate"
+    [ -z "$controls_marker_candidate" ] || /bin/rm -f "$controls_marker_candidate"
+    [ -z "$controls_fixture_debug" ] || /bin/rm -f "$controls_fixture_debug"
+    [ -z "$controls_fixture_optimized" ] || /bin/rm -f "$controls_fixture_optimized"
+    [ ! -d "$controls_snapshot_dir" ] || /bin/chmod 0700 "$controls_snapshot_dir"
+    /bin/rm -rf "$controls_build"
+  }
+  trap controls_install_cleanup EXIT
+  trap 'trap - EXIT HUP INT TERM; controls_install_cleanup; exit 129' HUP
+  trap 'trap - EXIT HUP INT TERM; controls_install_cleanup; exit 130' INT
+  trap 'trap - EXIT HUP INT TERM; controls_install_cleanup; exit 143' TERM
+  /bin/mkdir -m 0700 "$controls_snapshot_dir"
+  controls_source_snapshot="$controls_snapshot_dir/system-controls.swift"
+  "$SECURE_INSTALLER" asset "$SYSTEM_CONTROLS_SOURCE" "$controls_source_snapshot"
+  [ "$(/usr/bin/shasum -a 256 "$controls_source_snapshot" | /usr/bin/awk '{print $1}')" = "$SYSTEM_CONTROLS_SOURCE_SHA256" ] || { echo "System controls source snapshot checksum failed" >&2; exit 1; }
+  /bin/chmod 0444 "$controls_source_snapshot"
+  /bin/chmod 0500 "$controls_snapshot_dir"
+  check_controls_snapshot() {
+    [ "$(/usr/bin/shasum -a 256 "$controls_source_snapshot" | /usr/bin/awk '{print $1}')" = "$SYSTEM_CONTROLS_SOURCE_SHA256" ] || { echo "System controls source snapshot changed during compilation" >&2; exit 1; }
+  }
   controls_candidate=$(/usr/bin/mktemp "$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.binary.XXXXXX")
   controls_marker_candidate=$(/usr/bin/mktemp "$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.hash.XXXXXX")
   controls_fixture_debug=$(/usr/bin/mktemp "$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.fixture-debug.XXXXXX")
   controls_fixture_optimized=$(/usr/bin/mktemp "$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.fixture-optimized.XXXXXX")
-  controls_install_cleanup() { /bin/rm -f "$controls_candidate" "$controls_marker_candidate" "$controls_fixture_debug" "$controls_fixture_optimized"; }
-  trap controls_install_cleanup EXIT HUP INT TERM
-  /usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -warnings-as-errors -D SYSTEM_CONTROLS_TESTING "$SYSTEM_CONTROLS_SOURCE" -o "$controls_fixture_debug"
+  /usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -warnings-as-errors -D SYSTEM_CONTROLS_TESTING "$controls_source_snapshot" -o "$controls_fixture_debug"
+  check_controls_snapshot
   "$controls_fixture_debug" --self-test >/dev/null
-  /usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -O -warnings-as-errors -D SYSTEM_CONTROLS_TESTING "$SYSTEM_CONTROLS_SOURCE" -o "$controls_fixture_optimized"
+  /usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -O -warnings-as-errors -D SYSTEM_CONTROLS_TESTING "$controls_source_snapshot" -o "$controls_fixture_optimized"
+  check_controls_snapshot
   "$controls_fixture_optimized" --self-test >/dev/null
-  /usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -O -warnings-as-errors "$SYSTEM_CONTROLS_SOURCE" -o "$controls_candidate"
+  /usr/bin/xcrun swiftc -target arm64-apple-macosx15.0 -parse-as-library -O -warnings-as-errors "$controls_source_snapshot" -o "$controls_candidate"
+  check_controls_snapshot
   /bin/chmod 0755 "$controls_candidate"
-  [ "$(/usr/bin/lipo -archs "$controls_candidate")" = arm64 ] || { echo "System controls helper architecture mismatch" >&2; exit 1; }
-  if "$controls_candidate" --self-test >/dev/null 2>&1; then echo "Release system controls helper exposes the private fixture backend" >&2; exit 1
-  else controls_private_status=$?; [ "$controls_private_status" -eq 64 ] || { echo "Release system controls helper private-boundary check failed" >&2; exit 1; }
-  fi
   controls_binary_hash=$(/usr/bin/shasum -a 256 "$controls_candidate" | /usr/bin/awk '{print $1}')
   {
     printf '%s\n' 'version=2'
@@ -122,13 +240,17 @@ if [ "$controls_install_valid" != true ]; then
   "$SECURE_INSTALLER" system-controls-candidate-provenance "$controls_candidate" "$controls_marker_candidate" "$SYSTEM_CONTROLS_SOURCE_SHA256"
   "$CONFIG_DIR/scripts/system-controls-helper-install-transaction.sh" "$controls_candidate" "$controls_marker_candidate" "$SYSTEM_CONTROLS_HELPER_DIR" "$SYSTEM_CONTROLS_SOURCE_SHA256"
   "$SECURE_INSTALLER" system-controls-provenance "$controls_binary" "$controls_marker" "$SYSTEM_CONTROLS_SOURCE_SHA256"
+  controls_install_cleanup
   trap - EXIT HUP INT TERM
-  /bin/rm -f "$controls_fixture_debug" "$controls_fixture_optimized"
 fi
 
 if ! "$SECURE_INSTALLER" prepare-sbarlua "$SBARLUA_DIR" "$SBARLUA_COMMIT" "$SBARLUA_LEGACY_SHA256"; then
   work=$(/usr/bin/mktemp -d "$runtime_base/SbarLua.XXXXXX")
-  trap 'rm -rf "$work"' EXIT HUP INT TERM
+  sbarlua_build_cleanup() { /bin/rm -rf "$work"; }
+  trap sbarlua_build_cleanup EXIT
+  trap 'trap - EXIT HUP INT TERM; sbarlua_build_cleanup; exit 129' HUP
+  trap 'trap - EXIT HUP INT TERM; sbarlua_build_cleanup; exit 130' INT
+  trap 'trap - EXIT HUP INT TERM; sbarlua_build_cleanup; exit 143' TERM
   stage_home="$work/stage-home"
   /bin/mkdir -m 0700 "$stage_home"
   /usr/bin/git clone --filter=blob:none https://github.com/FelixKratz/SbarLua.git "$work/SbarLua"
@@ -140,5 +262,48 @@ if ! "$SECURE_INSTALLER" prepare-sbarlua "$SBARLUA_DIR" "$SBARLUA_COMMIT" "$SBAR
   trap - EXIT HUP INT TERM
 fi
 
-"$CONFIG_DIR/scripts/smoke-config.sh"
-echo "Dependencies are installed and the full offline smoke gate passed. Reload with: /opt/homebrew/bin/sketchybar --reload"
+"$CONFIG_DIR/scripts/sketchybar-launch-agent.py"
+/usr/bin/python3 - <<'PY'
+import json
+import subprocess
+import time
+
+expected_items = [
+    "release.probe", "popup.controller",
+    "space.1", "space.2", "space.3", "space.4", "space.5",
+    "space.6", "space.7", "space.8", "space.9", "front_window",
+    "wifi", "bluetooth", "display",
+    "audio", "microphone", "battery", "calendar", "calendar.next",
+    "calendar.event.bracket", "calendar.date.bracket",
+    "tmp", "ssd", "net", "ram", "gpu", "cpu", "system.bracket",
+]
+deadline = time.monotonic() + 10
+valid = False
+while time.monotonic() < deadline:
+    try:
+        result = subprocess.run(
+            ["/opt/homebrew/opt/sketchybar/bin/sketchybar", "--query", "bar"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        if result.returncode == 0 and len(result.stdout) <= 131072 and b"\x00" not in result.stdout:
+            value = json.loads(result.stdout.decode("utf-8", "strict"))
+            valid = (type(value) is dict
+                     and value.get("drawing") == "on"
+                     and type(value.get("height")) is int
+                     and value.get("height") == 36
+                     and value.get("items") == expected_items)
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError,
+            json.JSONDecodeError, TypeError, ValueError):
+        valid = False
+    if valid:
+        break
+    time.sleep(0.1)
+if not valid:
+    raise SystemExit("Configured SketchyBar runtime shape failed")
+print("Configured SketchyBar runtime shape passed")
+PY
+echo "Dependencies are installed, the full offline smoke gate passed, and the configured LaunchAgent is loaded."

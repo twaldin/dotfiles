@@ -14,21 +14,21 @@ sources=()
 for source in Sources/PublicStats/*.swift; do
   [[ "$source" == "Sources/PublicStats/Main.swift" ]] || sources+=("$source")
 done
-[[ ${#sources[@]} -eq 11 ]] || { echo E_SOURCE_COUNT >&2; exit 1; }
+[[ ${#sources[@]} -eq 12 ]] || { echo E_SOURCE_COUNT >&2; exit 1; }
 
 test_sources=(Tests/PublicStatsTests/*.swift)
-[[ ${#test_sources[@]} -eq 5 ]] || { echo E_TEST_SOURCE_COUNT >&2; exit 1; }
+[[ ${#test_sources[@]} -eq 6 ]] || { echo E_TEST_SOURCE_COUNT >&2; exit 1; }
 
 run_suite() {
   local output=$1
   shift
-  xcrun swiftc     "$@"     -warnings-as-errors     -parse-as-library     -swift-version 6     -target arm64-apple-macosx15.0     "${sources[@]}"     "${test_sources[@]}"     -framework AppKit     -framework IOKit     -framework Metal     -framework Network     -o "$output"
+  xcrun swiftc     "$@"     -warnings-as-errors     -parse-as-library     -swift-version 6     -target arm64-apple-macosx15.0     "${sources[@]}"     "${test_sources[@]}"     -framework AppKit     -framework DiskArbitration     -framework IOKit     -framework Metal     -framework Network     -framework SystemConfiguration     -o "$output"
   local result
   result=$("$output")
-  [[ "$result" == '55 TESTS PASSED' ]] || { echo E_TEST_RESULT >&2; exit 1; }
+  [[ "$result" == '60 TESTS PASSED' ]] || { echo E_TEST_RESULT >&2; exit 1; }
 }
 
 run_suite "$scratch/public-stats-tests-normal"
 run_suite "$scratch/public-stats-tests-optimized" -O
 printf '%s
-' '55 TESTS PASSED'
+' '60 TESTS PASSED'

@@ -50,6 +50,10 @@ func resetForPartialMetricsEvent(_ value: inout MetricsSnapshot) {
     value.storageUsedBytes = 0
     value.storageUsedPercent = 0
     value.importantAvailableBytes = nil
+    value.storageIOSampled = false
+    value.storageIOValid = false
+    value.storageReadBytesPerSecond = 0
+    value.storageWriteBytesPerSecond = 0
 
     value.networkSampled = false
     value.networkValid = false
@@ -57,6 +61,9 @@ func resetForPartialMetricsEvent(_ value: inout MetricsSnapshot) {
     value.networkPathType = .unknown
     value.networkReceiveBytesPerSecond = 0
     value.networkTransmitBytesPerSecond = 0
+    value.networkSessionValid = false
+    value.networkSessionReceiveBytes = 0
+    value.networkSessionTransmitBytes = 0
     value.networkExpensive = false
     value.networkConstrained = false
 
@@ -87,6 +94,7 @@ final class PublicStatsDaemon: @unchecked Sendable {
     private var cpuSampler = CPUSampler()
     private var perCoreCPUSampler = PerCoreCPUSampler()
     private var networkSampler = NetworkSampler()
+    private let storageIOSampler = StorageIOSampler()
     private var battery: BatterySnapshot
     private var metricsSequenceExhausted = false
     private var cpuDetailSequenceExhausted = false
@@ -180,12 +188,9 @@ final class PublicStatsDaemon: @unchecked Sendable {
             queue: stateQueue
         )
         pressure?.setEventHandler { [weak self] in
-            guard let self, let retained = self.pressure,
-                  let mapped = mapPressure(retained.data) else { return }
+            guard let self, let retained = self.pressure else { return }
             beginMetricsEvent()
-            metrics.pressureState = mapped
-            metrics.pressureValid = true
-            sampleConditions()
+            sampleConditions(pressureFallback: retained.data)
             emitMetrics()
         }
     }
@@ -204,6 +209,7 @@ final class PublicStatsDaemon: @unchecked Sendable {
         sampleCPUDetail()
         sampleMemory()
         sampleVolume()
+        sampleStorageIO()
         sampleConditions()
         sampleMetal()
         sampleAndStoreBattery()
@@ -239,8 +245,10 @@ final class PublicStatsDaemon: @unchecked Sendable {
         sampleCPU()
         sampleCPUDetail()
         sampleMemory()
-        let network = networkSampler.sample(timeNanoseconds: DispatchTime.now().uptimeNanoseconds)
+        let now = DispatchTime.now().uptimeNanoseconds
+        let network = networkSampler.sample(timeNanoseconds: now)
         apply(network)
+        apply(storageIOSampler.sample(timeNanoseconds: now))
         emitMetrics()
         emitCPUDetail()
     }
@@ -387,12 +395,25 @@ final class PublicStatsDaemon: @unchecked Sendable {
         }
     }
 
-    private func sampleConditions() {
+    private func sampleStorageIO() {
+        apply(storageIOSampler.sample(timeNanoseconds: DispatchTime.now().uptimeNanoseconds))
+    }
+
+    private func sampleConditions(
+        pressureFallback: DispatchSource.MemoryPressureEvent? = nil
+    ) {
         metrics.conditionSampled = true
         let value = readConditions()
         metrics.thermalValid = true
         metrics.thermalState = value.thermal
         metrics.lowPowerState = value.lowPower
+        if let pressure = resolvedMemoryPressure(fallback: pressureFallback) {
+            metrics.pressureValid = true
+            metrics.pressureState = pressure
+        } else {
+            metrics.pressureValid = false
+            metrics.pressureState = .unknown
+        }
     }
 
     private func sampleMetal() {
@@ -414,8 +435,18 @@ final class PublicStatsDaemon: @unchecked Sendable {
         metrics.networkPathType = value.type
         metrics.networkReceiveBytesPerSecond = value.receiveBytesPerSecond
         metrics.networkTransmitBytesPerSecond = value.transmitBytesPerSecond
+        metrics.networkSessionValid = value.sessionValid
+        metrics.networkSessionReceiveBytes = value.sessionReceiveBytes
+        metrics.networkSessionTransmitBytes = value.sessionTransmitBytes
         metrics.networkExpensive = value.expensive
         metrics.networkConstrained = value.constrained
+    }
+
+    private func apply(_ value: StorageIOObservation) {
+        metrics.storageIOSampled = value.sampled
+        metrics.storageIOValid = value.valid
+        metrics.storageReadBytesPerSecond = value.readBytesPerSecond
+        metrics.storageWriteBytesPerSecond = value.writeBytesPerSecond
     }
 
     private func sampleAndStoreBattery() {
@@ -442,13 +473,18 @@ final class PublicStatsDaemon: @unchecked Sendable {
         }
         cpuSampler.reset()
         perCoreCPUSampler.reset()
-        let resetNetwork = networkSampler.replacePathAfterReset(monitor.currentPath)
+        let now = DispatchTime.now().uptimeNanoseconds
+        let resetNetwork = networkSampler.replacePathAfterReset(
+            monitor.currentPath, timeNanoseconds: now
+        )
+        storageIOSampler.reset()
         beginMetricsEvent()
         sampleCPU()
         sampleCPUDetail()
         apply(resetNetwork)
         sampleMemory()
         sampleVolume()
+        sampleStorageIO()
         sampleConditions()
         sampleMetal()
         sampleAndStoreBattery()

@@ -124,6 +124,7 @@ def fake_run(argv, timeout=8, input_text=None):
         }))
     raise AssertionError(argv)
 module.run = fake_run
+module.wifi_profiler_details = lambda: {}
 state = module.wifi_state()
 check(state == {
     "interface_key": wifi_key, "power": True, "ssid": "Example", "name_available": True,

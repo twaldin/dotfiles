@@ -114,7 +114,7 @@ end
 fire("routine", { NAME = "smoke", INFO = "0" })
 fire("system_woke", { NAME = "smoke" })
 fire("front_app_switched", { INFO = "Finder" })
-fire("system_metrics_v2", require("tests.stats-fixture").metrics())
+fire("system_metrics_v3", require("tests.stats-fixture").metrics())
 
 -- Build every popup shell without running system commands, then exercise action hover.
 for _, target in ipairs({ "calendar", "wifi", "bluetooth", "audio", "microphone", "battery", "cpu", "gpu", "ram", "net", "ssd", "tmp", "front_window" }) do

@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "scripts/audio-state.py"
+NATIVE_SOURCE = ROOT / "scripts/system-controls.swift"
 
 
 def check(condition, message):
@@ -64,6 +66,10 @@ def captured_main(module, arguments):
 
 
 check(SOURCE.is_file(), "audio coordinator source is missing")
+check(NATIVE_SOURCE.is_file(), "native audio source is missing")
+native_source_text = NATIVE_SOURCE.read_text()
+check("kAudioDevicePropertyDeviceIsRunningSomewhere" in native_source_text,
+      "public CoreAudio active-use property is missing")
 source_text = SOURCE.read_text()
 check("assert " not in source_text and "assert(" not in source_text,
       "audio coordinator must not depend on optimizable assertions")
@@ -76,6 +82,10 @@ check("hmac.new" in source_text and "secrets.token_hex" in source_text,
       "session-bound opaque handle derivation is incomplete")
 check('os.environ.get("TMPDIR", "")' in source_text and '/tmp/sketchybar-audio-' not in source_text,
       "audio runtime must use the protected per-user temporary root")
+check(re.search(
+    r'json_process\(\s*\[SYSTEM_CONTROLS, "audio", "state"\], timeout=2\)',
+    source_text) is not None,
+      "audio state reads must use the two-second native deadline")
 missing_tmp_environment = dict(os.environ)
 missing_tmp_environment.pop("TMPDIR", None)
 missing_tmp = subprocess.run(
@@ -118,7 +128,7 @@ def state():
              "input": None, "output": {"volume": capability(50, "volume"), "mute": capability(False, "mute")}},
             {"uid": RAW[1], "name": "Desk microphone", "directions": ["input"],
              "eligible_roles": ["input"], "roles": ["input"],
-             "input": {"volume": capability(80, "volume"), "mute": capability(False, "mute")}, "output": None},
+             "input": {"volume": capability(80, "volume"), "mute": capability(False, "mute"), "active": False}, "output": None},
             {"uid": RAW[2], "name": "Other speakers", "directions": ["output"],
              "eligible_roles": ["output", "system_output"], "roles": [], "input": None,
              "output": {"volume": capability(25, "volume"), "mute": capability(False, "mute")}},
@@ -135,6 +145,16 @@ def state():
         value["devices"][2]["name"] = RAW[2][:64]
     if mode == "interior-identity-fragment":
         value["devices"][1]["name"] = "Headset " + RAW[2][38:66]
+    if mode == "active-true": value["devices"][1]["input"]["active"] = True
+    if mode == "active-absent": value["devices"][1]["input"].pop("active")
+    if mode == "active-number": value["devices"][1]["input"]["active"] = 1
+    if mode == "active-on-output": value["devices"][0]["output"]["active"] = False
+    if mode == "active-on-duplex":
+        value["devices"][1]["directions"].append("output")
+        value["devices"][1]["output"] = {
+            "volume": capability(25, "volume"),
+            "mute": capability(False, "mute"),
+        }
     if mode in {"wire", "wire-after"}:
         value["defaults"]["system_output"] = None
         value["devices"][0]["roles"] = ["output"]
@@ -206,6 +226,8 @@ else:
     check(first["devices"][1]["name"] == "Desk microphone"
           and first["devices"][2]["name"] == "Other speakers",
           "benign audio names must survive identity privacy filtering")
+    check(first["devices"][1]["input"]["active"] is False,
+          "input active-use state must preserve an exact false Boolean")
     handles = [device["key"] for device in first["devices"]]
     check(len(handles) == 3 and len(set(handles)) == 3
           and all(coordinator.valid_handle(value) for value in handles),
@@ -250,6 +272,15 @@ else:
     check(fourth["devices"][1]["name"] == "Headset 9ABCDEF…",
           "an interior fragment must be shortened below the identity threshold")
     scan_public(fourth, raw_identities)
+    behavior.write_text("active-true")
+    active = coordinator.state_document()
+    check(active["devices"][1]["input"]["active"] is True,
+          "input active-use state must preserve an exact true Boolean")
+    behavior.write_text("active-absent")
+    active_absent = coordinator.state_document()
+    check("active" not in active_absent["devices"][1]["input"],
+          "an absent native active-use property must remain omitted")
+    behavior.write_text("valid")
     check((mapping.stat().st_dev, mapping.stat().st_ino) == mapping_identity,
           "an unchanged identity inventory must not durably rewrite the mapping")
 
@@ -363,6 +394,7 @@ raise SystemExit(module.main(['audio', 'state']))
           "a stale handle must fail quietly before native helper execution")
 
     for hostile_mode in ("unknown-field", "duplicate", "bad-role",
+                         "active-number", "active-on-output", "active-on-duplex",
                          "malformed-json", "oversized"):
         behavior.write_text(hostile_mode)
         hostile_status, hostile_output, hostile_errors = captured_main(

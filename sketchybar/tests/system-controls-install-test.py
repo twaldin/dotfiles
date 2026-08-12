@@ -131,7 +131,12 @@ check('SYSTEM_CONTROLS_SOURCE_SHA256=' + source_hash in source, 'system controls
 check('AUDIO_COORDINATOR_SOURCE_SHA256=' + coordinator_hash in source, 'audio coordinator source pin is stale')
 check('AUDIO_COORDINATOR_SOURCE="$CONFIG_DIR/scripts/audio-state.py"' in source, 'audio coordinator provenance inventory is missing')
 check(source.index('host-contract "$host_arch" "$host_macos_version"') < source.index('Immutable system controls source checksum failed') < source.index('Immutable audio coordinator source checksum failed') < source.index('/opt/homebrew/bin/brew install lua'), 'host and source gates must precede dependency mutation')
-release_build = source.index('-parse-as-library -O -warnings-as-errors "$SYSTEM_CONTROLS_SOURCE"')
+check('"$SECURE_INSTALLER" asset "$SYSTEM_CONTROLS_SOURCE" "$controls_source_snapshot"' in source
+      and '/bin/chmod 0444 "$controls_source_snapshot"' in source
+      and '/bin/chmod 0500 "$controls_snapshot_dir"' in source
+      and source.count('\n  check_controls_snapshot\n') == 3,
+      'system controls builds must use one immutable hash-rechecked source snapshot')
+release_build = source.index('-parse-as-library -O -warnings-as-errors "$controls_source_snapshot"')
 debug_fixture = source.index('-parse-as-library -warnings-as-errors -D SYSTEM_CONTROLS_TESTING')
 optimized_fixture = source.index('-parse-as-library -O -warnings-as-errors -D SYSTEM_CONTROLS_TESTING')
 manifest = source.index("'version=2'", release_build)
@@ -756,7 +761,7 @@ with tempfile.TemporaryDirectory(prefix='system-controls-provenance.') as raw:
         check(pin_result.returncode != 0 and recovery_guard.is_dir() and not any(recovery_guard.iterdir()) and candidate_binary.exists() and candidate_marker.exists() and (live_binary.read_bytes(), live_marker.read_bytes()) == prior_pair, 'invalid or missing caller pin mutated state: ' + str(index))
     recovery_guard.rmdir()
     accepted_publish = subprocess.run(['/bin/sh', str(transaction), str(candidate_binary), str(candidate_marker), str(publish), source_hash], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    check(accepted_publish.returncode == 0 and live_binary.read_bytes() == binary.read_bytes() and live_marker.read_bytes() == provenance_marker(binary), 'exact caller pin did not publish the validated pair')
+    check(accepted_publish.returncode == 0 and live_binary.read_bytes() == binary.read_bytes() and live_marker.read_bytes() == provenance_marker(binary), 'exact caller pin did not publish the validated pair: ' + str((accepted_publish.returncode, accepted_publish.stderr)))
     accepted_pair = (live_binary.read_bytes(), live_marker.read_bytes())
     write(candidate_binary, binary.read_bytes(), 0o755)
     write(candidate_marker, provenance_marker(candidate_binary, binary_hash='0' * 64), 0o644)

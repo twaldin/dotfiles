@@ -17,11 +17,13 @@ end
 
 -- Routine/provider renders call this so a live update cannot erase the active
 -- hover cue. Semantic safety colors remain visible while hovered.
-function M.foreground(item, idle_color)
+function M.foreground(item, idle_color, preserve_hover_color)
   if not M.is_active(item) then return idle_color end
-  if idle_color == colors.warning
+  if preserve_hover_color == true
+     or idle_color == colors.warning
      or idle_color == colors.critical
      or idle_color == colors.state.actionable
+     or idle_color == colors.state.recording
      or idle_color == colors.red then return idle_color end
   return colors.primary
 end
@@ -31,6 +33,8 @@ local function repaint(item)
   if not state then return false end
   local idle_color = value(state.options.idle_color, colors.primary)
   local hovered = M.active == item
+  local preserve_hover_color = value(
+    state.options.preserve_hover_color, false) == true
   local background_color
   if state.popup_open then
     background_color = colors.right_hover
@@ -44,7 +48,8 @@ local function repaint(item)
       drawing = state.popup_open or hovered or value(state.options.idle_background, false),
       color = background_color,
     },
-    icon = { color = hovered and M.foreground(item, idle_color) or idle_color },
+    icon = { color = hovered and M.foreground(
+      item, idle_color, preserve_hover_color) or idle_color },
   })
   return true
 end

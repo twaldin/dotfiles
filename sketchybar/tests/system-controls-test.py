@@ -62,13 +62,22 @@ def validate_audio(value):
             state = device[direction]
             if state is None:
                 continue
-            check(set(state) == {'mute', 'volume'}, 'audio direction state is invalid')
+            expected = {'mute', 'volume'}
+            if direction == 'input' and 'active' in state:
+                expected.add('active')
+            check(set(state) == expected, 'audio direction state is invalid')
             volume = state['volume']
             mute = state['mute']
             check(isinstance(volume.get('available'), bool) and isinstance(volume.get('settable'), bool), 'audio volume capability is invalid')
             check(isinstance(mute.get('available'), bool) and isinstance(mute.get('settable'), bool), 'audio mute capability is invalid')
-            check(volume.get('value') is None or isinstance(volume['value'], (int, float)) and 0 <= volume['value'] <= 100, 'audio volume is invalid')
+            check(volume.get('value') is None or isinstance(volume['value'], (int, float)) and not isinstance(volume['value'], bool) and 0 <= volume['value'] <= 100, 'audio volume is invalid')
             check(mute.get('value') is None or isinstance(mute['value'], bool), 'audio mute is invalid')
+            if 'active' in state:
+                check(type(state['active']) is bool,
+                      'audio active-use state must be an exact Boolean')
+                check(direction == 'input' and device['output'] is None
+                      and device['directions'] == ['input'],
+                      'audio active-use state must be input-only and non-duplex')
         uids.append(device['uid'])
     check(len(uids) == len(set(uids)), 'audio UIDs must be unique')
     check(set(item for item in defaults.values() if item is not None).issubset(set(uids)), 'every available audio default must be present in the stable UID inventory')
@@ -117,7 +126,11 @@ def execute_bytes(binary, arguments, input_bytes):
 
 
 source = pathlib.Path(sys.argv[1]).resolve()
-live = len(sys.argv) == 3 and sys.argv[2] == '--live-read'
+live_mode = sys.argv[2] if len(sys.argv) == 3 else None
+check(live_mode in {None, '--live-read', '--live-active-schema'},
+      'system-controls test mode is invalid')
+live = live_mode is not None
+active_schema = live_mode == '--live-active-schema'
 check(source.is_file(), 'system-controls source is missing')
 coordinator_source = source.parent / 'audio-state.py'
 check(coordinator_source.is_file(), 'audio coordinator source is missing')
@@ -138,9 +151,41 @@ check('SYSTEM_CONTROLS_TESTING' in source_text,
 check('caffeine' not in source_text.lower() and 'KERN_PROCARGS2' not in source_text
       and 'proc_pidpath' not in source_text,
       'retired Keep Awake process-control surface must be absent')
+check('kAudioHardwarePropertyProcessObjectList' not in source_text
+      and 'kAudioDevicePropertyHogMode' not in source_text,
+      'microphone active-use state must not collect process identity')
 check('JSONEncoder' in source_text and 'kAudioHardwarePropertyTranslateUIDToDevice' in source_text, 'native JSON/CoreAudio boundaries are incomplete')
 check('IOBluetoothHostController.default()' in source_text and 'kBluetoothHCIPowerStateON' in source_text, 'public IOBluetooth adapter reader is missing')
 check('kAudioDevicePropertyDeviceCanBeDefaultDevice' in source_text and 'kAudioDevicePropertyDeviceCanBeDefaultSystemDevice' in source_text, 'CoreAudio eligibility properties are missing')
+active_use_match = re.search(
+    r'    func activeUse\(device: AudioObjectID\) throws -> Bool\? \{\n(.*?)\n    \}\n\n    func setVolume',
+    source_text, re.DOTALL)
+active_value_match = re.search(
+    r'private func activeUsePropertyValue\(\n(.*?)\n\}\n\nprivate final class CoreAudioBackend',
+    source_text, re.DOTALL)
+check(active_use_match is not None and active_value_match is not None,
+      'CoreAudio active-use read boundary is missing')
+active_use_body = active_use_match.group(1)
+active_value_body = active_value_match.group(1)
+check(active_use_body.count('kAudioDevicePropertyDeviceIsRunningSomewhere') == 2
+      and active_use_body.count('propertyScope.coreAudio') == 2
+      and 'try activeUsePropertyValue(' in active_use_body,
+      'CoreAudio active-use read must bind the selected property scope')
+input_choice = active_value_body.find('if hasProperty(.input)')
+global_choice = active_value_body.find('guard hasProperty(.global) else { return nil }')
+read_choice = active_value_body.find('let sample = try readProperty(propertyScope)')
+check(0 <= input_choice < global_choice < read_choice
+      and 'catch' not in active_value_body,
+      'CoreAudio active-use scope fallback order is invalid')
+check('case .input: return kAudioDevicePropertyScopeInput' in source_text
+      and 'case .global: return kAudioObjectPropertyScopeGlobal' in source_text,
+      'CoreAudio active-use scopes are incomplete')
+check('sample.size == UInt32(MemoryLayout<UInt32>.size)' in active_value_body
+      and 'sample.raw == 0 || sample.raw == 1' in active_value_body,
+      'CoreAudio active-use reads must retain exact UInt32 Boolean validation')
+check('let expectedSize = UInt32(MemoryLayout<UInt32>.size)' in source_text
+      and 'guard size == expectedSize else' in source_text,
+      'other CoreAudio UInt32 reads must retain their exact size contract')
 check('boundedAudioIdentityInput' in source_text and 'maximumBytes = 4096' in source_text and 'FileHandle.standardInput.read(upToCount:' in source_text, 'bounded audio identity stdin boundary is missing')
 check('arguments.count == 3, arguments[0] == "audio", arguments[1] == "set-default"' in source_text and 'input["expected_uid"]' in source_text, 'audio writes must take identities only from bounded stdin')
 
@@ -237,6 +282,19 @@ with tempfile.TemporaryDirectory(prefix='system-controls-test.') as raw:
 
     if live:
         audio = validate_audio(one_json(execute(production, ['audio', 'state'])))
+        if active_schema:
+            selected_uid = audio['defaults']['input']
+            selected = next((device for device in audio['devices']
+                             if device['uid'] == selected_uid), None)
+            check(selected is not None and selected['directions'] == ['input']
+                  and selected['output'] is None,
+                  'live active-use schema check requires an input-only selected device')
+            check(type(selected['input'].get('active')) is bool,
+                  'live selected input does not expose the exact active-use Boolean')
+            check(all('active' not in device['output']
+                      for device in audio['devices']
+                      if device['output'] is not None),
+                  'live output state exposed active use')
         wifi = validate_wifi(one_json(execute(production, ['wifi', 'state'])))
         check(wifi['association'] != 'associated' or wifi['mode'] == 'station', 'associated wifi must use station mode')
 

@@ -45,6 +45,34 @@ local function action(host, token, suffix, label, selected, callback, options)
   end
 end
 
+local wifi_association_text = {
+  associated = "Associated",
+  link_unverified = "Association unverified",
+  not_associated = "Not associated",
+  ibss = "IBSS association",
+  host_ap = "Host access point",
+  radio_off = "Radio off",
+  unknown = "Association not reported",
+}
+local wifi_network_text = {
+  associated = "Associated network",
+  link_unverified = "Association unverified",
+  not_associated = "Not connected",
+  ibss = "IBSS association",
+  host_ap = "Host access point",
+  radio_off = "Radio off",
+  unknown = "Association not reported",
+}
+local function wifi_text(values, association)
+  return values[association] or "Association not reported"
+end
+
+local function reported_text(value)
+  local text = tostring(value or ""):gsub("_", " ")
+  if text == "" or text == "unknown" then return "Not reported" end
+  return text
+end
+
 local rebuild_wifi
 local function build_wifi(token)
   if not popup.is_current(wifi, token) then return end
@@ -53,17 +81,58 @@ local function build_wifi(token)
     popup.note(wifi, token, "unavailable", "Wi-Fi state unavailable", { align = "center", color = colors.state.actionable })
   else
     popup.section(wifi, token, "current_heading", "Connection")
-    local network = wifi_state.ssid or (wifi_state.power and (wifi_state.association == "associated" and "Name hidden by macOS" or "Not connected") or "Radio off")
+    local association = wifi_state.association or "unknown"
+    local network = wifi_state.ssid or wifi_text(wifi_network_text, association)
     local rssi, noise, rate = tonumber(wifi_state.rssi), tonumber(wifi_state.noise), tonumber(wifi_state.rate)
+    local service = type(wifi_state.service_active) == "boolean"
+      and (wifi_state.service_active and "Active" or "Inactive") or "Not reported"
+    local mode = reported_text(wifi_state.mode)
     popup.field(wifi, token, "network", "Network", shell.ellipsis(network, 19), { value_color = wifi_state.ssid and colors.primary or colors.muted })
-    popup.field(wifi, token, "association", "Status", (tostring(wifi_state.association or "unknown"):gsub("_", " ")))
-    popup.field(wifi, token, "signal", "Signal / noise", rssi and noise and string.format("%.0f / %.0f dBm", rssi, noise) or "—")
-    popup.field(wifi, token, "rate", "Transmit rate", rate and string.format("%.0f Mb/s", rate) or "—")
-    popup.field(wifi, token, "security", "Security", (tostring(wifi_state.security or "unknown"):gsub("_", " ")))
+    popup.field(wifi, token, "association", "Status", wifi_text(wifi_association_text, association))
+    popup.field(wifi, token, "service", "Service", service)
+    popup.field(wifi, token, "mode", "Mode", mode)
+    popup.field(wifi, token, "phy", "PHY", reported_text(wifi_state.phy))
+    popup.field(wifi, token, "channel", "Channel", wifi_state.channel
+      and table.concat({ tostring(wifi_state.channel), reported_text(wifi_state.band),
+        reported_text(wifi_state.channel_width) }, " · ") or "Not reported")
+    popup.field(wifi, token, "mcs", "MCS", type(wifi_state.mcs) == "number"
+      and string.format("%.0f", wifi_state.mcs) or "Not reported")
+    popup.field(wifi, token, "signal", "Signal", rssi and string.format("%.0f dBm", rssi) or "Not reported")
+    popup.field(wifi, token, "noise", "Noise", noise and string.format("%.0f dBm", noise) or "Not reported")
+    popup.field(wifi, token, "rate", "Transmit rate", rate and string.format("%.0f Mb/s", rate) or "Not reported")
+    popup.field(wifi, token, "security", "Security", reported_text(wifi_state.security))
+    local permission = wifi_state.name_permission
+    if association == "associated" and not wifi_state.name_available then
+      if permission == "not_determined" or permission == "denied"
+        or permission == "restricted" or permission == "services_disabled" then
+        popup.section(wifi, token, "name_permission_heading", "Network name")
+        local label = permission == "not_determined" and "Allow network name · Location"
+          or "Open System Settings · Location Services"
+        action(wifi, token, "name_permission", label, false, function()
+          if wifi_busy then return end
+          wifi_busy = true
+          wifi_error = nil
+          rebuild_wifi()
+          shell.exec({ settings.config_dir .. "/scripts/connectivity-state.py", "wifi", "authorize-name" }, function(output, code)
+            wifi_busy = false
+            if code == 0 and type(output) == "table" then
+              wifi_state = output
+            else
+              wifi_error = "Network-name permission was not read back"
+            end
+            rebuild_wifi()
+          end)
+        end, { icon = "󰌆", icon_color = colors.state.actionable, highlight = false, disabled = wifi_busy })
+      elseif permission == "authorized" then
+        popup.note(wifi, token, "name_note", "macOS did not report the associated network name", { color = colors.muted })
+      else
+        popup.note(wifi, token, "name_note", "Network-name access could not be checked", { color = colors.muted })
+      end
+    end
     if wifi_error then popup.note(wifi, token, "action_error", wifi_error, { align = "center", color = colors.state.actionable }) end
     popup.section(wifi, token, "radio_heading", "Radio")
     if wifi_busy then
-      popup.note(wifi, token, "working", "WORKING · Wi-Fi radio", { align = "center", color = colors.state.busy })
+      popup.note(wifi, token, "working", "WORKING · Wi-Fi change", { align = "center", color = colors.state.busy })
     else
       local captured_power = wifi_state.power
       local captured_interface = wifi_state.interface_key
@@ -96,12 +165,62 @@ rebuild_wifi = function()
   end
 end
 
+local function proved_bluetooth_total(state, device_count)
+  if not state or state.inventory_available ~= true
+    or type(state.total_count) ~= "number" or state.total_count < 0
+    or state.total_count % 1 ~= 0 or state.total_count < device_count
+    or type(state.truncated) ~= "boolean"
+    or state.truncated ~= (state.total_count > device_count) then return nil end
+  return state.total_count
+end
+
+local battery_component_text = { main = "Battery", left = "Left", right = "Right", case = "Case" }
+local function bluetooth_device_facts(device)
+  local facts = { device.paired == true and "Paired" or "Not paired" }
+  if type(device.type) == "string" and device.type ~= "" then facts[#facts + 1] = device.type end
+  if type(device.profiles) == "table" and #device.profiles > 0 then
+    local profiles = {}
+    for index = 1, math.min(6, #device.profiles) do
+      if type(device.profiles[index]) == "string" and device.profiles[index] ~= "" then
+        profiles[#profiles + 1] = device.profiles[index]
+      end
+    end
+    if #profiles > 0 then facts[#facts + 1] = "Profile " .. table.concat(profiles, "/") end
+  end
+  local rssi = tonumber(device.rssi)
+  if rssi and rssi >= -127 and rssi <= -1 then
+    facts[#facts + 1] = string.format("RSSI %.0f dBm", rssi)
+  end
+  if type(device.battery) == "table" then
+    for index = 1, math.min(4, #device.battery) do
+      local value = device.battery[index]
+      local label = type(value) == "table" and battery_component_text[value.component] or nil
+      local percent = type(value) == "table" and tonumber(value.percent) or nil
+      if label and percent and percent >= 0 and percent <= 100 then
+        facts[#facts + 1] = string.format("%s %.0f%%", label, percent)
+      end
+    end
+  end
+  return table.concat(facts, " · ")
+end
+
 local rebuild_bluetooth
 local function build_bluetooth(token)
   if not popup.is_current(bluetooth, token) then return end
+  local devices = bluetooth_state and bluetooth_state.devices or {}
   local connected_count = 0
-  for _, device in ipairs(bluetooth_state and bluetooth_state.devices or {}) do if device.connected then connected_count = connected_count + 1 end end
-  local chip = bluetooth_state and ((bluetooth_state.power and "On" or "Off") .. " · " .. connected_count .. " connected") or "—"
+  for _, device in ipairs(devices) do if device.connected then connected_count = connected_count + 1 end end
+  local exact_total = proved_bluetooth_total(bluetooth_state, #devices)
+  local chip = "—"
+  if bluetooth_state then
+    if bluetooth_state.inventory_available ~= true then
+      chip = (bluetooth_state.power and "On" or "Off") .. " · devices unavailable"
+    elseif exact_total and not bluetooth_state.truncated then
+      chip = (bluetooth_state.power and "On" or "Off") .. " · " .. connected_count .. " connected"
+    else
+      chip = (bluetooth_state.power and "On" or "Off") .. " · partial device list"
+    end
+  end
   popup.header(bluetooth, token, "BLUETOOTH", chip)
   if not bluetooth_state then
     popup.note(bluetooth, token, "unavailable", "Bluetooth state unavailable", { align = "center", color = colors.state.actionable })
@@ -112,29 +231,51 @@ local function build_bluetooth(token)
     if bluetooth_error then popup.note(bluetooth, token, "action_error", bluetooth_error, { align = "center", color = colors.state.actionable }) end
     if bluetooth_busy then popup.note(bluetooth, token, "working", "WORKING · Bluetooth device", { align = "center", color = colors.state.busy }) end
     popup.section(bluetooth, token, "devices_heading", "Paired devices")
-    local devices = bluetooth_state.devices or {}
-    if #devices == 0 then popup.note(bluetooth, token, "none", "No paired devices", { align = "center" }) end
-    for index = 1, math.min(8, #devices) do
-      local captured = devices[index]
-      action(bluetooth, token, "device_" .. index, captured.name .. (captured.connected and "  ·  Connected" or ""), captured.connected, function()
-        if bluetooth_busy then return end
-        bluetooth_busy = true
-        bluetooth_error = nil
-        rebuild_bluetooth()
-        local expected = captured.connected and "on" or "off"
-        shell.exec({ settings.config_dir .. "/scripts/connectivity-state.py", "bluetooth", captured.connected and "disconnect" or "connect", captured.key, expected }, function(output, code)
-          bluetooth_busy = false
-          if code == 0 and type(output) == "table" then
-            bluetooth_state = output
-          else
-            bluetooth_error = "Bluetooth change was not confirmed"
-          end
-          rebuild_bluetooth()
-        end)
-      end, { disabled = bluetooth_busy })
+    if bluetooth_state.inventory_available ~= true then
+      local message = bluetooth_state.power and "Paired-device inventory unavailable"
+        or "Paired-device inventory unavailable while Bluetooth is off"
+      popup.note(bluetooth, token, "inventory_unavailable", message, { align = "center" })
+    elseif exact_total == 0 then
+      popup.note(bluetooth, token, "none", "No paired devices", { align = "center" })
     end
-    if #devices > 8 then
-      popup.link(bluetooth, token, "device_overflow", "… and " .. (#devices - 8) .. " more", function() shell.open(settings.links.bluetooth) end)
+    if bluetooth_state.inventory_available == true then
+      if not bluetooth_state.power and #devices > 0 then
+        popup.note(bluetooth, token, "power_required",
+          "Turn on Bluetooth in System Settings to change devices", { align = "center", color = colors.muted })
+      end
+      for index = 1, math.min(8, #devices) do
+        local captured = devices[index]
+        local label = captured.name
+          .. (captured.connected and "  ·  Connected" or "  ·  Disconnected")
+        if bluetooth_state.power then
+          action(bluetooth, token, "device_" .. index, label, captured.connected, function()
+            if bluetooth_busy then return end
+            bluetooth_busy = true
+            bluetooth_error = nil
+            rebuild_bluetooth()
+            local expected = captured.connected and "on" or "off"
+            shell.exec({ settings.config_dir .. "/scripts/connectivity-state.py", "bluetooth", captured.connected and "disconnect" or "connect", captured.key, expected }, function(output, code)
+              bluetooth_busy = false
+              if code == 0 and type(output) == "table" then
+                bluetooth_state = output
+              else
+                bluetooth_error = "Bluetooth change was not confirmed"
+              end
+              rebuild_bluetooth()
+            end)
+          end, { disabled = bluetooth_busy })
+        else
+          popup.field(bluetooth, token, "device_" .. index, label, "Read only",
+            { value_color = colors.muted })
+        end
+        popup.note(bluetooth, token, "device_facts_" .. index,
+          bluetooth_device_facts(captured), { color = colors.muted })
+      end
+    end
+    if exact_total and exact_total > 8 then
+      popup.link(bluetooth, token, "device_overflow", "… and " .. (exact_total - 8) .. " more", function() shell.open(settings.links.bluetooth) end)
+    elseif #devices > 8 or bluetooth_state.truncated == true then
+      popup.link(bluetooth, token, "device_overflow", "More paired devices", function() shell.open(settings.links.bluetooth) end)
     end
   end
   popup.section(bluetooth, token, "settings_heading", "Open")
@@ -161,7 +302,9 @@ local function refresh_wifi()
   shell.exec({ settings.config_dir .. "/scripts/connectivity-state.py", "wifi", "state" }, function(output, code)
     wifi_in_flight = false; wifi_state = code == 0 and type(output) == "table" and output or nil
     local available = wifi_state and wifi_state.power
-    wifi:set({ icon = { string = available and (wifi_state.ssid and "󰤨" or "󰤯") or "󰤭", color = hover.foreground(wifi, available and colors.primary or colors.muted) } })
+    local associated = available and wifi_state.association == "associated"
+    wifi:set({ icon = { string = associated and "󰤨" or (available and "󰤯" or "󰤭"),
+      color = hover.foreground(wifi, available and colors.primary or colors.muted) } })
     rebuild_wifi()
   end)
 end

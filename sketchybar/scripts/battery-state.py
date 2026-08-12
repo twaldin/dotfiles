@@ -15,7 +15,7 @@ INVENTORY_STATES = {
     "present", "absent", "ambiguous", "malformed", "unavailable",
     "unsupported_type_present",
 }
-SOURCES = {"ac", "battery", "ups", "unknown"}
+SOURCES = {"ac", "battery", "ups", "offline", "unknown"}
 CHARGE_STATES = {
     "finishing_charge", "charging", "charged", "empty", "discharging",
     "not_charging", "offline", "unknown", "unavailable",

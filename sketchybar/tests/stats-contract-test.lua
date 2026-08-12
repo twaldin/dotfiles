@@ -28,7 +28,7 @@ check(not contract.accept_cpu_detail(cursor, clone(detail), now), "duplicate CPU
 
 local second = fixture.metrics("00000000000000000002")
 second.METRICS_SAMPLE_EPOCH_S = tostring(now)
-second.NAME, second.SENDER, second.INFO = "cpu", "system_metrics_v2", ""
+second.NAME, second.SENDER, second.INFO = "cpu", "system_metrics_v3", ""
 check(contract.accept(cursor, second, now) and cursor.metrics_sequence == second.METRICS_SEQ,
   "increasing metric sequence was rejected")
 
@@ -39,17 +39,26 @@ rounded.METRICS_SAMPLE_EPOCH_S = tostring(now)
 check(contract.accept(cursor, rounded, now), "three-decimal CPU rounding bound was rejected")
 
 local invalid_metrics = {
-  function(value) value.METRICS_SCHEMA = "1" end,
+  function(value) value.METRICS_SCHEMA = "2" end,
   function(value) value.METRICS_SAMPLE_EPOCH_S = tostring(now - 16) end,
   function(value) value.METRICS_SAMPLE_EPOCH_S = tostring(now + 1) end,
   function(value) value.CPU_BUSY_PCT = "nan" end,
+  function(value) value.CPU_BUSY_PCT = "0x18" end,
+  function(value) value.CPU_BUSY_PCT = "2.4e1" end,
   function(value) value.CPU_BUSY_PCT = "101" end,
   function(value) value.CPU_IDLE_PCT = "75" end,
   function(value) value.MEM_AVAILABLE_B = "1" end,
   function(value) value.SWAP_USED_B = "5000000000" end,
   function(value) value.SSD_USED_B = "1" end,
+  function(value) value.SSD_IO_VALID = "0" end,
+  function(value) value.SSD_IO_SAMPLED = "0" end,
+  function(value) value.SSD_READ_BPS = "9007199254740992" end,
+  function(value) value.SSD_WRITE_BPS = "1.5" end,
   function(value) value.NET_STATE = "connected" end,
   function(value) value.NET_VALID = "0" end,
+  function(value) value.NET_SESSION_VALID = "0" end,
+  function(value) value.NET_SESSION_RX_B = "9007199254740992" end,
+  function(value) value.NET_SESSION_TX_B = "-1" end,
   function(value) value.GPU_ACTIVITY_VALID = "1" end,
   function(value) value.PRESSURE_STATE = "red" end,
   function(value)
@@ -58,8 +67,9 @@ local invalid_metrics = {
     value.CPU_SYSTEM_PCT, value.CPU_IDLE_PCT, value.CPU_LOAD1 = "0", "0", "1"
   end,
   function(value)
-    value.NET_SAMPLED, value.NET_VALID = "0", "0"
+    value.NET_SAMPLED, value.NET_VALID, value.NET_SESSION_VALID = "0", "0", "0"
     value.NET_RX_BPS, value.NET_TX_BPS = "0", "0"
+    value.NET_SESSION_RX_B, value.NET_SESSION_TX_B = "0", "0"
   end,
   function(value)
     value.CONDITION_SAMPLED, value.THERMAL_VALID, value.PRESSURE_VALID = "0", "0", "0"
@@ -79,6 +89,24 @@ for index, mutate in ipairs(invalid_metrics) do
       and cursor.cpu_detail_sequence == before_detail,
     "rejected metric event mutated cursor: " .. index)
 end
+
+local unsampled_network = fixture.metrics("00000000000000000004")
+unsampled_network.METRICS_SAMPLE_EPOCH_S = tostring(now)
+unsampled_network.NET_SAMPLED, unsampled_network.NET_VALID = "0", "0"
+unsampled_network.NET_STATE, unsampled_network.NET_PATH_TYPE = "unknown", "unknown"
+unsampled_network.NET_RX_BPS, unsampled_network.NET_TX_BPS = "0", "0"
+unsampled_network.NET_SESSION_VALID = "0"
+unsampled_network.NET_SESSION_RX_B, unsampled_network.NET_SESSION_TX_B = "0", "0"
+unsampled_network.NET_EXPENSIVE, unsampled_network.NET_CONSTRAINED = "0", "0"
+check(contract.accept(cursor, unsampled_network, now),
+  "unsampled network partial event was rejected")
+local reset_session = fixture.metrics("00000000000000000005")
+reset_session.METRICS_SAMPLE_EPOCH_S = tostring(now)
+reset_session.NET_SESSION_RX_B, reset_session.NET_SESSION_TX_B = "0", "0"
+check(contract.accept(cursor, reset_session, now),
+  "valid zero provider-session baseline after invalidation was rejected")
+check(cursor.network_session_rx == 0 and cursor.network_session_tx == 0,
+  "provider-session cursor did not restart at the valid zero baseline")
 
 local invalid_details = {
   function(value) value.CPU_DETAIL_SCHEMA = "2" end,
@@ -120,6 +148,7 @@ check(not contract.accept(cursor, old, now), "retired producer was accepted")
 local replacement_metrics = fixture.metrics("00000000000000000001")
 replacement_metrics.PRODUCER_INSTANCE = replacement.PRODUCER_INSTANCE
 replacement_metrics.METRICS_SAMPLE_EPOCH_S = tostring(now)
+replacement_metrics.NET_SESSION_RX_B, replacement_metrics.NET_SESSION_TX_B = "0", "0"
 accepted = contract.accept(cursor, replacement_metrics, now)
 check(accepted and not accepted.reset, "independent replacement metric stream was rejected")
 print("Stats metrics and CPU detail consumer contracts passed")

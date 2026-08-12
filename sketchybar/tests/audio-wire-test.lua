@@ -29,6 +29,8 @@ check(raw_state:find('"system_output":null', 1, true) ~= nil,
       "wire fixture must include a null default")
 check(raw_state:find('"value":null', 1, true) ~= nil,
       "wire fixture must include an unavailable null capability")
+check(raw_state:find('"active":false', 1, true) ~= nil,
+      "wire fixture must include an exact false active-use Boolean")
 check(raw_write:find('"mute":null', 1, true) ~= nil
       and raw_write:find('"volume":null', 1, true) ~= nil,
       "wire write fixture must include nullable fields")
@@ -69,6 +71,10 @@ check(view.devices[2].input.mute.available == false
       and view.devices[2].input.mute.settable == false
       and view.devices[2].input.mute.value == nil,
       "real SbarLua null capability must remain unavailable")
+check(view.devices[2].input.active == false,
+      "real SbarLua false active-use Boolean must remain false")
+check(view.devices[1].output.active == nil,
+      "real SbarLua output state must omit active use")
 
 local choices = audio.choices("output")
 check(#choices == 2, "wire state must expose both eligible output choices")

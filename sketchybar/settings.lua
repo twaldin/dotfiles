@@ -15,11 +15,11 @@ local M = {
     heading_height = 34, section_height = 28, row_height = 30, axis_height = 18,
   },
   right_layout = {
-    stat_width = 48, stat_count = 6,
-    calendar_event_width = 188, calendar_date_width = 148,
+    stat_width = 48, tmp_width = 72, stat_count = 6,
+    calendar_event_width = 164, calendar_date_width = 148,
     notch_reserve = 200, minimum_notched_width = 1512,
   },
-  release_fingerprint = "8767c07aff9c158caa7a0e0f7ab1682f3c8026dab27e560b2262aafd928e1829",
+  release_fingerprint = "2184ab2239fcec997727ed0f30afec5b9ba647ce8f05d9edb194ec7a8eca56f9",
   calendar_show_titles = true,
   left_layout = {
     -- 640 points plus the bar's 8-point edge padding equals the same
@@ -70,6 +70,7 @@ end
 M.type = {
   bar_icon = face(M.font, "Regular", 13.0),
   bar_value = face(M.font, "Medium", 10.5),
+  bar_value_compact = face(M.font, "Medium", 8.5),
   bar_meta = face(M.font, "Regular", 10.0),
   bar_event = face(M.font, "SemiBold", 10.0),
   bar_event_detail = face(M.font, "Medium", 9.0),

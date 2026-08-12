@@ -14,8 +14,10 @@ local metrics_required = {
   "MEM_USED_B", "MEM_AVAILABLE_B", "MEM_COMPRESSED_B", "MEM_WIRED_B",
   "SWAP_VALID", "SWAP_TOTAL_B", "SWAP_USED_B", "SSD_SAMPLED", "SSD_VALID",
   "SSD_TOTAL_B", "SSD_FREE_B", "SSD_USED_B", "SSD_USED_PCT",
-  "SSD_IMPORTANT_AVAILABLE_VALID", "SSD_IMPORTANT_AVAILABLE_B", "NET_SAMPLED",
+  "SSD_IMPORTANT_AVAILABLE_VALID", "SSD_IMPORTANT_AVAILABLE_B", "SSD_IO_SAMPLED",
+  "SSD_IO_VALID", "SSD_READ_BPS", "SSD_WRITE_BPS", "NET_SAMPLED",
   "NET_VALID", "NET_STATE", "NET_PATH_TYPE", "NET_RX_BPS", "NET_TX_BPS",
+  "NET_SESSION_VALID", "NET_SESSION_RX_B", "NET_SESSION_TX_B",
   "NET_EXPENSIVE", "NET_CONSTRAINED", "CONDITION_SAMPLED", "THERMAL_VALID",
   "PRESSURE_VALID", "THERMAL_STATE", "PRESSURE_STATE", "LOW_POWER_STATE",
   "GPU_CAPS_VALID", "GPU_PRESENT", "GPU_UNIFIED", "GPU_LOW_POWER",
@@ -23,8 +25,8 @@ local metrics_required = {
 }
 local metrics_bits = {
   "CPU_SAMPLED", "CPU_VALID", "MEM_SAMPLED", "MEM_VALID", "SWAP_VALID",
-  "SSD_SAMPLED", "SSD_VALID", "SSD_IMPORTANT_AVAILABLE_VALID", "NET_SAMPLED",
-  "NET_VALID", "NET_EXPENSIVE", "NET_CONSTRAINED", "CONDITION_SAMPLED",
+  "SSD_SAMPLED", "SSD_VALID", "SSD_IMPORTANT_AVAILABLE_VALID", "SSD_IO_SAMPLED",
+  "SSD_IO_VALID", "NET_SAMPLED", "NET_VALID", "NET_SESSION_VALID", "NET_EXPENSIVE", "NET_CONSTRAINED", "CONDITION_SAMPLED",
   "THERMAL_VALID", "PRESSURE_VALID", "GPU_CAPS_VALID", "GPU_PRESENT",
   "GPU_UNIFIED", "GPU_LOW_POWER", "GPU_REMOVABLE", "GPU_HEADLESS", "GPU_ACTIVITY_VALID",
 }
@@ -39,6 +41,15 @@ local function one_of(value, choices)
 end
 
 local function number(value, minimum, maximum, integer)
+  if type(value) == "string" then
+    if integer then
+      if not value:match("^%d+$") then return nil end
+    elseif not value:match("^%d+$") and not value:match("^%d+%.%d+$") then
+      return nil
+    end
+  elseif type(value) ~= "number" then
+    return nil
+  end
   local parsed = tonumber(value)
   if not parsed or parsed ~= parsed or parsed == math.huge or parsed == -math.huge then return nil end
   if parsed < minimum or (maximum and parsed > maximum) then return nil end
@@ -92,6 +103,8 @@ local function commit(cursor, instance, sequence, epoch, sequence_key)
   if reset then
     cursor.metrics_sequence = nil
     cursor.cpu_detail_sequence = nil
+    cursor.network_session_rx = nil
+    cursor.network_session_tx = nil
   end
   cursor.instance = instance
   cursor[sequence_key] = sequence
@@ -101,7 +114,7 @@ end
 function M.accept(cursor, env, now)
   if type(cursor) ~= "table" or type(env) ~= "table"
       or not has_exact_event_keys(env, metrics_required) then return nil end
-  if env.METRICS_SCHEMA ~= "2" then return nil end
+  if env.METRICS_SCHEMA ~= "3" then return nil end
   local instance, sequence = env.PRODUCER_INSTANCE, env.METRICS_SEQ
   local epoch = envelope(cursor, instance, sequence, env.METRICS_SAMPLE_EPOCH_S, now, "metrics_sequence")
   if not epoch then return nil end
@@ -109,7 +122,8 @@ function M.accept(cursor, env, now)
   if env.CPU_VALID == "1" and env.CPU_SAMPLED ~= "1" then return nil end
   if (env.MEM_VALID == "1" or env.SWAP_VALID == "1") and env.MEM_SAMPLED ~= "1" then return nil end
   if (env.SSD_VALID == "1" or env.SSD_IMPORTANT_AVAILABLE_VALID == "1") and env.SSD_SAMPLED ~= "1" then return nil end
-  if env.NET_VALID == "1" and env.NET_SAMPLED ~= "1" then return nil end
+  if env.SSD_IO_VALID == "1" and env.SSD_IO_SAMPLED ~= "1" then return nil end
+  if (env.NET_VALID == "1" or env.NET_SESSION_VALID == "1") and env.NET_SAMPLED ~= "1" then return nil end
   if (env.THERMAL_VALID == "1" or env.PRESSURE_VALID == "1") and env.CONDITION_SAMPLED ~= "1" then return nil end
 
   local cpu = {}
@@ -163,16 +177,30 @@ function M.accept(cursor, env, now)
   elseif not all_zero({ ssd_total, ssd_free, ssd_used, ssd_percent, ssd_important }) then return nil end
   if env.SSD_SAMPLED == "0" and (env.SSD_VALID ~= "0" or env.SSD_IMPORTANT_AVAILABLE_VALID ~= "0" or
       not all_zero({ ssd_total, ssd_free, ssd_used, ssd_percent, ssd_important })) then return nil end
+  local ssd_read = number(env.SSD_READ_BPS, 0, MAXIMUM_EXACT_INTEGER, true)
+  local ssd_write = number(env.SSD_WRITE_BPS, 0, MAXIMUM_EXACT_INTEGER, true)
+  if not ssd_read or not ssd_write then return nil end
+  if env.SSD_IO_VALID == "0" and not all_zero({ ssd_read, ssd_write }) then return nil end
+  if env.SSD_IO_SAMPLED == "0" and (env.SSD_IO_VALID ~= "0" or
+      not all_zero({ ssd_read, ssd_write })) then return nil end
 
   local rx = number(env.NET_RX_BPS, 0, MAXIMUM_EXACT_INTEGER, true)
   local tx = number(env.NET_TX_BPS, 0, MAXIMUM_EXACT_INTEGER, true)
-  if not rx or not tx or (env.NET_VALID == "0" and (rx ~= 0 or tx ~= 0)) then return nil end
+  local session_rx = number(env.NET_SESSION_RX_B, 0, MAXIMUM_EXACT_INTEGER, true)
+  local session_tx = number(env.NET_SESSION_TX_B, 0, MAXIMUM_EXACT_INTEGER, true)
+  if not rx or not tx or not session_rx or not session_tx
+      or (env.NET_VALID == "0" and (rx ~= 0 or tx ~= 0))
+      or (env.NET_SESSION_VALID == "0" and (session_rx ~= 0 or session_tx ~= 0)) then return nil end
+  if cursor.instance == instance and env.NET_SESSION_VALID == "1"
+      and ((cursor.network_session_rx and session_rx < cursor.network_session_rx)
+        or (cursor.network_session_tx and session_tx < cursor.network_session_tx)) then return nil end
   if not one_of(env.NET_STATE, { "satisfied", "unsatisfied", "requires_connection", "unknown" }) then return nil end
   if not one_of(env.NET_PATH_TYPE, { "wifi", "wired", "cellular", "other", "multiple", "none", "unknown" }) then return nil end
   if not one_of(env.THERMAL_STATE, { "nominal", "fair", "serious", "critical", "unknown" }) then return nil end
   if not one_of(env.PRESSURE_STATE, { "normal", "warning", "critical", "unknown" }) then return nil end
   if not one_of(env.LOW_POWER_STATE, { "on", "off_or_unsupported" }) then return nil end
-  if env.NET_SAMPLED == "0" and not (env.NET_VALID == "0" and rx == 0 and tx == 0 and
+  if env.NET_SAMPLED == "0" and not (env.NET_VALID == "0" and env.NET_SESSION_VALID == "0"
+      and rx == 0 and tx == 0 and session_rx == 0 and session_tx == 0 and
       env.NET_STATE == "unknown" and env.NET_PATH_TYPE == "unknown" and
       env.NET_EXPENSIVE == "0" and env.NET_CONSTRAINED == "0") then return nil end
   if env.CONDITION_SAMPLED == "0" and not (env.THERMAL_VALID == "0" and env.PRESSURE_VALID == "0" and
@@ -188,7 +216,15 @@ function M.accept(cursor, env, now)
   if env.GPU_PRESENT == "0" and not (env.GPU_UNIFIED == "0" and env.GPU_LOW_POWER == "0" and
       env.GPU_REMOVABLE == "0" and env.GPU_HEADLESS == "0" and gpu_max == 0) then return nil end
 
-  return commit(cursor, instance, sequence, epoch, "metrics_sequence")
+  local accepted = commit(cursor, instance, sequence, epoch, "metrics_sequence")
+  if env.NET_SESSION_VALID == "1" then
+    cursor.network_session_rx = session_rx
+    cursor.network_session_tx = session_tx
+  else
+    cursor.network_session_rx = nil
+    cursor.network_session_tx = nil
+  end
+  return accepted
 end
 
 local function percentages(value)

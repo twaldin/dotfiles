@@ -39,11 +39,14 @@ check("update_freq = 15" in FRONT and "update_freq = 5" not in FRONT,
       "front-window fallback polling is too frequent")
 check("colors.state.actionable" in WORKSPACES and "render_availability(false)" in WORKSPACES,
       "Yabai topology failure has no visible degraded-state signal")
-for token in ('SKETCHYBAR_LOG_DIR="$HOME/Library/Logs/sketchybar"',
-              '/bin/mkdir -m 0700 "$SKETCHYBAR_LOG_DIR"'):
-    check(token in INSTALL, "launchd log directory gate is incomplete")
-check("<integer>63</integer>" in PLIST and "Library/Logs/sketchybar" in PLIST,
-      "launchd private log contract changed")
+check('"$CONFIG_DIR/scripts/sketchybar-launch-agent.py"' in INSTALL,
+      "transactional SketchyBar LaunchAgent installation is missing")
+for token in ("/opt/homebrew/opt/sketchybar/bin/sketchybar", "--config",
+              "/Users/twaldin/.config/sketchybar/sketchybarrc",
+              "Library/Logs/sketchybar", "LimitLoadToSessionType"):
+    check(token in PLIST, "reviewed LaunchAgent contract is incomplete: " + token)
+check("<key>Umask</key>" not in PLIST and "<key>ThrottleInterval</key>" not in PLIST,
+      "host-rejected LaunchAgent keys returned")
 bar_height_match = re.search(r"\bbar_height\s*=\s*(\d+)", SETTINGS)
 yabairc_reservation = re.search(r"external_bar all:(\d+):0", YABAIRC)
 deploy_reservation = re.search(r'"external_bar": "all:(\d+):0"', DEPLOY)

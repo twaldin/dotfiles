@@ -4,7 +4,7 @@ No third-party executable or implementation source is vendored here.
 The three source subtrees under `native/` are frozen first-party prototypes. Their internal directory names record an immutable fan-in boundary, not third-party ownership. They are not built or installed.
 `lib/unicode_grapheme_ranges.lua` contains generated range data derived from the
 Unicode Character Database under the Unicode Data Files and Software License.
-`install-deps.sh` builds the first-party public stats and CoreAudio helpers, then installs dependencies and one Lua binary module into their normal user or Homebrew locations. The Lua implementation is independently written against public APIs.
+`install-deps.sh` builds the first-party public stats, CoreAudio, read-only hardware, and narrow BetterDisplay transaction helpers, then installs dependencies and one Lua binary module into their normal user or Homebrew locations. The Lua implementation is independently written. The hardware helper uses unsupported Apple IOAccelerator and IOReport schemas; no Stats implementation source is copied into it.
 
 ## Pinned or required dependencies
 
@@ -13,7 +13,8 @@ Unicode Character Database under the Unicode Data Files and Software License.
 | SbarLua | commit `dba9cc421b868c918d5c23c408544a28aadf2f2f` | GPL-3.0 | Installed binary module: <https://github.com/FelixKratz/SbarLua> |
 | Lua | live Homebrew formula input; must remain 5.5.x and pass the post-install smoke gate | MIT | Runtime and SbarLua ABI: <https://www.lua.org/license.html> |
 | icalBuddy | live Homebrew formula input; post-install smoke required | MIT | Calendar command API: <https://hasseg.org/icalBuddy/> |
-| BetterDisplay | installed signed app version 4.2.3 build 48120; exact-version read gate | Vendor license | Read-only display integration through the documented bundled CLI: <https://github.com/waydabber/BetterDisplay/wiki/Integration-features,-CLI> |
+| BetterDisplay | installed signed app version 4.2.3 build 48120; executable SHA-256 `b7507a7d367af7ca3119e8bf0d10342a6e5b2cea497f43c9f14d32bd560894c4`; exact signature/version/hash gate | Vendor license | Display reads and reviewed local DNC control protocol: <https://github.com/waydabber/BetterDisplay/wiki/Integration-features,-CLI> |
+| Stats | installed signed app version 3.0.10 build 832; team `RP2S87B72W`; bundled `smc` SHA-256 `5a924e98212ff85635a2db5778d417a182fcaca338bc1fe41dcf61571f5e8a0d` | MIT | Fixed read-only temperature and fan commands from the external bundled CLI; exact source tag <https://github.com/exelban/stats/tree/64a34fa34c29d71de19af0868475e23cef7aaf81> |
 | Yabai | installed signed app version 7.1.25 at `$HOME/Applications/Yabai.app`; exact-version smoke gate | MIT | Native Space/window queries and focus actions: <https://github.com/koekeishiya/yabai> |
 | JetBrains Mono Nerd Font | existing user font | SIL OFL 1.1 plus Nerd Fonts notices | Monochrome glyphs: <https://www.nerdfonts.com/> |
 | sketchybar-app-font | release `v2.0.71`; Lua SHA-256 `adbdd97d5137846babb2584de701f341541402bb2e1478d1ae031e07cc5e060c`; TTF SHA-256 `e015c40fbe95d85763b633eae54f7b8e1ded83cffbc15aff40b8b8f89717a0b1` | CC0-1.0 | App ligatures and lookup map installed outside the repository: <https://github.com/kvndrsslr/sketchybar-app-font/releases/tag/v2.0.71> |
@@ -33,13 +34,20 @@ A Homebrew update invalidates the prior runtime proof. `install-deps.sh` resolve
 
 - SketchyBar configuration, events, components, sliders, graphs, popups, and
   querying: <https://felixkratz.github.io/SketchyBar/>
-- Stats 3.0.10 popup layouts were reviewed as MIT-licensed visual prior art:
-  <https://github.com/exelban/stats/tree/v3.0.10>. No Stats source or binary is
-  vendored. Stats exposes no documented local metrics API used by this configuration.
+- Stats 3.0.10 popup layouts and private telemetry behavior were reviewed at exact tag commit
+  <https://github.com/exelban/stats/tree/64a34fa34c29d71de19af0868475e23cef7aaf81>.
+  No Stats source or binary is vendored. The configuration executes only the exact
+  signed external bundled `smc` binary with fixed read commands. Stats exposes no
+  robust general local metrics bus: its LevelDB, app-group snapshots, preferences,
+  cloud credentials, remote controls, XPC helper, and all SMC write commands are excluded.
   SketchyBar aliases are visual captures rather than interactive status items, and
   current macOS 26 alias limitations are tracked at
   <https://github.com/FelixKratz/SketchyBar/issues/738#issuecomment-3332084641>
   and <https://github.com/FelixKratz/SketchyBar/issues/738#issuecomment-4674820526>.
+- The first-party hardware helper was independently written from observed Apple system contracts. Private API behavior was checked against pinned Stats source and the Apple-owned `/usr/bin/powermetrics`; private schemas remain unsupported and can break after an OS update. Stats frequency code cites MIT StatsBar, but no StatsBar source is copied here.
+- The read-only private battery-detail contract was checked against `Modules/Battery/readers.swift` at the pinned Stats commit (SHA-256 `cc0da3c3231b093881dff78da8f702b52de988dcebce9a6c9b8cf2ae31029c1a`). No Stats source is copied; ambiguous charging fields are omitted.
+- Public memory-pressure behavior was reviewed against exact Stats 3.0.10 `Modules/RAM/readers.swift` (SHA-256 `b08e7db0a98d973bcfcdef3a7da1e90c1dda4c86ed7eddd00e8d3e09a45e267b`). Public Data backing-device I/O behavior was reviewed against exact Stats 3.0.10 `Modules/Disk/readers.swift` (SHA-256 `93ca2674b5cf813a4dc434234e74f43dfed04048fe811ab31632cfa68fabea2a`). Network-counter behavior uses the separately listed exact Net reader hash. Only behavior was reviewed. No Stats source was copied.
+- Connectivity capability parity was checked against exact Stats 3.0.10 `Modules/Net/readers.swift` (SHA-256 `16116b5113fe7d4d824e2c8fc2b6abab40d050d8ebe3c16426ae48d04eb04584`) and `Modules/Bluetooth/readers.swift` (SHA-256 `de119bbb51236ab5df8a5fa7c8dc3e00d6ddf23c36116a0b42a1c8ccd2c14bc3`). The first-party implementation uses the same public CoreWLAN/IOBluetooth and fixed Apple tool capabilities through an independent closed privacy boundary. It does not copy Stats code or read Stats caches, preferences, app-group data, CoreBluetooth UUIDs, or remote services.
 - SbarLua public wrapper API and upstream examples:
   <https://github.com/FelixKratz/SbarLua>
 - Visual-only workspace/app-strip reference supplied by the user:
@@ -52,10 +60,18 @@ A Homebrew update invalidates the prior runtime proof. `install-deps.sh` resolve
   art, not vendored: <https://github.com/FelixKratz/SketchyBar/discussions/12>
   and <https://github.com/FelixKratz/SketchyBar/discussions/47>.
 - Apple public CoreWLAN, IOBluetooth, CoreAudio, IOPowerSources, IOPM battery,
-  Metal, CoreGraphics, AppKit, ColorSync, ProcessInfo, and `networksetup`/`open`
-  interfaces.
+  Metal, CoreGraphics, AppKit, ColorSync, CoreLocation, CoreWLAN, IOBluetooth,
+  ProcessInfo, and `networksetup`/`system_profiler`/`ioreg`/`pmset`/`open`
+  interfaces. The foreground network-name permission request follows Apple’s
+  `CLLocationManager.requestWhenInUseAuthorization()` contract and required
+  `NSLocationWhenInUseUsageDescription`/macOS `NSLocationUsageDescription` keys:
+  <https://developer.apple.com/documentation/corelocation/cllocationmanager/requestwheninuseauthorization()>
+  and <https://developer.apple.com/documentation/corelocation/requesting-authorization-to-use-location-services>.
+  Apple’s Access Wi-Fi Information entitlement documentation lists only iOS,
+  iPadOS, and visionOS, so the macOS helper does not claim or add that entitlement:
+  <https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.networking.wifi-info>.
 - BetterDisplay documented CLI integration:
-  <https://github.com/waydabber/BetterDisplay/wiki/Integration-features,-CLI>.
+  <https://github.com/waydabber/BetterDisplay/wiki/Integration-features,-CLI>. The write helper uses the installed app's reviewed local DNC protocol only for brightness, hardware contrast, volume, and mute. DNC is an unauthenticated local broadcast bus; correlation and post-write readback reduce accidental races but do not authenticate another process in the same login context.
 
 No Linkarzu/Rocky source, unlicensed icon map, GPL dotfile source, private
 Control Center alias, Notification Center database, or deprecated
