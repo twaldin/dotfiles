@@ -791,8 +791,16 @@ def install() -> None:
         _publish(candidate)
         _verify_reviewed_destination(owner, source_data)
         _bootstrap(owner)
-        candidate_snapshot = _read_live_snapshot(owner)
-        _require(_reviewed_live_snapshot(candidate_snapshot))
+        bootstrap_deadline = time.monotonic() + LAUNCHCTL_TIMEOUT_SECONDS
+        while True:
+            try:
+                candidate_snapshot = _read_live_snapshot(owner)
+                if _reviewed_live_snapshot(candidate_snapshot):
+                    break
+            except InstallFailure:
+                pass
+            _require(time.monotonic() < bootstrap_deadline)
+            time.sleep(0.1)
         candidate_bootstrap_token = candidate_snapshot.process_token
         candidate_stable_token = _verify_live_contract(owner)
         _verify_bar_shape()
