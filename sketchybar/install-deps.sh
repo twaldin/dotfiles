@@ -48,6 +48,35 @@ check_native_source_pins
 [ "$(/usr/bin/shasum -a 256 "$AUDIO_COORDINATOR_SOURCE" | /usr/bin/awk '{print $1}')" = "$AUDIO_COORDINATOR_SOURCE_SHA256" ] || { echo "Immutable audio coordinator source checksum failed" >&2; exit 1; }
 /opt/homebrew/bin/brew install lua ical-buddy
 
+# The pinned app-font assets must exist before the smoke gate: lib/icons.lua and
+# the workspaces test read icon_map.lua, so a fresh host cannot pass the gate
+# without them. Both installs are exact-hash checked and idempotent.
+
+install_asset() {
+  url=$1
+  expected=$2
+  destination=$3
+  "$SECURE_INSTALLER" prepare-asset "$destination"
+  actual=""
+  if [ -r "$destination" ]; then actual=$(/usr/bin/shasum -a 256 "$destination" | /usr/bin/awk '{print $1}'); fi
+  [ "$actual" = "$expected" ] && return 0
+  temporary=$(/usr/bin/mktemp "$runtime_base/sketchybar-asset.XXXXXX")
+  /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 --output "$temporary" "$url"
+  downloaded=$(/usr/bin/shasum -a 256 "$temporary" | /usr/bin/awk '{print $1}')
+  [ "$downloaded" = "$expected" ] || { /bin/rm -f "$temporary"; echo "Checksum failed for $url" >&2; exit 1; }
+  "$SECURE_INSTALLER" asset "$temporary" "$destination"
+  /bin/rm -f "$temporary"
+}
+
+install_asset \
+  "https://github.com/kvndrsslr/sketchybar-app-font/releases/download/v2.0.71/icon_map.lua" \
+  "adbdd97d5137846babb2584de701f341541402bb2e1478d1ae031e07cc5e060c" \
+  "$HOME/.local/share/sketchybar-app-font/icon_map.lua"
+install_asset \
+  "https://github.com/kvndrsslr/sketchybar-app-font/releases/download/v2.0.71/sketchybar-app-font.ttf" \
+  "e015c40fbe95d85763b633eae54f7b8e1ded83cffbc15aff40b8b8f89717a0b1" \
+  "$HOME/Library/Fonts/sketchybar-app-font.ttf"
+
 # Gate the complete immutable source tree before any release helper is published.
 # Each later native build is self-tested again and each publication is transactional.
 "$CONFIG_DIR/scripts/smoke-config.sh"
@@ -143,31 +172,6 @@ trap - EXIT HUP INT TERM
 
 lua_version=$(/opt/homebrew/bin/lua -v 2>&1)
 case "$lua_version" in "Lua 5.5"*) ;; *) echo "Lua 5.5 is required; found: $lua_version" >&2; exit 1 ;; esac
-
-install_asset() {
-  url=$1
-  expected=$2
-  destination=$3
-  "$SECURE_INSTALLER" prepare-asset "$destination"
-  actual=""
-  if [ -r "$destination" ]; then actual=$(/usr/bin/shasum -a 256 "$destination" | /usr/bin/awk '{print $1}'); fi
-  [ "$actual" = "$expected" ] && return 0
-  temporary=$(/usr/bin/mktemp "$runtime_base/sketchybar-asset.XXXXXX")
-  /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 --output "$temporary" "$url"
-  downloaded=$(/usr/bin/shasum -a 256 "$temporary" | /usr/bin/awk '{print $1}')
-  [ "$downloaded" = "$expected" ] || { /bin/rm -f "$temporary"; echo "Checksum failed for $url" >&2; exit 1; }
-  "$SECURE_INSTALLER" asset "$temporary" "$destination"
-  /bin/rm -f "$temporary"
-}
-
-install_asset \
-  "https://github.com/kvndrsslr/sketchybar-app-font/releases/download/v2.0.71/icon_map.lua" \
-  "adbdd97d5137846babb2584de701f341541402bb2e1478d1ae031e07cc5e060c" \
-  "$HOME/.local/share/sketchybar-app-font/icon_map.lua"
-install_asset \
-  "https://github.com/kvndrsslr/sketchybar-app-font/releases/download/v2.0.71/sketchybar-app-font.ttf" \
-  "e015c40fbe95d85763b633eae54f7b8e1ded83cffbc15aff40b8b8f89717a0b1" \
-  "$HOME/Library/Fonts/sketchybar-app-font.ttf"
 
 /bin/mkdir -p "$SYSTEM_CONTROLS_HELPER_DIR"
 [ -d "$SYSTEM_CONTROLS_HELPER_DIR" ] && [ ! -L "$SYSTEM_CONTROLS_HELPER_DIR" ] && [ "$(/usr/bin/stat -f %u "$SYSTEM_CONTROLS_HELPER_DIR")" = "$(/usr/bin/id -u)" ] && [ "$(/usr/bin/stat -f %Lp "$SYSTEM_CONTROLS_HELPER_DIR")" = 700 ] || { echo "System controls helper directory is not an owned mode-0700 real directory" >&2; exit 1; }
