@@ -183,7 +183,14 @@ with tempfile.TemporaryDirectory(prefix="hardware-marker-test.") as raw:
     os.chmod(binary, 0o755)
     marker.write_text(marker_value())
     require(module._marker_values() is None, "wrong-architecture hardware helper was accepted")
-    binary.write_bytes(original_native_paths[1].read_bytes())
+    correct_arch = base / "correct-arch"
+    compiled = subprocess.run(
+        ["/usr/bin/xcrun", "swiftc", "-target", "arm64-apple-macosx15.0",
+         "-parse-as-library", "-O", str(wrong_arch_source), "-o", str(correct_arch)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=60, check=False)
+    require(compiled.returncode == 0, "correct-architecture hardware fixture compile failed")
+    binary.write_bytes(correct_arch.read_bytes())
     os.chmod(binary, 0o755)
     approved_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
     execution = module._native_execution_copy(approved_hash)
