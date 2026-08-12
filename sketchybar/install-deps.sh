@@ -77,6 +77,27 @@ install_asset \
   "e015c40fbe95d85763b633eae54f7b8e1ded83cffbc15aff40b8b8f89717a0b1" \
   "$HOME/Library/Fonts/sketchybar-app-font.ttf"
 
+# The pinned SbarLua module must also precede the gate: the Lua load/event
+# smoke test requires the installed module on a fresh host.
+
+if ! "$SECURE_INSTALLER" prepare-sbarlua "$SBARLUA_DIR" "$SBARLUA_COMMIT" "$SBARLUA_LEGACY_SHA256"; then
+  work=$(/usr/bin/mktemp -d "$runtime_base/SbarLua.XXXXXX")
+  sbarlua_build_cleanup() { /bin/rm -rf "$work"; }
+  trap sbarlua_build_cleanup EXIT
+  trap 'trap - EXIT HUP INT TERM; sbarlua_build_cleanup; exit 129' HUP
+  trap 'trap - EXIT HUP INT TERM; sbarlua_build_cleanup; exit 130' INT
+  trap 'trap - EXIT HUP INT TERM; sbarlua_build_cleanup; exit 143' TERM
+  stage_home="$work/stage-home"
+  /bin/mkdir -m 0700 "$stage_home"
+  /usr/bin/git clone --filter=blob:none https://github.com/FelixKratz/SbarLua.git "$work/SbarLua"
+  /usr/bin/git -C "$work/SbarLua" checkout --detach "$SBARLUA_COMMIT"
+  [ "$(/usr/bin/git -C "$work/SbarLua" rev-parse HEAD)" = "$SBARLUA_COMMIT" ]
+  HOME="$stage_home" /usr/bin/make -C "$work/SbarLua" install
+  "$SECURE_INSTALLER" sbarlua "$stage_home/.local/share/sketchybar_lua/sketchybar.so" "$SBARLUA_COMMIT" "$SBARLUA_DIR"
+  /bin/rm -rf "$work"
+  trap - EXIT HUP INT TERM
+fi
+
 # Gate the complete immutable source tree before any release helper is published.
 # Each later native build is self-tested again and each publication is transactional.
 "$CONFIG_DIR/scripts/smoke-config.sh"
@@ -248,23 +269,6 @@ if [ "$controls_install_valid" != true ]; then
   trap - EXIT HUP INT TERM
 fi
 
-if ! "$SECURE_INSTALLER" prepare-sbarlua "$SBARLUA_DIR" "$SBARLUA_COMMIT" "$SBARLUA_LEGACY_SHA256"; then
-  work=$(/usr/bin/mktemp -d "$runtime_base/SbarLua.XXXXXX")
-  sbarlua_build_cleanup() { /bin/rm -rf "$work"; }
-  trap sbarlua_build_cleanup EXIT
-  trap 'trap - EXIT HUP INT TERM; sbarlua_build_cleanup; exit 129' HUP
-  trap 'trap - EXIT HUP INT TERM; sbarlua_build_cleanup; exit 130' INT
-  trap 'trap - EXIT HUP INT TERM; sbarlua_build_cleanup; exit 143' TERM
-  stage_home="$work/stage-home"
-  /bin/mkdir -m 0700 "$stage_home"
-  /usr/bin/git clone --filter=blob:none https://github.com/FelixKratz/SbarLua.git "$work/SbarLua"
-  /usr/bin/git -C "$work/SbarLua" checkout --detach "$SBARLUA_COMMIT"
-  [ "$(/usr/bin/git -C "$work/SbarLua" rev-parse HEAD)" = "$SBARLUA_COMMIT" ]
-  HOME="$stage_home" /usr/bin/make -C "$work/SbarLua" install
-  "$SECURE_INSTALLER" sbarlua "$stage_home/.local/share/sketchybar_lua/sketchybar.so" "$SBARLUA_COMMIT" "$SBARLUA_DIR"
-  /bin/rm -rf "$work"
-  trap - EXIT HUP INT TERM
-fi
 
 "$CONFIG_DIR/scripts/sketchybar-launch-agent.py"
 /usr/bin/python3 - <<'PY'
