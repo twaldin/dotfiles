@@ -7,6 +7,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import subprocess
 
 
 EXPECTED_QUERY_TUPLE = (
@@ -30,16 +31,16 @@ EXPECTED_RUNTIME_SURFACES = ('sketchybar/OPERATIONS.md',
  'sketchybar/bootstrap.lua',
  'sketchybar/colors.lua',
  'sketchybar/default.lua',
- 'sketchybar/deps/sketchybar-system-stats.rb',
  'sketchybar/init.lua',
  'sketchybar/install-deps.sh',
+ 'sketchybar/launch-agents/homebrew.mxcl.sketchybar.plist',
  'sketchybar/items/audio.lua',
  'sketchybar/items/battery.lua',
  'sketchybar/items/calendar.lua',
  'sketchybar/items/connectivity.lua',
+ 'sketchybar/items/display.lua',
  'sketchybar/items/front_window.lua',
  'sketchybar/items/init.lua',
- 'sketchybar/items/media.lua',
  'sketchybar/items/microphone.lua',
  'sketchybar/items/status.lua',
  'sketchybar/items/workspaces.lua',
@@ -47,14 +48,39 @@ EXPECTED_RUNTIME_SURFACES = ('sketchybar/OPERATIONS.md',
  'sketchybar/lib/calendar.lua',
  'sketchybar/lib/calendar_bar_layout.lua',
  'sketchybar/lib/calendar_width_ranges.lua',
+ 'sketchybar/lib/fan_power_control.lua',
+ 'sketchybar/lib/hardware_contract.lua',
  'sketchybar/lib/hover.lua',
  'sketchybar/lib/icons.lua',
  'sketchybar/lib/popup.lua',
  'sketchybar/lib/shell.lua',
+ 'sketchybar/lib/stats_contract.lua',
  'sketchybar/lib/text.lua',
  'sketchybar/lib/text_ranges.lua',
  'sketchybar/lib/unicode_grapheme_ranges.lua',
  'sketchybar/lib/window_pages.lua',
+ 'sketchybar/privileged/fan-power-owner/LaunchDaemon.plist',
+ 'sketchybar/privileged/fan-power-owner/Package.swift',
+ 'sketchybar/privileged/fan-power-owner/README.md',
+ 'sketchybar/privileged/fan-power-owner/RELEASE-MANIFEST.sha256',
+ 'sketchybar/privileged/fan-power-owner/ReleaseBinding.swift.in',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerClient/App.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerCore/Models.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerCore/OwnerController.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerCore/PMSetBackend.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerCore/RequestCodec.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerDaemon/App.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerDaemon/AppleSMCFanHardware.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerDaemon/PeerAuthenticator.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerDaemon/PowerWakeMonitor.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerDaemon/ReleaseBinding.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerDaemon/ResponseCodec.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerDaemon/SocketServer.swift',
+ 'sketchybar/privileged/fan-power-owner/Sources/FanPowerDaemon/SystemPMSetRunner.swift',
+ 'sketchybar/privileged/fan-power-owner/audit/mutation_test.py',
+ 'sketchybar/privileged/fan-power-owner/audit/source_audit.py',
+ 'sketchybar/privileged/fan-power-owner/install.sh',
+ 'sketchybar/privileged/fan-power-owner/scripts/verify.sh',
  'sketchybar/providers/public-stats/Package.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/BatterySampler.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/ConditionSampler.swift',
@@ -65,20 +91,33 @@ EXPECTED_RUNTIME_SURFACES = ('sketchybar/OPERATIONS.md',
  'sketchybar/providers/public-stats/Sources/PublicStats/Main.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/MetalSampler.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/NetworkSampler.swift',
+ 'sketchybar/providers/public-stats/Sources/PublicStats/PerCoreCPUSampler.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/Resources/PrivacyInfo.xcprivacy',
  'sketchybar/providers/public-stats/Sources/PublicStats/SelfTest.swift',
+ 'sketchybar/providers/public-stats/Sources/PublicStats/StorageIOSampler.swift',
  'sketchybar/providers/public-stats/Sources/PublicStats/VolumeSampler.swift',
  'sketchybar/providers/public-stats/audit-public-stats.sh',
  'sketchybar/providers/public-stats/run-tests.sh',
- 'sketchybar/scripts/calendar-helper-install-transaction.sh',
- 'sketchybar/scripts/calendar-panel.swift',
- 'sketchybar/scripts/data-disk.sh',
+ 'sketchybar/scripts/audio-state.py',
+ 'sketchybar/scripts/battery-hardware-state.py',
+ 'sketchybar/scripts/battery-hardware.swift',
+ 'sketchybar/scripts/battery-state.py',
+ 'sketchybar/scripts/battery-state.swift',
+ 'sketchybar/scripts/betterdisplay-control.swift',
+ 'sketchybar/scripts/connectivity-state.py',
+ 'sketchybar/scripts/connectivity-state.swift',
+ 'sketchybar/scripts/display-state.py',
+ 'sketchybar/scripts/fan-power-client.sh',
  'sketchybar/scripts/focus-space.sh',
  'sketchybar/scripts/focus-window.sh',
  'sketchybar/scripts/generate-unicode-grapheme-ranges.py',
+ 'sketchybar/scripts/hardware-metrics-bridge.h',
+ 'sketchybar/scripts/hardware-metrics.swift',
+ 'sketchybar/scripts/hardware-state.py',
  'sketchybar/scripts/provider-launch.sh',
  'sketchybar/scripts/provider-log.py',
  'sketchybar/scripts/secure-file-install.py',
+ 'sketchybar/scripts/sketchybar-launch-agent.py',
  'sketchybar/scripts/smoke-config.sh',
  'sketchybar/scripts/system-controls-helper-install-transaction.sh',
  'sketchybar/scripts/system-controls.swift',
@@ -90,6 +129,20 @@ EXPECTED_RUNTIME_SURFACES = ('sketchybar/OPERATIONS.md',
  'sketchybar/vendor/unicode/17.0.0/GraphemeBreakProperty.txt',
  'sketchybar/vendor/unicode/17.0.0/LICENSE.txt',
  'sketchybar/vendor/unicode/17.0.0/emoji-data.txt')
+
+
+# Exact reviewed runtime integration. The vendored power artifact remains
+# source-only; this independently reviewed helper may use only these closed
+# contract names, and any byte change invalidates the approval.
+APPROVED_RUNTIME_REFERENCE_PINS = {
+    "sketchybar/scripts/battery-state.swift": {
+        "sha256": "6480561f5e7481f6f4b8af5d802fbd2face75c5033766b3c8439321a1f4f8d04",
+        "allowed": frozenset({
+            "batteryhealth", "closedvalue", "inventorystate",
+            "strictcfbridge", "strictvalue", "valuestate",
+        }),
+    },
+}
 
 VENDOR_REFERENCE_TOKENS = ('actionregistration',
  'activepowersource',
@@ -1491,6 +1544,20 @@ def _collect_runtime_surfaces(sketchybar_root, repository_root):
     expected = frozenset(EXPECTED_RUNTIME_SURFACES)
     if frozenset(observed) != expected:
         fail("complete non-test production file inventory changed")
+    try:
+        tracked = subprocess.run(
+            ["/usr/bin/git", "-C", os.fspath(repository_root), "ls-files", "--error-unmatch", "--",
+             *EXPECTED_RUNTIME_SURFACES],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        fail("cannot verify the tracked production file inventory")
+    if tracked.returncode != 0:
+        fail("production inventory contains an untracked release surface")
     return tuple(EXPECTED_RUNTIME_SURFACES)
 
 def _check_no_runtime_references_or_adapters(repository_root, sketchybar_root, native_root):
@@ -1532,10 +1599,17 @@ def _check_no_runtime_references_or_adapters(repository_root, sketchybar_root, n
         "darwinsystemsettingsapplicationopener",
     ) + VENDOR_REFERENCE_TOKENS
     for repository_relative in _collect_runtime_surfaces(sketchybar_root, repository_root):
-        text = _read_repository_text(repository_root / repository_relative, repository_root, repository_relative)
+        path = repository_root / repository_relative
+        text = _read_repository_text(path, repository_root, repository_relative)
         lowered = text.lower()
+        approval = APPROVED_RUNTIME_REFERENCE_PINS.get(repository_relative)
+        allowed = frozenset()
+        if approval is not None:
+            if _sha256(text.encode("utf-8")) != approval["sha256"]:
+                fail(f"reviewed runtime integration byte pin changed: {repository_relative}")
+            allowed = approval["allowed"]
         for forbidden in forbidden_references:
-            if forbidden in lowered:
+            if forbidden in lowered and forbidden not in allowed:
                 fail(f"runtime surface {repository_relative} references a vendor destination or vendored module")
 
 

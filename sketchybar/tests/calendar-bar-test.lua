@@ -5,7 +5,7 @@ local fixed_now = real_time({ year = 2026, month = 8, day = 7, hour = 10, min = 
 os.time = function(value) return value == nil and fixed_now or real_time(value) end
 
 local objects, subscriptions, commands, creation_order, delayed = {}, {}, {}, {}, {}
-local open_failure, emit_safe, emit_empty, provider_error = false, true, false, false
+local open_failure, emit_empty, provider_error = false, false, false
 local helper_exit, query_error, query_count = 0, false, 0
 local query_rects = {
   ["display-10"] = { origin = { 1212, 0 }, size = { 116, 32 } },
@@ -91,8 +91,7 @@ sbar = {
       local record = assert(command:match("(__SB_REC_[%x]+__)"), "synthetic record token")
       local start_time, end_time = fixed_now + start_offset, fixed_now + start_offset + event_duration
       local range = os.date("%Y-%m-%d at %H:%M:%S %z", start_time) .. " - " .. os.date("%Y-%m-%d at %H:%M:%S %z", end_time)
-      local url = emit_safe and "https://zoom.us/wc/join/123456789" or "https://zoom.us.evil.example/j/123456789"
-      local output = record .. fixture_title .. property .. range .. property .. "url: " .. url .. property .. "uid: synthetic"
+      local output = record .. fixture_title .. property .. range .. property .. "uid: synthetic"
       if defer_query then deferred_query[#deferred_query + 1] = { callback = callback, output = output }; return end
       callback(output, 0)
     elseif command:find("/usr/bin/open", 1, true) then
@@ -141,6 +140,8 @@ assert(objects["calendar.gap.system"] == nil, "calendar and system groups touch 
 local event_surface = assert(objects["calendar.event.bracket"], "event surface exists")
 local date_surface = assert(objects["calendar.date.bracket"], "date surface exists")
 assert(objects["calendar.bracket"] == nil, "old combined surface is absent")
+equal(event.properties.padding_left, 0, "calendar has no exceptional exterior gap")
+equal(event.properties.padding_right, 0, "calendar segment has no exceptional exterior gap")
 
 -- Loading state exists before the deferred synthetic provider starts.
 equal(event.properties.icon.string, glyph .. " Calendar", "loading title is generic")
@@ -151,14 +152,21 @@ initial_uuid("01234567-89AB-CDEF-0123-456789ABCDEF\n", 0)
 local initial_query_command = commands[2] or ""
 assert(initial_query_command:find("'/usr/bin/perl' '-e' 'alarm 3; exec @ARGV or exit 127'", 1, true), "provider uses exact timeout wrapper")
 assert(initial_query_command:find("'-ps' '|__SB_PROP_", 1, true), "provider uses delimited synthetic separator")
+assert(initial_query_command:find("'-po' 'title,datetime'", 1, true)
+  and initial_query_command:find("'-iep' 'title,datetime'", 1, true),
+  "display-only provider requests only rendered Calendar properties")
+for _, private_property in ipairs({ "url", "location", "notes" }) do
+  assert(not initial_query_command:find(private_property, 1, true),
+    "provider requests private unused Calendar property: " .. private_property)
+end
 
--- The date anchor is fixed; the event surface is intrinsic up to the 372 pt notch-safe maximum.
-equal(date.properties.width, 116, "date width")
-assert(math.abs(date.properties.icon.width + date.properties.label.width - 116) < 0.0001,
+-- The date anchor and event maximum come from the shared notch-safe layout.
+equal(date.properties.width, 148, "date width")
+assert(math.abs(date.properties.icon.width + date.properties.label.width - 148) < 0.0001,
   "date lanes fill exact anchor")
 equal(date.properties.icon.padding_left, 0, "date outer edge uses computed lane margin")
-equal(date.properties.icon.padding_right, 4, "date half-gap")
-equal(date.properties.label.padding_left, 4, "time half-gap")
+equal(date.properties.icon.padding_right, calendar_layout.content_gap / 2, "date half-gap")
+equal(date.properties.label.padding_left, calendar_layout.content_gap / 2, "time half-gap")
 equal(date.properties.label.padding_right, 0, "time outer edge uses computed lane margin")
 local date_advance = #date.properties.icon.string * calendar_layout.title_narrow_advance
 local time_advance = #date.properties.label.string * calendar_layout.title_narrow_advance
@@ -171,10 +179,10 @@ equal(date.properties.icon.y_offset, 1, "date baseline is optically centered")
 equal(date.properties.label.y_offset, 1, "time baseline is optically centered")
 equal(event.properties.icon.align, "left", "title alignment")
 equal(event.properties.icon.font.style, "SemiBold", "title weight")
-equal(event.properties.icon.font.size, 9.0, "title font size")
+equal(event.properties.icon.font.size, 11.5, "title font size")
 equal(event.properties.label.align, "left", "detail left alignment")
 equal(event.properties.label.font.style, "Medium", "detail weight")
-equal(event.properties.label.font.size, 8.0, "detail font size")
+equal(event.properties.label.font.size, 10.0, "detail font size")
 assert(event.properties.label.max_chars == nil, "detail has no character cap")
 
 local function assert_dynamic_event_layout(label)
@@ -190,7 +198,7 @@ local function assert_dynamic_event_layout(label)
     equal(detail.width, 0, label .. " empty detail lane")
     equal(detail.drawing, false, label .. " empty detail hidden")
   else
-    equal(icon.padding_right + detail.padding_left, 8, label .. " title/detail gap")
+    equal(icon.padding_right + detail.padding_left, calendar_layout.content_gap, label .. " title/detail gap")
     equal(detail.padding_right, 8, label .. " right edge padding")
     equal(detail.width, "dynamic", label .. " CoreText-sized detail lane")
     equal(detail.drawing, true, label .. " detail visible")
@@ -199,7 +207,7 @@ end
 
 assert_dynamic_event_layout("ready")
 equal(event.properties.icon.max_chars, 0, "short title needs no native scalar clip")
-assert(math.abs(date.properties.icon.width + date.properties.label.width - 116) < 0.0001, "date field sum")
+assert(math.abs(date.properties.icon.width + date.properties.label.width - 148) < 0.0001, "date field sum")
 local right_order = {}
 for _, name in ipairs(creation_order) do
   if name == "calendar" or name == "calendar.next" then right_order[#right_order + 1] = name end
@@ -215,7 +223,7 @@ for _, entry in ipairs({
   equal(surface.members[1], member, "exact bracket member")
   local background = surface.properties.background
   assert(background.drawing == true and background.color == idle_color, "leveled resting bracket fill")
-  assert(background.height == 26 and background.corner_radius == 0, "sharp fixed-height bracket")
+  assert(background.height == 28 and background.corner_radius == 0, "sharp fixed-height bracket")
   assert(background.border_width == 0 and background.border_color == colors.transparent, "continuous bracket has no outline")
   assert(background.shadow.drawing == false, "bracket shadow disabled")
 end
@@ -226,9 +234,10 @@ equal(date.properties.label.color, colors.accent, "time accent unchanged")
 assert(date.properties.label.string:match("^%d?%d:%d%d [AP]M$") and not date.properties.label.string:match("^0"), "date clock format unchanged")
 
 -- Complete sanitized titles stay whole; overflow uses a cluster-safe ellipsis.
-equal(event.properties.icon.string, glyph .. " Synthetic review", "ready synthetic title")
-assert(event.properties.label.string:find("↗", 1, true), "safe meeting marker")
-fixture_title = "ABCDEFGHIJKLMNOPQRSTUV" -- 22 model glyphs; 24 with the trusted prefix.
+assert(event.properties.icon.string:sub(1, #glyph + 1) == glyph .. " "
+  and event.properties.icon.string:find("Synthetic", 1, true), "ready synthetic title remains recognizable")
+assert(not event.properties.label.string:find("↗", 1, true), "meeting marker is removed from the static surface")
+fixture_title = "Team sync" -- common short title must remain complete.
 fire(event, "system_woke")
 equal(event.properties.icon.string, glyph .. " " .. fixture_title, "target-length model title remains complete")
 assert_dynamic_event_layout("fitting title")
@@ -262,147 +271,27 @@ fire(event, "system_woke")
 
 -- Countdown states and detail semantics remain in the intrinsic left-aligned lane.
 assert(event.properties.label.string:match("^in "), "before-start countdown")
-assert(event.properties.label.string:find(" · ", 1, true), "duration marker")
+assert(event.properties.label.string:match("^in "), "compact upcoming countdown")
 start_offset, event_duration = -600, 2100
 fire(event, "system_woke")
-assert(event.properties.label.string:match("^ends in "), "during-event countdown")
-assert(event.properties.label.string:find(" · ", 1, true), "during-event duration")
+assert(event.properties.label.string:match("^ends "), "during-event countdown")
+assert(not event.properties.label.string:find(" · ", 1, true), "bar detail omits duration")
 start_offset, event_duration = 3600, 1500
 
--- Both full click surfaces have one left route; all other buttons are no-ops.
-assert(date.subscriptions["mouse.clicked"] and #date.subscriptions["mouse.clicked"] == 1, "one date click handler")
-assert(event.subscriptions["mouse.clicked"] and #event.subscriptions["mouse.clicked"] == 1, "one event click handler")
-for _, object in ipairs({ date, event }) do
-  for _, button in ipairs({ "right", "middle", "other", "unknown" }) do
-    commands, query_count = {}, 0
-    fire(object, "mouse.clicked", { BUTTON = button })
-    equal(#commands, 0, "non-left click command no-op")
-    equal(query_count, 0, "non-left click query no-op")
-  end
-  commands, query_count = {}, 0
-  fire(object, "mouse.clicked", {})
-  equal(#commands, 0, "missing-button command no-op")
-  equal(query_count, 0, "missing-button query no-op")
+-- Calendar surfaces are display-only. They never subscribe to clicks or open apps/URLs.
+assert(not date.subscriptions["mouse.clicked"], "date surface is static")
+assert(not event.subscriptions["mouse.clicked"], "event surface is static")
+assert(not event.properties.label.string:find("↗", 1, true), "meeting marker is absent")
+
+-- Display-only Calendar surfaces expose no hover affordance or state transition.
+for _, surface_item in ipairs({ event, date }) do
+  assert(not surface_item.subscriptions["mouse.entered"], "display-only surface has no hover entry")
+  assert(not surface_item.subscriptions["mouse.exited"], "display-only surface has no hover exit")
+  assert(not surface_item.subscriptions["mouse.exited.global"], "display-only surface has no global hover exit")
 end
-
-local function release_date_debounce()
-  for index = #delayed, 1, -1 do
-    if not delayed[index].ran and delayed[index].seconds == 0.30 then run_delay(index); return end
-  end
-  error("missing calendar click debounce")
-end
-
-local function click_date()
-  fire(date, "mouse.clicked", { BUTTON = "left" })
-  release_date_debounce()
-end
-
-commands, query_count = {}, 0
-fire(date, "mouse.clicked", { BUTTON = "left" })
-equal(query_count, 1, "date left click queries anchor once")
-equal(#commands, 1, "date left click launches helper once")
-fire(date, "mouse.clicked", { BUTTON = "left" })
-equal(query_count, 1, "double click is ignored during bounded debounce")
-equal(#commands, 1, "double click cannot close a just-opened owner")
-release_date_debounce()
-local display2 = commands[1]:find("'--anchor%-cg' '%-800' '100' '116' '32'")
-local display10 = commands[1]:find("'--anchor%-cg' '1212' '0' '116' '32'")
-assert(display2 and display10 and display2 < display10, "116 x 32 anchors sorted by display")
-assert(commands[1]:find("calendar%-panel' '%-%-toggle'") and commands[1]:find("'--ical%-buddy' '/opt/homebrew/bin/icalBuddy'"), "native helper route unchanged")
-
-query_rects = { ["display-1"] = { origin = { 0 / 0, 0 }, size = { 116, 32 } } }
-commands = {}
-click_date()
-equal(#commands, 0, "invalid anchor fails closed without opening another application")
-query_rects = {
-  ["display-1"] = { origin = { 1212, 0 }, size = { 116, 32 } },
-  ["display-2"] = { origin = { 0 / 0, 0 }, size = { 116, 32 } },
-}
-commands = {}
-click_date()
-equal(#commands, 1, "valid clicked-display candidate survives unrelated malformed display")
-assert(commands[1]:find("'--anchor%-cg' '1212' '0' '116' '32'"), "only valid candidate reaches helper")
-query_rects = { ["display-1"] = { origin = { 1212, 0 }, size = { 116, 32 } } }
-helper_exit, commands = 75, {}
-click_date()
-equal(#commands, 1, "pointer-abort helper exit has no fallback")
-helper_exit, commands = 5, {}
-click_date()
-equal(#commands, 1, "helper failure cannot open unanchored Calendar")
-query_error, helper_exit, commands = true, 0, {}
-click_date()
-equal(#commands, 0, "query failure is a safe no-action result")
-query_error = false
-
-emit_safe, provider_error, emit_empty = true, false, false
-fixture_title = "Synthetic review"
-fire(event, "system_woke")
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "safe meeting opens once")
-assert(commands[1]:find("https://zoom.us/wc/join/123456789", 1, true), "allowlisted meeting route")
-local pre_end_now = fixed_now
-fixed_now = fixed_now + start_offset + event_duration + 1
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "event ended after render falls back once")
-assert(commands[1]:find("%-a") and not commands[1]:find("zoom.us", 1, true), "ended meeting link is never opened")
-equal(event.properties.icon.string, glyph .. " Calendar", "ended click clears stale current event")
-equal(event.properties.label.string, "LOADING", "ended click shows immediate refresh state")
-assert_dynamic_event_layout("ended loading detail")
-local ended_refresh_delay = #delayed
-equal(delayed[ended_refresh_delay].seconds, 0, "ended click schedules immediate forced refresh")
-run_delay(ended_refresh_delay)
-fixed_now = pre_end_now
-fire(event, "system_woke")
-commands, open_failure = {}, true
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 2, "failed meeting open falls back once")
-assert(commands[2]:find("%-a") and commands[2]:find("Calendar", 1, true), "meeting fallback targets Calendar")
-open_failure, emit_safe = false, false
-fire(event, "system_woke")
-assert(not event.properties.label.string:find("↗", 1, true), "unsafe meeting has no marker")
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "unsafe meeting falls back directly")
-assert(commands[1]:find("%-a") and not commands[1]:find("zoom.us", 1, true), "unsafe URL never opens")
-
--- Normal hover changes fill and foreground without changing border or geometry.
-local normal_width = event.properties.width
-local normal_icon_width, normal_label_width = event.properties.icon.width, event.properties.label.width
-local normal_title_color, normal_detail_color = event.properties.icon.color, event.properties.label.color
-fire(event, "mouse.entered")
-equal(event_surface.properties.background.color, colors.hover, "normal event hover fill")
-equal(event_surface.properties.background.border_color, colors.transparent, "normal event hover keeps border absent")
-equal(event.properties.icon.color, colors.primary, "normal event hover title color")
-equal(event.properties.label.color, colors.primary, "normal event hover detail color")
-equal(event.properties.width, normal_width, "normal event hover width stable")
-equal(event.properties.icon.width, normal_icon_width, "normal event hover title lane stable")
-equal(event.properties.label.width, normal_label_width, "normal event hover detail lane stable")
-fire(event, "mouse.exited.global")
-equal(event.properties.icon.color, normal_title_color, "normal event title color restores")
-equal(event.properties.label.color, normal_detail_color, "normal event detail color restores")
-
--- Crossing the end boundary while the pointer enters changes paint only. The
--- next routine/click path owns state transition and provider refresh.
-provider_error, emit_empty, emit_safe = false, false, true
-start_offset, event_duration = -60, 120
-fire(event, "system_woke")
-local boundary_title = event.properties.icon.string
-local boundary_detail = event.properties.label.string
-local boundary_width = event.properties.width
-fixed_now = fixed_now + 61
-fire(event, "mouse.entered")
-equal(event.properties.icon.string, boundary_title, "end-boundary hover keeps title")
-equal(event.properties.label.string, boundary_detail, "end-boundary hover keeps detail")
-equal(event.properties.width, boundary_width, "end-boundary hover keeps geometry")
-fire(event, "mouse.exited.global")
-fixed_now = fixed_now - 61
-start_offset, event_duration = 3600, 1500
-fire(event, "system_woke")
 
 -- Privacy-off is generic for ready and stale, and stale links are never actionable.
-settings.calendar_show_titles, emit_safe = false, true
+settings.calendar_show_titles = false
 provider_error = false
 fire(event, "system_woke")
 equal(event.properties.icon.string, glyph .. " Upcoming event", "privacy-off ready title")
@@ -412,62 +301,17 @@ equal(event.properties.icon.string, glyph .. " Upcoming event", "privacy-off sta
 equal(event.properties.label.string, "STALE", "stale detail")
 equal(event.properties.icon.color, colors.warning, "warning title remains visible")
 equal(event.properties.label.color, colors.warning, "warning detail remains visible")
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "stale event fallback once")
-assert(commands[1]:find("%-a") and not commands[1]:find("zoom.us", 1, true), "stale link not actionable")
-
--- Surface hover is independent, preserves warnings, and keeps square continuous geometry.
-local event_child_history = #event.set_history
-local warning_icon_color = event.properties.icon.color
-local warning_label_color = event.properties.label.color
-local warning_width = event.properties.width
-local event_surface_history = #event_surface.set_history
-fire(event, "mouse.entered")
-equal(event_surface.properties.background.color, colors.hover, "event full-surface hover")
-equal(event_surface.properties.background.border_color, colors.transparent, "event hover border stays absent")
-equal(date_surface.properties.background.color, colors.right_date, "date surface stays idle")
-assert(#event.set_history > event_child_history, "hover updates event foreground state")
-equal(event.properties.icon.color, warning_icon_color, "hover preserves warning title")
-equal(event.properties.label.color, warning_label_color, "hover preserves warning detail")
-equal(event.properties.width, warning_width, "warning hover geometry stable")
-fire(event, "mouse.exited")
-local stale_leave = #delayed
-equal(delayed[stale_leave].seconds, 0.05, "surface exit delay")
-fire(date, "mouse.entered")
-equal(event_surface.properties.background.color, colors.right_event, "event resets during group transfer")
-equal(date_surface.properties.background.color, colors.hover, "date highlights independently")
-equal(date_surface.properties.background.border_color, colors.transparent, "date hover border stays absent")
-equal(date.properties.icon.color, colors.primary, "date hover icon foreground")
-equal(date.properties.label.color, colors.primary, "date hover label foreground")
-local event_after_transfer, date_after_transfer = #event_surface.set_history, #date_surface.set_history
-run_delay(stale_leave)
-equal(#event_surface.set_history, event_after_transfer, "stale event leave does not repaint event")
-equal(#date_surface.set_history, date_after_transfer, "stale event leave does not repaint date")
-popup_close_count = 0
-fire(event, "mouse.exited.global")
-fire(date, "mouse.exited.global")
-equal(popup_close_count, 0, "calendar surface global exit never schedules popup close")
-equal(event_surface.properties.background.color, colors.right_event, "global exit event idle")
-equal(date_surface.properties.background.color, colors.right_date, "global exit date idle")
-fire(event, "sketchybar_test_hover", { TARGET = "calendar.next" })
-equal(event_surface.properties.background.color, colors.hover, "targeted event hover")
-fire(date, "sketchybar_test_hover", { TARGET = "calendar" })
-equal(event_surface.properties.background.color, colors.right_event, "targeted transfer resets event")
-equal(date_surface.properties.background.color, colors.hover, "targeted date hover")
-fire(date, "sketchybar_test_hover_exit", { TARGET = "calendar" })
-equal(date_surface.properties.background.color, colors.right_date, "targeted date exit")
+-- Warning state remains visible without implying an unavailable action.
+equal(event.properties.icon.color, colors.warning, "warning title remains visible without hover")
+equal(event.properties.label.color, colors.warning, "warning detail remains visible without hover")
 
 -- Empty and provider-error-without-cache states retain generic fixed geometry.
 settings.calendar_show_titles, provider_error, emit_empty = true, false, true
 fire(event, "system_woke")
 equal(event.properties.icon.string, glyph .. " No upcoming events", "empty title")
-commands = {}
-fire(event, "mouse.clicked", { BUTTON = "left" })
-equal(#commands, 1, "empty event opens Calendar once")
 provider_error, emit_empty = true, false
 fire(event, "system_woke")
-equal(event.properties.icon.string, glyph .. " Calendar unavailable", "uncached provider error generic")
+assert(event.properties.icon.string:sub(1, #glyph + 10) == glyph .. " Calendar " and event.properties.icon.string:find("…", 1, true), "uncached provider error generic")
 equal(event.properties.label.string, "STALE", "uncached provider error detail")
 
 -- Forced refreshes coalesce and late callbacks cannot replace current state.
@@ -501,7 +345,7 @@ local current_title = event.properties.icon.string
 deferred_query[1].callback(deferred_query[1].output, 0)
 equal(event.properties.icon.string, current_title, "duplicate old callback ignored")
 deferred_query[2].callback(deferred_query[2].output, 0)
-equal(event.properties.icon.string, glyph .. " Synthetic new generation", "current callback wins")
+assert(event.properties.icon.string:sub(1, #glyph + 1) == glyph .. " " and event.properties.icon.string:find("Synthetic new", 1, true), "current callback wins")
 defer_query = false
 
 -- Every render update preserves bounded intrinsic geometry; hover never changes the child background.
@@ -516,7 +360,7 @@ for _, update in ipairs(event.set_history) do
       equal(update.label.width, 0, "event empty update label width")
       equal(update.label.drawing, false, "event empty update label hidden")
     else
-      equal(update.icon.padding_right + update.label.padding_left, 8, "event update content gap")
+      equal(update.icon.padding_right + update.label.padding_left, calendar_layout.content_gap, "event update content gap")
       equal(update.label.padding_right, 8, "event update right edge")
       equal(update.label.width, "dynamic", "event update uses native detail width")
       equal(update.label.drawing, true, "event detail update visible")
@@ -527,7 +371,7 @@ for _, update in ipairs(event.set_history) do
   assert(not update.background, "event child background never updated")
 end
 for _, update in ipairs(date.set_history) do
-  if update.width ~= nil then equal(update.width, 116, "date update width") end
+  if update.width ~= nil then equal(update.width, 148, "date update width") end
   assert(not update.background, "date child background never updated")
 end
 for _, surface in ipairs({ event_surface, date_surface }) do
@@ -538,7 +382,7 @@ for _, surface in ipairs({ event_surface, date_surface }) do
   end
 end
 equal(event.properties.width, "dynamic", "final event width remains native dynamic")
-equal(date.properties.width, 116, "final anchor width")
+equal(date.properties.width, 148, "final anchor width")
 
 os.time = real_time
 print("Calendar split surface geometry passed")

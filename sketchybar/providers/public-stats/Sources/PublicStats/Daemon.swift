@@ -15,8 +15,64 @@ func batteryWatcherDiagnostic(installed: Bool) -> String? {
 func contractDiagnostic(for event: FixedEvent) -> String {
     switch event {
     case .metrics: return "E_METRICS_CONTRACT"
+    case .cpuDetail: return "E_CPU_DETAIL_CONTRACT"
     case .battery: return "E_BATTERY_CONTRACT"
     }
+}
+
+func resetForPartialMetricsEvent(_ value: inout MetricsSnapshot) {
+    value.cpuSampled = false
+    value.cpuValid = false
+    value.cpuBusyPercent = 0
+    value.cpuUserPercent = 0
+    value.cpuNicePercent = 0
+    value.cpuSystemPercent = 0
+    value.cpuIdlePercent = 0
+    value.cpuLoad1 = 0
+    value.cpuLoad5 = 0
+    value.cpuLoad15 = 0
+
+    value.memorySampled = false
+    value.memoryValid = false
+    value.memoryTotalBytes = 0
+    value.memoryUsedBytes = 0
+    value.memoryAvailableBytes = 0
+    value.memoryCompressedBytes = 0
+    value.memoryWiredBytes = 0
+    value.swapValid = false
+    value.swapTotalBytes = 0
+    value.swapUsedBytes = 0
+
+    value.storageSampled = false
+    value.storageValid = false
+    value.storageTotalBytes = 0
+    value.storageFreeBytes = 0
+    value.storageUsedBytes = 0
+    value.storageUsedPercent = 0
+    value.importantAvailableBytes = nil
+    value.storageIOSampled = false
+    value.storageIOValid = false
+    value.storageReadBytesPerSecond = 0
+    value.storageWriteBytesPerSecond = 0
+
+    value.networkSampled = false
+    value.networkValid = false
+    value.networkState = .unknown
+    value.networkPathType = .unknown
+    value.networkReceiveBytesPerSecond = 0
+    value.networkTransmitBytesPerSecond = 0
+    value.networkSessionValid = false
+    value.networkSessionReceiveBytes = 0
+    value.networkSessionTransmitBytes = 0
+    value.networkExpensive = false
+    value.networkConstrained = false
+
+    value.conditionSampled = false
+    value.thermalValid = false
+    value.pressureValid = false
+    value.thermalState = .unknown
+    value.pressureState = .unknown
+    value.lowPowerState = .offOrUnsupported
 }
 
 // All mutable sampling state is confined to stateQueue. Main-thread setup only installs retained sources.
@@ -34,10 +90,14 @@ final class PublicStatsDaemon: @unchecked Sendable {
 
     private let producerInstance: String
     private var metrics: MetricsSnapshot
+    private var cpuDetail: CPUDetailSnapshot
     private var cpuSampler = CPUSampler()
+    private var perCoreCPUSampler = PerCoreCPUSampler()
     private var networkSampler = NetworkSampler()
+    private let storageIOSampler = StorageIOSampler()
     private var battery: BatterySnapshot
     private var metricsSequenceExhausted = false
+    private var cpuDetailSequenceExhausted = false
     private var batterySequenceExhausted = false
     private var bootstrapped = false
     private var conditionPendingDuringStartup = false
@@ -49,6 +109,7 @@ final class PublicStatsDaemon: @unchecked Sendable {
         precondition(isValidProducerInstance(instance))
         producerInstance = instance
         metrics = MetricsSnapshot(producerInstance: instance)
+        cpuDetail = CPUDetailSnapshot(producerInstance: instance)
         var initialBattery = BatterySnapshot()
         initialBattery.producerInstance = instance
         battery = initialBattery
@@ -127,12 +188,9 @@ final class PublicStatsDaemon: @unchecked Sendable {
             queue: stateQueue
         )
         pressure?.setEventHandler { [weak self] in
-            guard let self, let retained = self.pressure,
-                  let mapped = mapPressure(retained.data) else { return }
+            guard let self, let retained = self.pressure else { return }
             beginMetricsEvent()
-            metrics.pressureState = mapped
-            metrics.pressureValid = true
-            sampleConditions()
+            sampleConditions(pressureFallback: retained.data)
             emitMetrics()
         }
     }
@@ -140,15 +198,23 @@ final class PublicStatsDaemon: @unchecked Sendable {
     private func startupSample() {
         metrics = MetricsSnapshot(producerInstance: producerInstance)
         metrics.metricsSequence = 0
+        cpuDetail = CPUDetailSnapshot(producerInstance: producerInstance)
+        cpuDetail.cpuDetailSequence = 0
         metricsSequenceExhausted = false
+        cpuDetailSequenceExhausted = false
         batterySequenceExhausted = false
+        cpuSampler.reset()
+        perCoreCPUSampler.reset()
         sampleCPU()
+        sampleCPUDetail()
         sampleMemory()
         sampleVolume()
+        sampleStorageIO()
         sampleConditions()
         sampleMetal()
         sampleAndStoreBattery()
         emitMetrics()
+        emitCPUDetail()
         emitBattery()
     }
 
@@ -171,20 +237,20 @@ final class PublicStatsDaemon: @unchecked Sendable {
     }
 
     private func beginMetricsEvent() {
-        metrics.cpuSampled = false
-        metrics.memorySampled = false
-        metrics.storageSampled = false
-        metrics.networkSampled = false
-        metrics.conditionSampled = false
+        resetForPartialMetricsEvent(&metrics)
     }
 
     private func fastTimerEvent() {
         beginMetricsEvent()
         sampleCPU()
+        sampleCPUDetail()
         sampleMemory()
-        let network = networkSampler.sample(timeNanoseconds: DispatchTime.now().uptimeNanoseconds)
+        let now = DispatchTime.now().uptimeNanoseconds
+        let network = networkSampler.sample(timeNanoseconds: now)
         apply(network)
+        apply(storageIOSampler.sample(timeNanoseconds: now))
         emitMetrics()
+        emitCPUDetail()
     }
 
     private func volumeTimerEvent() {
@@ -253,6 +319,33 @@ final class PublicStatsDaemon: @unchecked Sendable {
         metrics.cpuActive = UInt64(sample.active)
     }
 
+    private func sampleCPUDetail() {
+        cpuDetail.coreValid = false
+        cpuDetail.coreBusyPercentages = []
+        let now = DispatchTime.now().uptimeNanoseconds
+        switch readPerCoreCPUTicks() {
+        case .success(let ticks):
+            let sample = perCoreCPUSampler.consume(
+                ticks: ticks,
+                timeNanoseconds: now,
+                clockTicksPerSecond: Int64(sysconf(_SC_CLK_TCK))
+            )
+            cpuDetail.coreValid = sample.valid
+            cpuDetail.coreBusyPercentages = sample.busyPercentages
+        case .failure:
+            perCoreCPUSampler.reset()
+        }
+
+        let uptime = ProcessInfo.processInfo.systemUptime
+        if uptime.isFinite, uptime >= 0, uptime <= Double(maximumLuaExactInteger) {
+            cpuDetail.uptimeValid = true
+            cpuDetail.uptimeSeconds = UInt64(uptime.rounded(.down))
+        } else {
+            cpuDetail.uptimeValid = false
+            cpuDetail.uptimeSeconds = 0
+        }
+    }
+
     private func sampleMemory() {
         metrics.memorySampled = true
         switch readMemory() {
@@ -302,12 +395,25 @@ final class PublicStatsDaemon: @unchecked Sendable {
         }
     }
 
-    private func sampleConditions() {
+    private func sampleStorageIO() {
+        apply(storageIOSampler.sample(timeNanoseconds: DispatchTime.now().uptimeNanoseconds))
+    }
+
+    private func sampleConditions(
+        pressureFallback: DispatchSource.MemoryPressureEvent? = nil
+    ) {
         metrics.conditionSampled = true
         let value = readConditions()
         metrics.thermalValid = true
         metrics.thermalState = value.thermal
         metrics.lowPowerState = value.lowPower
+        if let pressure = resolvedMemoryPressure(fallback: pressureFallback) {
+            metrics.pressureValid = true
+            metrics.pressureState = pressure
+        } else {
+            metrics.pressureValid = false
+            metrics.pressureState = .unknown
+        }
     }
 
     private func sampleMetal() {
@@ -329,8 +435,18 @@ final class PublicStatsDaemon: @unchecked Sendable {
         metrics.networkPathType = value.type
         metrics.networkReceiveBytesPerSecond = value.receiveBytesPerSecond
         metrics.networkTransmitBytesPerSecond = value.transmitBytesPerSecond
+        metrics.networkSessionValid = value.sessionValid
+        metrics.networkSessionReceiveBytes = value.sessionReceiveBytes
+        metrics.networkSessionTransmitBytes = value.sessionTransmitBytes
         metrics.networkExpensive = value.expensive
         metrics.networkConstrained = value.constrained
+    }
+
+    private func apply(_ value: StorageIOObservation) {
+        metrics.storageIOSampled = value.sampled
+        metrics.storageIOValid = value.valid
+        metrics.storageReadBytesPerSecond = value.readBytesPerSecond
+        metrics.storageWriteBytesPerSecond = value.writeBytesPerSecond
     }
 
     private func sampleAndStoreBattery() {
@@ -356,24 +472,24 @@ final class PublicStatsDaemon: @unchecked Sendable {
             return
         }
         cpuSampler.reset()
-        let resetNetwork = networkSampler.replacePathAfterReset(monitor.currentPath)
-        metrics.cpuValid = false
-        metrics.cpuBusyPercent = 0
-        metrics.cpuUserPercent = 0
-        metrics.cpuNicePercent = 0
-        metrics.cpuSystemPercent = 0
-        metrics.cpuIdlePercent = 0
-        metrics.networkValid = false
-        metrics.networkReceiveBytesPerSecond = 0
-        metrics.networkTransmitBytesPerSecond = 0
+        perCoreCPUSampler.reset()
+        let now = DispatchTime.now().uptimeNanoseconds
+        let resetNetwork = networkSampler.replacePathAfterReset(
+            monitor.currentPath, timeNanoseconds: now
+        )
+        storageIOSampler.reset()
         beginMetricsEvent()
+        sampleCPU()
+        sampleCPUDetail()
         apply(resetNetwork)
         sampleMemory()
         sampleVolume()
+        sampleStorageIO()
         sampleConditions()
         sampleMetal()
         sampleAndStoreBattery()
         emitMetrics()
+        emitCPUDetail()
         emitBattery()
     }
 
@@ -391,6 +507,22 @@ final class PublicStatsDaemon: @unchecked Sendable {
             return
         }
         metrics.metricsSequence = next
+    }
+
+    private func emitCPUDetail() {
+        guard !cpuDetailSequenceExhausted else { return }
+        cpuDetail.cpuDetailSampleEpochSeconds = epochSeconds(Date()) ?? 0
+        guard let payload = try? ContractSerializer.cpuDetail(cpuDetail) else {
+            Self.diagnostic(contractDiagnostic(for: .cpuDetail))
+            return
+        }
+        emitter.submit(payload)
+        guard let next = nextSequence(after: cpuDetail.cpuDetailSequence) else {
+            cpuDetailSequenceExhausted = true
+            Self.diagnostic("E_CPU_DETAIL_SEQUENCE_EXHAUSTED")
+            return
+        }
+        cpuDetail.cpuDetailSequence = next
     }
 
     private func emitBattery() {

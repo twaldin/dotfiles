@@ -3,6 +3,9 @@ package.path = os.getenv("SKETCHYBAR_CONFIG_DIR") .. "/?.lua;" .. os.getenv("SKE
 local subscriptions, objects, delayed = {}, {}, {}
 local function validate(value, path)
   if type(value) == "function" then error("function leaked into SketchyBar property at " .. path) end
+  if path:match("slider%.highlight_color$") and type(value) ~= "number" then
+    error("slider highlight color must be numeric at " .. path)
+  end
   if type(value) ~= "table" then return end
   for key, child in pairs(value) do validate(child, path .. "." .. tostring(key)) end
 end
@@ -26,6 +29,22 @@ local function object(name, properties)
 end
 
 local function mock_output(command)
+  if command:find("connectivity%-state%.py") and command:find("'wifi' 'state'", 1, true) then
+    return {
+      power = true, ssid = nil, name_available = false,
+      association = "associated", security = "wpa3_personal",
+      rssi = -47, noise = -89, rate = 1201,
+    }, 0
+  end
+  if command:find("connectivity%-state%.py") and command:find("'bluetooth' 'state'", 1, true) then
+    return {
+      power = true,
+      devices = {
+        { address = "00:11:22:33:44:55", name = "Mock headset", connected = true },
+        { address = "66:77:88:99:AA:BB", name = "Mock keyboard", connected = false },
+      },
+    }, 0
+  end
   if command:find("'audio' 'state'", 1, true) then
     return {
       schema = 1, ok = true, warning_count = 0,
@@ -52,8 +71,8 @@ local function mock_output(command)
     }, 0
   end
   if command:find("network%-sample%.sh") then return "1\ten0\t100\t100\t192.0.2.2\t192.0.2.1\tMock", 0 end
-  if command:find("blueutil") then return {}, 0 end
   if command:find("system_profiler") then return { SPBluetoothDataType = { { controller_properties = { controller_state = "attrib_on" }, device_connected = {} } } }, 0 end
+  if command:find("gpu%-usage%.py") then return { schema = 1, valid = true, usage_percent = 12.3 }, 0 end
   if command:find("query.*%-%-spaces") or command:find("query.*%-%-windows") then return {}, 0 end
   if command:find("top%-processes%.sh") then return "1%  mock\n2%  mock", 0 end
   if command:find("vpn%-state%.sh") then return "Tailscale on", 0 end
@@ -95,10 +114,10 @@ end
 fire("routine", { NAME = "smoke", INFO = "0" })
 fire("system_woke", { NAME = "smoke" })
 fire("front_app_switched", { INFO = "Finder" })
-fire("system_stats", { CPU_USAGE = "12", RAM_USAGE = "34", DISK_USAGE = "56", BATTERY_PERCENTAGE = "78", UPTIME = "1d" })
+fire("system_metrics_v3", require("tests.stats-fixture").metrics())
 
 -- Build every popup shell without running system commands, then exercise action hover.
-for _, target in ipairs({ "calendar", "wifi", "bluetooth", "audio", "microphone", "battery", "status", "front_window" }) do
+for _, target in ipairs({ "calendar", "wifi", "bluetooth", "audio", "microphone", "battery", "cpu", "gpu", "ram", "net", "ssd", "tmp", "front_window" }) do
   fire("sketchybar_test_popup", { TARGET = target })
 end
 fire("mouse.entered", { NAME = "smoke" })

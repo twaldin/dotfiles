@@ -18,16 +18,81 @@ helper = pathlib.Path(sys.argv[1]).resolve()
 launcher = pathlib.Path(sys.argv[2]).resolve()
 source = launcher.read_text()
 helper_source = helper.read_text()
-check('SKETCHYBAR_PROVIDER_CHILD_HOLD_AFTER_CLAIM' not in helper_source and 'SKETCHYBAR_PROVIDER_CHILD_DELAY_BEFORE_PUBLISH' not in helper_source, 'production provider child must have no environment-controlled claim hold or publication delay')
+wrapper = launcher.parents[1] / "sketchybarrc"
+wrapper_source = wrapper.read_text()
+for name, runtime_source in (("provider launcher", source), ("SketchyBar wrapper", wrapper_source)):
+    check('runtime_base_input=${TMPDIR:-}' in runtime_source
+          and 'cd -P -- "$runtime_base_input"' in runtime_source
+          and '/usr/bin/stat -f %Lp "$runtime_base"' in runtime_source
+          and ('${TMPDIR:-' + '/tmp}') not in runtime_source,
+          name + " must require a validated per-user TMPDIR")
+check('provider="$HOME/.local/share/sketchybar-provider/sketchybar-public-stats"' in source and '"$provider" daemon &' in source, 'launcher must execute the first-party public stats daemon')
+check('SKETCHYBAR_PROVIDER_' not in source and 'SKETCHYBAR_PROVIDER_' not in helper_source,
+      'production provider lifecycle must have no environment-controlled test behavior')
 check('log=/tmp/' not in source and ': >"$log"' not in source, 'provider launcher must not use or truncate a shared /tmp log')
-check('runtime="$runtime_base/sketchybar-stats-provider-$uid"' in source, 'provider metadata must share the private per-user runtime directory')
+check('runtime="$runtime_base/sketchybar-public-stats-$uid"' in source, 'provider metadata must share the private per-user runtime directory')
 check('pidfile="$runtime/provider.pid"' in source and 'log="$runtime/provider.log"' in source, 'provider PID and log must share the runtime directory')
 check('"$log_helper" exec-owned "$log" "$pidfile" "$pending_intent" "$$" "$provider"' in source and '"$log_helper" pid "$pending_intent" "$$"' in source, 'launcher intent must be durable before the child self-publishes and execs')
-check('legacy_pidfile=' in source, 'provider restart must migrate the prior owned PID file without duplication')
+check('legacy_pidfile=' not in source, 'public stats launcher must not use the retired provider PID path')
 check('>"${pidfile}.new"' not in source and '"$log_helper" pid "$pidfile" "$new_pid"' not in source and 'exec-owned' in source, 'parent must never publish the child PID after fork')
 check('remove-stale' not in source and '/bin/rm -f "$pending_intent"' not in source, 'production start and restart paths must never remove ambiguous pending intent')
-lock_test_guard = '[ "${SKETCHYBAR_PROVIDER_LOCK_TEST:-}" = 1 ] && exit 0'
-check(lock_test_guard in source and source.index(lock_test_guard) < source.index('owned_pid()'), 'isolated default-restart lock test guard must exit before provider lifecycle code')
+with tempfile.TemporaryDirectory(prefix='provider-tmpdir-boundary-test.') as raw:
+    base = pathlib.Path(raw).resolve()
+    weak = base / 'weak'
+    weak.mkdir(mode=0o755)
+    weak.chmod(0o755)
+    isolated_scripts = base / 'scripts'
+    isolated_scripts.mkdir()
+    isolated_launcher = isolated_scripts / launcher.name
+    isolated_wrapper = base / wrapper.name
+    isolated_installer = base / 'install-deps.sh'
+    isolated_smoke = isolated_scripts / 'smoke-config.sh'
+    shutil.copy2(launcher, isolated_launcher)
+    shutil.copy2(wrapper, isolated_wrapper)
+    shutil.copy2(wrapper.parent / 'install-deps.sh', isolated_installer)
+    shutil.copy2(wrapper.parent / 'scripts/smoke-config.sh', isolated_smoke)
+    isolated_home = base / 'home'
+    isolated_config = base / 'config'
+    isolated_home.mkdir()
+    isolated_config.mkdir()
+    invalid_values = [('relative-provider-tmp', 64), (str(weak), 73), (None, 64)]
+    for executable, label in ((isolated_launcher, 'Public stats'),
+                              (isolated_wrapper, 'SketchyBar')):
+        for value, expected_code in invalid_values:
+            environment = dict(os.environ, HOME=str(isolated_home),
+                               SKETCHYBAR_CONFIG_DIR=str(isolated_config))
+            if value is None:
+                environment.pop('TMPDIR', None)
+            else:
+                environment['TMPDIR'] = value
+            rejected = subprocess.run([str(executable)], env=environment,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True, timeout=10)
+            expected_error = (label + ': unsafe or missing per-user TMPDIR '
+                              + '(exit ' + str(expected_code) + ')\n')
+            check(rejected.returncode == expected_code and rejected.stdout == ''
+                  and rejected.stderr == expected_error,
+                  'unsafe isolated runtime parent must return a safe diagnostic: '
+                  + executable.name)
+    for executable, label in ((isolated_installer, 'Installer'),
+                              (isolated_smoke, 'Smoke gate')):
+        for value, expected_code in invalid_values:
+            environment = dict(os.environ, HOME=str(isolated_home))
+            if value is None:
+                environment.pop('TMPDIR', None)
+            else:
+                environment['TMPDIR'] = value
+            rejected = subprocess.run([str(executable)], env=environment,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True, timeout=10)
+            requirement = ('macOS per-user TMPDIR' if expected_code == 64
+                           else 'a safe per-user TMPDIR')
+            expected_error = (label + ' requires ' + requirement
+                              + ' (exit ' + str(expected_code) + ')\n')
+            check(rejected.returncode == expected_code and rejected.stdout == ''
+                  and rejected.stderr == expected_error,
+                  'manual entrypoint TMPDIR preflight must be exact and isolated: '
+                  + executable.name)
 
 with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     runtime = pathlib.Path(raw) / 'runtime'
@@ -169,8 +234,11 @@ with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     lock_record.unlink()
     lockdir.rmdir()
 
-    abort_mkdir_environment = dict(os.environ, SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_STAGE_MKDIR='1')
-    aborted_mkdir = subprocess.run([sys.executable, str(helper), 'acquire-lock-directory', str(lockdir), str(os.getpid())], env=abort_mkdir_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    abort_mkdir_helper = pathlib.Path(raw) / 'provider-log-abort-stage-mkdir.py'
+    stage_mkdir_anchor = '    stage = pathlib.Path(tempfile.mkdtemp(prefix=".launcher.lock.stage.", dir=path.parent))\n'
+    check(helper_source.count(stage_mkdir_anchor) == 1, 'stage-mkdir crash fixture anchor')
+    abort_mkdir_helper.write_text(helper_source.replace(stage_mkdir_anchor, stage_mkdir_anchor + '    os._exit(75)\n', 1))
+    aborted_mkdir = subprocess.run([sys.executable, str(abort_mkdir_helper), 'acquire-lock-directory', str(lockdir), str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     check(aborted_mkdir.returncode != 0 and not lockdir.exists(), 'crash after staging mkdir must not expose an empty fixed lock directory')
     staged_empty = list(runtime.glob('.launcher.lock.stage.*'))
     check(len(staged_empty) == 1 and staged_empty[0].is_dir(), 'mkdir crash fixture must retain only one invisible unique stage')
@@ -179,8 +247,11 @@ with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     subprocess.run([sys.executable, str(helper), 'release-lock-directory', str(lockdir), str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     staged_empty[0].rmdir()
 
-    abort_record_environment = dict(os.environ, SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_STAGE_RECORD='1')
-    aborted_record = subprocess.run([sys.executable, str(helper), 'acquire-lock-directory', str(lockdir), str(os.getpid())], env=abort_record_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    abort_record_helper = pathlib.Path(raw) / 'provider-log-abort-stage-record.py'
+    stage_record_anchor = '        os.fsync(descriptor)\n        record_info = os.fstat(descriptor)\n'
+    check(helper_source.count(stage_record_anchor) == 1, 'stage-record crash fixture anchor')
+    abort_record_helper.write_text(helper_source.replace(stage_record_anchor, '        os.fsync(descriptor)\n        os._exit(75)\n        record_info = os.fstat(descriptor)\n', 1))
+    aborted_record = subprocess.run([sys.executable, str(abort_record_helper), 'acquire-lock-directory', str(lockdir), str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     check(aborted_record.returncode != 0 and not lockdir.exists(), 'crash after staged record fsync must not expose the fixed lock')
     staged_record = list(runtime.glob('.launcher.lock.stage.*'))
     check(len(staged_record) == 1 and (staged_record[0] / 'pid').is_file(), 'record crash fixture must retain only one complete invisible stage')
@@ -193,8 +264,11 @@ with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     lockdir.mkdir(mode=0o700)
     lock_record.write_text('999999999\n')
     lock_record.chmod(0o600)
-    abort_quarantine_environment = dict(os.environ, SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_QUARANTINE='1')
-    aborted_quarantine = subprocess.run([sys.executable, str(helper), 'release-lock-directory', str(lockdir), '999999999'], env=abort_quarantine_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    abort_quarantine_helper = pathlib.Path(raw) / 'provider-log-abort-quarantine.py'
+    quarantine_anchor = '        rename_exclusive(path, quarantine)\n'
+    check(helper_source.count(quarantine_anchor) == 1, 'quarantine crash fixture anchor')
+    abort_quarantine_helper.write_text(helper_source.replace(quarantine_anchor, quarantine_anchor + '        os._exit(75)\n', 1))
+    aborted_quarantine = subprocess.run([sys.executable, str(abort_quarantine_helper), 'release-lock-directory', str(lockdir), '999999999'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     check(aborted_quarantine.returncode != 0 and not lockdir.exists() and (lock_quarantine / 'pid').read_text() == '999999999\n', 'crash after directory quarantine must leave one complete recoverable quarantine')
     after_quarantine = subprocess.run([sys.executable, str(helper), 'acquire-lock-directory', str(lockdir), str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     check(after_quarantine.returncode == 0 and lockdir.is_dir() and not lock_quarantine.exists(), 'next acquisition must recover a complete dead quarantine before atomic publication')
@@ -203,8 +277,11 @@ with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     lockdir.mkdir(mode=0o700)
     lock_record.write_text('999999999\n')
     lock_record.chmod(0o600)
-    abort_detach_environment = dict(os.environ, SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_CLEANUP_DETACH='1')
-    aborted_detach = subprocess.run([sys.executable, str(helper), 'release-lock-directory', str(lockdir), '999999999'], env=abort_detach_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    abort_detach_helper = pathlib.Path(raw) / 'provider-log-abort-cleanup-detach.py'
+    cleanup_detach_anchor = '    try:\n        (cleanup / "pid").unlink()\n'
+    check(helper_source.count(cleanup_detach_anchor) == 1, 'cleanup-detach crash fixture anchor')
+    abort_detach_helper.write_text(helper_source.replace(cleanup_detach_anchor, '    os._exit(75)\n' + cleanup_detach_anchor, 1))
+    aborted_detach = subprocess.run([sys.executable, str(abort_detach_helper), 'release-lock-directory', str(lockdir), '999999999'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     detached_cleanup = list(runtime.glob('.launcher.lock.cleanup.*'))
     check(aborted_detach.returncode != 0 and not lockdir.exists() and not lock_quarantine.exists() and len(detached_cleanup) == 1 and (detached_cleanup[0] / 'pid').is_file(), 'crash after fixed-quarantine detach must leave only one invisible complete cleanup directory')
     after_detach = subprocess.run([sys.executable, str(helper), 'acquire-lock-directory', str(lockdir), str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -216,8 +293,11 @@ with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     lockdir.mkdir(mode=0o700)
     lock_record.write_text('999999999\n')
     lock_record.chmod(0o600)
-    abort_cleanup_record_environment = dict(os.environ, SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_CLEANUP_RECORD='1')
-    aborted_cleanup_record = subprocess.run([sys.executable, str(helper), 'release-lock-directory', str(lockdir), '999999999'], env=abort_cleanup_record_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    abort_cleanup_record_helper = pathlib.Path(raw) / 'provider-log-abort-cleanup-record.py'
+    cleanup_record_anchor = '        (cleanup / "pid").unlink()\n        cleanup.rmdir()\n'
+    check(helper_source.count(cleanup_record_anchor) == 1, 'cleanup-record crash fixture anchor')
+    abort_cleanup_record_helper.write_text(helper_source.replace(cleanup_record_anchor, '        (cleanup / "pid").unlink()\n        os._exit(75)\n        cleanup.rmdir()\n', 1))
+    aborted_cleanup_record = subprocess.run([sys.executable, str(abort_cleanup_record_helper), 'release-lock-directory', str(lockdir), '999999999'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     empty_cleanup = list(runtime.glob('.launcher.lock.cleanup.*'))
     check(aborted_cleanup_record.returncode != 0 and not lockdir.exists() and not lock_quarantine.exists() and len(empty_cleanup) == 1 and not list(empty_cleanup[0].iterdir()), 'crash after detached record removal must leave only one invisible empty cleanup directory')
     after_cleanup_record = subprocess.run([sys.executable, str(helper), 'acquire-lock-directory', str(lockdir), str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -233,7 +313,8 @@ with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     owned_process = subprocess.Popen([sys.executable, str(helper), 'exec-owned', str(owned_log), str(owned_pidfile), str(owned_intent), str(os.getpid()), '/bin/sleep', '5'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         for _ in range(500):
-            if owned_pidfile.exists() or owned_process.poll() is not None:
+            if ((owned_pidfile.exists() and not owned_intent.exists())
+                    or owned_process.poll() is not None):
                 break
             time.sleep(0.01)
         check(owned_pidfile.read_text() == str(owned_process.pid) + '\n' and not owned_intent.exists() and stat.S_IMODE(owned_pidfile.stat().st_mode) == 0o600 and owned_process.poll() is None, 'exec-owned child must atomically publish its own PID and clear durable intent before exact command survives')
@@ -306,7 +387,19 @@ with tempfile.TemporaryDirectory(prefix='provider-runtime-test.') as raw:
     check(parent_result.returncode != 0 and not (real_runtime / 'provider.log').exists(), 'symlink runtime directory must reject')
 
 with tempfile.TemporaryDirectory(prefix='provider-lock-overlap-test.') as raw:
-    runtime = pathlib.Path(raw) / ('sketchybar-stats-provider-' + str(os.getuid()))
+    lock_fixture = pathlib.Path(raw) / 'fixture'
+    lock_fixture.mkdir()
+    lock_launcher = lock_fixture / launcher.name
+    lock_helper = lock_fixture / helper.name
+    lock_exit_anchor = 'trap cleanup EXIT\n'
+    check(source.count(lock_exit_anchor) == 1, 'lock-overlap fixture anchor')
+    lock_launcher.write_text(source.replace(lock_exit_anchor, lock_exit_anchor + 'exit 0\n', 1))
+    lock_launcher.chmod(0o755)
+    lock_helper.write_text(helper_source)
+    lock_helper.chmod(0o755)
+    isolated_lock_home = pathlib.Path(raw) / 'home'
+    isolated_lock_home.mkdir()
+    runtime = pathlib.Path(raw) / ('sketchybar-public-stats-' + str(os.getuid()))
     runtime.mkdir(mode=0o700)
     lockdir = runtime / 'launcher.lock'
     lockdir.mkdir(mode=0o700)
@@ -315,10 +408,10 @@ with tempfile.TemporaryDirectory(prefix='provider-lock-overlap-test.') as raw:
     holder_file.write_text(str(holder_process.pid) + '\n')
     holder_file.chmod(0o600)
     original_inode = holder_file.stat().st_ino
-    lock_env = dict(os.environ, TMPDIR=raw, SKETCHYBAR_PROVIDER_LOCK_TEST='1')
+    lock_env = dict(os.environ, TMPDIR=raw, HOME=str(isolated_lock_home))
     try:
-        absolute = subprocess.run([str(launcher)], env=lock_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        relative = subprocess.run(['./' + launcher.name], cwd=launcher.parent, env=lock_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        absolute = subprocess.run([str(lock_launcher)], env=lock_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        relative = subprocess.run(['./' + lock_launcher.name], cwd=lock_launcher.parent, env=lock_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         check(absolute.returncode == 0 and relative.returncode == 0 and holder_file.read_text() == str(holder_process.pid) + '\n' and holder_file.stat().st_ino == original_inode, 'overlapping absolute and relative default restarts must not steal a verified live lock')
     finally:
         holder_process.terminate()
@@ -345,7 +438,15 @@ with tempfile.TemporaryDirectory(prefix='provider-post-fork-test.') as raw:
     fake_source.write_text('#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n')
     compiled = subprocess.run(['/usr/bin/xcrun', 'clang', str(fake_source), '-o', str(fake_provider)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     check(compiled.returncode == 0, 'isolated fake provider must compile')
-    copied_launcher.write_text(launcher.read_text().replace('/opt/homebrew/bin/stats_provider', str(fake_provider)))
+    post_fork_anchor = 'new_pid=$!\n'
+    copied_launcher_source = launcher.read_text().replace(
+        'provider="$HOME/.local/share/sketchybar-provider/sketchybar-public-stats"',
+        'provider="' + str(fake_provider) + '"')
+    check(copied_launcher_source.count(post_fork_anchor) == 1,
+          'post-fork parent-abort fixture anchor')
+    copied_launcher.write_text(copied_launcher_source.replace(
+        post_fork_anchor,
+        post_fork_anchor + 'if [ "${PRIVATE_PROVIDER_PARENT_ABORT:-}" = 1 ]; then /bin/kill -KILL "$$"; fi\n', 1))
     copied_launcher.chmod(0o755)
     copied_source = helper.read_text()
     claim_line = '        claim_record(intent, intent_owner, own_pid)\n'
@@ -359,7 +460,7 @@ with tempfile.TemporaryDirectory(prefix='provider-post-fork-test.') as raw:
     check(claim_line in copied_source, 'isolated helper fixture must find the claim boundary')
     copied_helper.write_text(copied_source.replace(claim_line, claim_line + hold_fixture, 1))
     copied_helper.chmod(0o755)
-    runtime = base / ('sketchybar-stats-provider-' + str(os.getuid()))
+    runtime = base / ('sketchybar-public-stats-' + str(os.getuid()))
     runtime.mkdir(mode=0o700)
     dead_intent = runtime / 'provider.pending'
     dead_intent.write_text('999999999\n')
@@ -376,10 +477,10 @@ with tempfile.TemporaryDirectory(prefix='provider-post-fork-test.') as raw:
 
     child_hold = base / 'child-claim-hold'
     child_hold.write_text('hold\n')
-    launch_environment = dict(os.environ, TMPDIR=raw, SKETCHYBAR_PROVIDER_ABORT_AFTER_FORK='1', SKETCHYBAR_PROVIDER_CHILD_HOLD_AFTER_CLAIM=str(child_hold))
+    launch_environment = dict(os.environ, TMPDIR=raw, PRIVATE_PROVIDER_PARENT_ABORT='1', SKETCHYBAR_PROVIDER_CHILD_HOLD_AFTER_CLAIM=str(child_hold))
     aborted_process = subprocess.Popen([str(copied_launcher)], env=launch_environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
     aborted_returncode = aborted_process.wait()
-    runtime = base / ('sketchybar-stats-provider-' + str(os.getuid()))
+    runtime = base / ('sketchybar-public-stats-' + str(os.getuid()))
     child_pidfile = runtime / 'provider.pid'
     child_intent = runtime / 'provider.pending'
     check(aborted_returncode != 0 and child_intent.exists() and not child_pidfile.exists(), 'post-fork parent abort fixture must expose durable intent before child publication')

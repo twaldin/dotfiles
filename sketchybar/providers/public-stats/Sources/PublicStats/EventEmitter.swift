@@ -4,6 +4,7 @@ import Foundation
 
 struct PendingEvents: Sendable {
     private var metrics: SerializedEvent?
+    private var cpuDetail: SerializedEvent?
     private var battery: SerializedEvent?
     private var order: [FixedEvent] = []
 
@@ -12,6 +13,7 @@ struct PendingEvents: Sendable {
         order.append(payload.event)
         switch payload.event {
         case .metrics: metrics = payload
+        case .cpuDetail: cpuDetail = payload
         case .battery: battery = payload
         }
     }
@@ -23,6 +25,9 @@ struct PendingEvents: Sendable {
         case .metrics:
             defer { metrics = nil }
             return metrics
+        case .cpuDetail:
+            defer { cpuDetail = nil }
+            return cpuDetail
         case .battery:
             defer { battery = nil }
             return battery

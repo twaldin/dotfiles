@@ -295,12 +295,8 @@ def cleanup_quarantine(path, quarantine, directory_info, record_info, expected):
         or moved_value != expected
     ):
         fail("Provider detached lock cleanup changed")
-    if os.environ.get("SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_CLEANUP_DETACH") == "1":
-        os._exit(75)
     try:
         (cleanup / "pid").unlink()
-        if os.environ.get("SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_CLEANUP_RECORD") == "1":
-            os._exit(75)
         cleanup.rmdir()
         sync_parent(path)
     except OSError:
@@ -324,8 +320,6 @@ def remove_lock_directory(path, expected, require_dead):
         fail("Provider lock changed before quarantine")
     try:
         rename_exclusive(path, quarantine)
-        if os.environ.get("SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_QUARANTINE") == "1":
-            os._exit(75)
         moved_directory, moved_record, moved_value = lock_directory(quarantine)
         if (
             moved_directory.st_dev != directory_info.st_dev or moved_directory.st_ino != directory_info.st_ino
@@ -366,8 +360,6 @@ def acquire_lock_directory(path, value):
             fail("Provider lock is held", 75)
         remove_lock_directory(path, owner, True)
     stage = pathlib.Path(tempfile.mkdtemp(prefix=".launcher.lock.stage.", dir=path.parent))
-    if os.environ.get("SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_STAGE_MKDIR") == "1":
-        os._exit(75)
     stage_info = stage.lstat()
     descriptor = -1
     published = False
@@ -382,8 +374,6 @@ def acquire_lock_directory(path, value):
         os.fchmod(descriptor, 0o600)
         write_all(descriptor, (value + "\n").encode("ascii"))
         os.fsync(descriptor)
-        if os.environ.get("SKETCHYBAR_PROVIDER_LOCK_ABORT_AFTER_STAGE_RECORD") == "1":
-            os._exit(75)
         record_info = os.fstat(descriptor)
         checked_directory, checked_record, checked_value = lock_directory(stage)
         if (

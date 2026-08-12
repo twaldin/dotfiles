@@ -30,13 +30,69 @@ install = root / 'install-deps.sh'
 transaction = root / 'scripts/system-controls-helper-install-transaction.sh'
 secure = root / 'scripts/secure-file-install.py'
 source_path = root / 'scripts/system-controls.swift'
+coordinator_path = root / 'scripts/audio-state.py'
 settings = (root / 'settings.lua').read_text()
 source = install.read_text()
 source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+coordinator_hash = hashlib.sha256(coordinator_path.read_bytes()).hexdigest()
 fixture_workspace = tempfile.TemporaryDirectory(prefix='system-controls-transaction-fixture.')
 fixture_directory = pathlib.Path(os.path.realpath(fixture_workspace.name))
 fixture_transaction = fixture_directory / transaction.name
-shutil.copy2(transaction, fixture_transaction)
+transaction_source = transaction.read_text()
+check('SKETCHYBAR_TEST_' not in transaction_source
+      and '--test-fixtures' not in transaction_source,
+      'production system controls transaction must have no test seams')
+fixture_source = transaction_source
+production_arity = '[ "$#" -eq 4 ] || { echo "Usage: system-controls-helper-install-transaction CANDIDATE MARKER DIRECTORY EXPECTED_SOURCE_SHA256" >&2; exit 64; }\n'
+fixture_arity = '''case "$#" in
+  4) ;;
+  5) [ "$5" = --test-fixtures ] || exit 64 ;;
+  *) exit 64 ;;
+esac
+'''
+check(fixture_source.count(production_arity) == 1, 'transaction arity fixture anchor')
+fixture_source = fixture_source.replace(production_arity, fixture_arity, 1)
+lock_anchor = '  exec "$secure_installer" system-controls-lock-run "$lock_guard" "$script_dir/system-controls-helper-install-transaction.sh" "$candidate" "$candidate_marker" "$directory_physical" "$controls_candidate_source"\n'
+check(fixture_source.count(lock_anchor) == 1, 'transaction lock fixture anchor')
+fixture_source = fixture_source.replace(lock_anchor, lock_anchor.rstrip('\n') + ' --test-fixtures\n', 1)
+def inject_after(anchor, payload, name):
+    global fixture_source
+    check(fixture_source.count(anchor) == 1, name + ' fixture anchor')
+    fixture_source = fixture_source.replace(anchor, anchor + payload, 1)
+inject_after('  restored=true\n', '''  if [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_ROLLBACK_READY:-}" ]; then
+    printf '%s\n' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_ROLLBACK_READY"
+    /bin/sleep 0.2
+  fi
+''', 'rollback')
+inject_after('binary_replaced=true\n', '''if [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_BEFORE_BINARY_RENAME_READY:-}" ]; then
+  printf '%s\n' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_BEFORE_BINARY_RENAME_READY"
+  /bin/sleep 0.2
+fi
+''', 'before binary rename')
+inject_after('/bin/mv -f "$candidate" "$destination"\n', '''if [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_AFTER_BINARY_RENAME_READY:-}" ]; then
+  printf '%s\n' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_AFTER_BINARY_RENAME_READY"
+  /bin/sleep 0.2
+fi
+''', 'after binary rename')
+inject_after('"$secure_installer" system-controls-state "$recovery_state" "binary-published|$state_suffix"\n', '''if [ "${SKETCHYBAR_TEST_ABORT_AFTER_SYSTEM_CONTROLS_BINARY_RENAME:-0}" = 1 ]; then
+  /bin/kill -TERM "$$"
+fi
+if [ "${SKETCHYBAR_TEST_FAIL_SYSTEM_CONTROLS_MARKER_RENAME:-0}" = 1 ]; then
+  echo "System controls helper marker installation failed" >&2
+  exit 1
+fi
+if [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_BEFORE_MARKER_RENAME_READY:-}" ]; then
+  printf '%s\n' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_BEFORE_MARKER_RENAME_READY"
+  /bin/sleep 0.2
+fi
+''', 'binary publication')
+inject_after('/bin/mv -f "$candidate_marker" "$destination_marker"\n', '''if [ -n "${SKETCHYBAR_TEST_SYSTEM_CONTROLS_AFTER_MARKER_RENAME_READY:-}" ]; then
+  printf '%s\n' ready >"$SKETCHYBAR_TEST_SYSTEM_CONTROLS_AFTER_MARKER_RENAME_READY"
+  /bin/sleep 0.2
+fi
+''', 'after marker rename')
+fixture_transaction.write_text(fixture_source)
+fixture_transaction.chmod(0o755)
 fixture_secure = fixture_directory / 'secure-file-install.py'
 fixture_secure.write_text("""#!/usr/bin/python3
 import fcntl
@@ -72,8 +128,15 @@ os.execv(real, [real] + sys.argv[1:])
 """ % str(secure))
 fixture_secure.chmod(0o755)
 check('SYSTEM_CONTROLS_SOURCE_SHA256=' + source_hash in source, 'system controls source pin is stale')
-check(source.index('host-contract "$host_arch" "$host_macos_version"') < source.index('Immutable system controls source checksum failed') < source.index('/opt/homebrew/bin/brew install lua'), 'host and source gates must precede dependency mutation')
-release_build = source.index('-parse-as-library -O -warnings-as-errors "$SYSTEM_CONTROLS_SOURCE"')
+check('AUDIO_COORDINATOR_SOURCE_SHA256=' + coordinator_hash in source, 'audio coordinator source pin is stale')
+check('AUDIO_COORDINATOR_SOURCE="$CONFIG_DIR/scripts/audio-state.py"' in source, 'audio coordinator provenance inventory is missing')
+check(source.index('host-contract "$host_arch" "$host_macos_version"') < source.index('Immutable system controls source checksum failed') < source.index('Immutable audio coordinator source checksum failed') < source.index('/opt/homebrew/bin/brew install lua'), 'host and source gates must precede dependency mutation')
+check('"$SECURE_INSTALLER" asset "$SYSTEM_CONTROLS_SOURCE" "$controls_source_snapshot"' in source
+      and '/bin/chmod 0444 "$controls_source_snapshot"' in source
+      and '/bin/chmod 0500 "$controls_snapshot_dir"' in source
+      and source.count('\n  check_controls_snapshot\n') == 3,
+      'system controls builds must use one immutable hash-rechecked source snapshot')
+release_build = source.index('-parse-as-library -O -warnings-as-errors "$controls_source_snapshot"')
 debug_fixture = source.index('-parse-as-library -warnings-as-errors -D SYSTEM_CONTROLS_TESTING')
 optimized_fixture = source.index('-parse-as-library -O -warnings-as-errors -D SYSTEM_CONTROLS_TESTING')
 manifest = source.index("'version=2'", release_build)
@@ -84,11 +147,12 @@ check(debug_fixture < optimized_fixture < release_build < manifest < candidate_p
 check('$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.binary.XXXXXX' in source and '$SYSTEM_CONTROLS_HELPER_DIR/.system-controls.hash.XXXXXX' in source, 'candidates must share the owned canonical destination')
 check('system-controls-helper-install-transaction.sh" "$controls_candidate" "$controls_marker_candidate" "$SYSTEM_CONTROLS_HELPER_DIR" "$SYSTEM_CONTROLS_SOURCE_SHA256"' in source, 'transaction must receive the caller-pinned source hash')
 check('system_controls = os.getenv("HOME") .. "/.local/share/sketchybar-controls/system-controls"' in settings, 'inert system controls path is missing')
+check('audio_state = assert(os.getenv("SKETCHYBAR_CONFIG_DIR")) .. "/scripts/audio-state.py"' in settings, 'first-party audio coordinator path is missing')
 check('switch_audio' not in settings and 'switchaudio-osx' not in source, 'retired transition audio dependency remains configured')
 check(transaction.is_file(), 'system controls rollback transaction is missing')
-transaction_source = transaction.read_text()
 check(transaction_source.count('sync-directory') >= 5 and transaction_source.count('sync-file') >= 2, 'system controls transaction durability is incomplete')
-check('SKETCHYBAR_TEST_FAIL_SYSTEM_CONTROLS_MARKER_RENAME' in transaction_source and 'SKETCHYBAR_TEST_ABORT_AFTER_SYSTEM_CONTROLS_BINARY_RENAME' in transaction_source, 'system controls transaction fixture seams are missing')
+check('SKETCHYBAR_TEST_' not in transaction_source and '--test-fixtures' not in transaction_source,
+      'production system controls transaction fixture seam is present')
 check('SKETCHYBAR_TEST_' not in source, 'release installer must not select transaction fixture hooks')
 check('--test-fixtures' not in source, 'release installer must not select the fixture sentinel')
 
@@ -113,7 +177,8 @@ with tempfile.TemporaryDirectory(prefix='system-controls-install-contract.') as 
     check(failed.returncode != 0, 'injected marker rename failure must fail')
     check(fingerprint(binary) == previous_binary and fingerprint(marker) == previous_marker,
           'detected post-binary failure must restore exact previous bytes and modes')
-    check(not list(destination.glob('.system-controls-install.previous-*')), 'rollback backups must not remain after successful restoration')
+    check(not (destination / '.system-controls-install-transaction').exists(),
+          'successful rollback must remove the real recovery journal')
 
     candidate = destination / '.system-controls.binary.abort'
     candidate_marker = destination / '.system-controls.hash.abort'
@@ -125,7 +190,8 @@ with tempfile.TemporaryDirectory(prefix='system-controls-install-contract.') as 
     check(aborted.returncode != 0, 'interruption after binary rename must fail')
     check(fingerprint(binary) == previous_binary and fingerprint(marker) == previous_marker,
           'interrupted noncommitted transaction must restore exact previous bytes and modes')
-    check(not list(destination.glob('.system-controls-install.previous-*')), 'interruption rollback backups must not remain after restoration')
+    check(not (destination / '.system-controls-install-transaction').exists(),
+          'interruption rollback must remove the real recovery journal')
 
     candidate = destination / '.system-controls.binary.double-signal'
     candidate_marker = destination / '.system-controls.hash.double-signal'
@@ -143,7 +209,8 @@ with tempfile.TemporaryDirectory(prefix='system-controls-install-contract.') as 
     double_process.communicate(timeout=5)
     restored_identities = ((binary.stat().st_dev, binary.stat().st_ino), (marker.stat().st_dev, marker.stat().st_ino))
     check(double_process.returncode != 0 and fingerprint(binary) == previous_binary and fingerprint(marker) == previous_marker and restored_identities == previous_identities, 'second handled signal during rollback must preserve the exact prior pair')
-    check(not list(destination.glob('.system-controls-install.previous-*')), 'double-signal rollback must leave no backup residue')
+    check(not (destination / '.system-controls-install-transaction').exists(),
+          'double-signal rollback must remove the real recovery journal')
 
     candidate = destination / '.system-controls.binary.success'
     candidate_marker = destination / '.system-controls.hash.success'
@@ -446,6 +513,8 @@ with tempfile.TemporaryDirectory(prefix='system-controls-concurrent-rollback.') 
     check(loser.returncode != 0 and recovery_before == {path.name: fingerprint(path) for path in recovery.iterdir()}, 'busy loser mutated a live rollback journal')
     winner.communicate(timeout=5)
     check(winner.returncode != 0 and (fingerprint(binary), fingerprint(marker)) == old_pair, 'locked rollback did not restore the old pair')
+    check(not recovery.exists(),
+          'completed concurrent rollback must remove the real recovery journal')
 
 
 with tempfile.TemporaryDirectory(prefix='system-controls-crash-lock-release.') as raw:
@@ -617,6 +686,12 @@ with tempfile.TemporaryDirectory(prefix='system-controls-lock-contract.') as raw
     check(wrong.returncode != 0 and not wrong_guard.parent.exists(), 'wrong lock guard was accepted or mutated')
     different_script = directory / 'different-transaction.sh'; write(different_script, b'#!/bin/sh\nexit 0\n', 0o755)
     correct_guard = directory / '.system-controls-install.lock' / 'guard'
+    extra_fixture_argument = subprocess.run(
+        [str(secure), 'system-controls-lock-run', str(correct_guard),
+         *transaction_arguments, '--test-fixtures'],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    check(extra_fixture_argument.returncode == 64 and not correct_guard.parent.exists(),
+          'real lock helper accepted the retired transaction fixture sentinel')
     swapped = subprocess.run([str(secure), 'system-controls-lock-run', str(correct_guard), str(different_script), *transaction_arguments[1:]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     check(swapped.returncode != 0 and not correct_guard.parent.exists(), 'noncanonical transaction script was accepted')
     correct_guard.parent.mkdir(mode=0o700); write(correct_guard, b'', 0o644)
@@ -686,7 +761,7 @@ with tempfile.TemporaryDirectory(prefix='system-controls-provenance.') as raw:
         check(pin_result.returncode != 0 and recovery_guard.is_dir() and not any(recovery_guard.iterdir()) and candidate_binary.exists() and candidate_marker.exists() and (live_binary.read_bytes(), live_marker.read_bytes()) == prior_pair, 'invalid or missing caller pin mutated state: ' + str(index))
     recovery_guard.rmdir()
     accepted_publish = subprocess.run(['/bin/sh', str(transaction), str(candidate_binary), str(candidate_marker), str(publish), source_hash], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    check(accepted_publish.returncode == 0 and live_binary.read_bytes() == binary.read_bytes() and live_marker.read_bytes() == provenance_marker(binary), 'exact caller pin did not publish the validated pair')
+    check(accepted_publish.returncode == 0 and live_binary.read_bytes() == binary.read_bytes() and live_marker.read_bytes() == provenance_marker(binary), 'exact caller pin did not publish the validated pair: ' + str((accepted_publish.returncode, accepted_publish.stderr)))
     accepted_pair = (live_binary.read_bytes(), live_marker.read_bytes())
     write(candidate_binary, binary.read_bytes(), 0o755)
     write(candidate_marker, provenance_marker(candidate_binary, binary_hash='0' * 64), 0o644)

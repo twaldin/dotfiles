@@ -6,37 +6,21 @@ local year, month = calendar.shift_month(2026, 1, -1); equal(year, 2025, "Dec pr
 year, month = calendar.shift_month(2026, 12, 1); equal(year, 2027, "Jan next year"); equal(month, 1, "Jan next month")
 equal(calendar.days_in_month(2028, 2), 29, "leap February"); equal(calendar.days_in_month(2027, 2), 28, "ordinary February")
 local cells = calendar.month_cells(2026, 8); equal(#cells, 42, "cell count"); equal(cells[1].key, "2026-07-26", "first overflow"); equal(cells[7].key, "2026-08-01", "Saturday mapping"); equal(cells[42].key, "2026-09-05", "last overflow")
-equal(calendar.countdown({title="x", start=2000, ["end"]=2900}, 1400).detail, "in 10m · 15m", "before countdown")
-equal(calendar.countdown({title="x", start=2000, ["end"]=2900}, 2420).detail, "ends in 8m · 15m", "during countdown keeps duration")
+equal(calendar.countdown({title="x", start=2000, ["end"]=2900}, 1400).detail, "in 10m", "before countdown")
+equal(calendar.countdown({title="x", start=2000, ["end"]=2900}, 2420).detail, "ends 8m", "during countdown")
 equal(calendar.countdown({title="x", start=2000, ["end"]=2900}, 3000).phase, "ended", "ended countdown")
 equal(calendar.countdown({title="x", start=2000, ["end"]=2900}, 2000).phase, "during", "start equals now active")
 equal(calendar.countdown({title="x", start=2000, ["end"]=2900}, 2900).phase, "ended", "end equals now ended")
 equal(calendar.countdown({title="x", start=2000, ["end"]=1900}, 1800).phase, "unavailable", "invalid interval")
-equal(calendar.countdown({title="x", start=1000, ["end"]=2000, allDay=true}, 500).detail, "in 9m · all day", "future all-day countdown")
+equal(calendar.countdown({title="x", start=1000, ["end"]=2000, allDay=true}, 500).detail, "in 9m", "future all-day countdown")
 equal(calendar.countdown({title="x", start=1000, ["end"]=2000, allDay=true}, 1200).detail, "all day", "active all-day countdown")
 equal(calendar.countdown({title="x", start=1000, ["end"]=2000, allDay=true}, 2000).phase, "ended", "all-day exclusive end")
-equal(calendar.meeting_url({url="https://zoom.us/j/123", notes="https://meet.google.com/abc-defg-hij"}), "https://zoom.us/j/123", "explicit URL preferred")
-equal(calendar.meeting_url({notes="join https://meet.google.com/abc-defg-hij."}), "https://meet.google.com/abc-defg-hij", "notes URL")
-equal(calendar.meeting_url({url="https://example.com/not-meeting", notes="join https://us02web.zoom.us/j/123?pwd=a&amp;b=c"}), "https://us02web.zoom.us/j/123?pwd=a&b=c", "unsafe explicit falls through and decodes HTML")
-assert(calendar.safe_meeting_url("https://teams.microsoft.com/l/meetup-join/19%3ameeting") ~= nil, "Teams join")
-assert(calendar.safe_meeting_url("https://zoom.us/wc/join/123456789") ~= nil, "Zoom web join")
-assert(calendar.safe_meeting_url("https://zoom.us:443/j/123456789") ~= nil, "explicit HTTPS port")
-assert(calendar.safe_meeting_url("https://zoom.us:444/j/123456789") == nil, "unsafe port")
-assert(calendar.safe_meeting_url("https://zoom.us/j/" .. string.rep("1", 5000)) == nil, "bounded meeting URL")
-assert(calendar.safe_meeting_url("https://acme.webex.com/meet/person") ~= nil, "Webex meet")
-assert(calendar.safe_meeting_url("http://zoom.us/j/123") == nil, "HTTPS required")
-assert(calendar.safe_meeting_url("https://zoom.us/") == nil, "meeting path required")
-assert(calendar.safe_meeting_url("https://zoom.us.evil.example/j/1") == nil, "suffix attack")
-assert(calendar.safe_meeting_url("https://zoom.us@evil.example/j/1") == nil, "userinfo attack")
-assert(calendar.safe_meeting_url("javascript:alert(1)") == nil, "scheme attack")
-
 local tokens = { record = "__R__", property = "__P__", newline = "__N__" }
 local output = "__R__Later__P__2026-08-07 at 15:45:00 -0700 - 16:15:00 -0700__P__uid: later\n" ..
-  "__R__Earlier__P__2026-08-07 at 09:00:00 -0700 - 09:15:00 -0700__P__notes: Join https://meet.google.com/abc-defg-hij.__P__uid: earlier\n"
+  "__R__Earlier__P__2026-08-07 at 09:00:00 -0700 - 09:15:00 -0700__P__uid: earlier\n"
 local parsed, parse_error = calendar.parse_events(output, tokens)
 assert(parsed and not parse_error and #parsed == 2, "structured event parse")
 equal(parsed[1].title, "Earlier", "chronological structured sort")
-equal(parsed[1].meeting_url, "https://meet.google.com/abc-defg-hij", "structured safe link")
 assert(parsed[1].sort_id == nil and parsed[1].sort_rank == 1 and parsed[2].sort_rank == 2, "raw UID discarded after stable sort")
 local chained_emoji = "👩" .. utf8.char(0x200d) .. "💻" .. utf8.char(0x200d) .. "👩"
 local emoji_event = assert(calendar.parse_events("__R__" .. chained_emoji .. "__P__2026-08-07 at 12:00:00 -0700 - 12:30:00 -0700__P__uid: emoji", tokens))[1]
@@ -53,7 +37,7 @@ local stripped_title_batch = "__R__" .. utf8.char(0xe123) .. "__P__2026-08-07 at
 local stripped_title_events = assert(calendar.parse_events(stripped_title_batch, tokens))
 equal(#stripped_title_events, 2, "fully stripped title does not discard valid batch")
 equal(stripped_title_events[1].title, "Upcoming event", "fully stripped title gets generic fallback")
-local multiline = "__R__Lines__P__2026-08-07 at 10:00:00 -0700 - 11:00:00 -0700__P__notes: first__N__second__N__https://zoom.us/wc/join/123456789__P__uid: lines"
+local private_property = "__R__Private__P__2026-08-07 at 10:00:00 -0700 - 11:00:00 -0700__P__notes: not requested__P__uid: private"
 local raw_all_day = "__R__Multi-day raw__P__2026-08-20 - 2026-08-22__P__uid: raw-multi-day"
 local raw_all_day_events = assert(calendar.parse_events(raw_all_day, tokens))
 equal(raw_all_day_events[1].duration_days, 3, "icalBuddy inclusive all-day range becomes exclusive three-calendar-day interval")
@@ -70,8 +54,8 @@ assert(calendar.select_summary({ dst_all_day }, dst_all_day["end"]) == nil, "DST
 equal(calendar.countdown(dst_all_day, dst_before).phase, "before", "DST all-day countdown is upcoming before start")
 equal(calendar.countdown(dst_all_day, dst_final_day).detail, "all day", "DST all-day countdown is active on final day")
 equal(calendar.countdown(dst_all_day, dst_all_day["end"]).phase, "ended", "DST all-day countdown ends at exclusive midnight")
-local multiline_events = assert(calendar.parse_events(multiline, tokens))
-equal(multiline_events[1].meeting_url, "https://zoom.us/wc/join/123456789", "all newline sentinels decoded before safe-link extraction")
+assert(calendar.parse_events(private_property, tokens) == nil,
+  "unrequested private Calendar properties fail closed")
 assert(calendar.parse_events("__R____R__Broken__P__2026-08-07__P__uid: x", tokens) == nil, "adjacent sentinel rejected")
 assert(calendar.parse_events("__R__Broken only title", tokens) == nil, "partial record rejected")
 assert(calendar.parse_events("__R__A__P__2026-08-07__P__uid: same__R__B__P__2026-08-07__P__uid: same", tokens) == nil, "duplicate identity rejected")
@@ -100,15 +84,15 @@ equal(next_chosen.title, "at boundary", "start equals now is active summary")
 assert(calendar.select_summary({{ title = "ended boundary", start = 200, ["end"] = 300, sort_id = "x" }}, 300) == nil, "end equals now excluded")
 local future_all_day = { title = "future all day", start = 500, ["end"] = 900, allDay = true, sort_rank = 1 }
 equal(calendar.select_summary({ future_all_day }, 300).title, "future all day", "future all-day fallback selection")
-equal(calendar.countdown(future_all_day, 300).detail, "in 4m · all day", "future all-day summary is not presented as active")
+equal(calendar.countdown(future_all_day, 300).detail, "in 4m", "future all-day summary is not presented as active")
 
 
-local max_before = calendar.countdown({ title = "x", start = 1000 + 8 * 86400, ["end"] = 1000 + 38 * 86400 }, 1000).detail .. " ↗"
-local max_active = calendar.countdown({ title = "x", start = 1000 - 22 * 86400, ["end"] = 1000 + 8 * 86400 }, 1000).detail .. " ↗"
+local max_before = calendar.countdown({ title = "x", start = 1000 + 8 * 86400, ["end"] = 1000 + 38 * 86400 }, 1000).detail
+local max_active = calendar.countdown({ title = "x", start = 1000 - 22 * 86400, ["end"] = 1000 + 8 * 86400 }, 1000).detail
 assert(#max_before <= 24 and #max_active <= 24, "fixed supporting column has bounded before/active text")
 equal(calendar.compact_duration(1000 * 86400), "99d+", "large day values are capped")
-equal(calendar.countdown({ title = "x", start = 0, ["end"] = 1000 * 86400 }, 1).detail .. " ↗", "ends in 99d+ · 99d+ ↗", "longest active detail fixture")
-equal(calendar.countdown({ title = "x", start = 1000 * 86400, ["end"] = 2000 * 86400 }, 0).detail .. " ↗", "in 99d+ · 99d+ ↗", "longest before detail fixture")
+equal(calendar.countdown({ title = "x", start = 0, ["end"] = 1000 * 86400 }, 1).detail, "ends 99d+", "bounded active detail fixture")
+equal(calendar.countdown({ title = "x", start = 1000 * 86400, ["end"] = 2000 * 86400 }, 0).detail, "in 99d+", "bounded before detail fixture")
 
 local title_glyph = "󰃭"
 local ascii_title = calendar.bounded_event_title(title_glyph, "Review reliability report", 180, 5.4, 24.0)

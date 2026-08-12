@@ -1,0 +1,77 @@
+{
+  "binary": {
+    "executable_sha256": "294491fa38fd025d3c7ea9cb9e5ef7c4238f3da7859a5e082fc63585f25dd909",
+    "version_output": "yabai-v7.1.25"
+  },
+  "capture": {
+    "ambient_process_data_included": false,
+    "method": "read-only exact pinned app executable on the Work reference host"
+  },
+  "config": {
+    "auto_balance": "off",
+    "bottom_padding": "10",
+    "display_arrangement_order": "default",
+    "external_bar": "all:36:0",
+    "focus_follows_mouse": "disabled",
+    "layout": "bsp",
+    "left_padding": "10",
+    "mouse_action1": "move",
+    "mouse_action2": "resize",
+    "mouse_drop_action": "swap",
+    "mouse_follows_focus": "off",
+    "mouse_modifier": "fn",
+    "right_padding": "10",
+    "skip_window_focus_animation": "on",
+    "split_ratio": "0.5500",
+    "split_type": "auto",
+    "top_padding": "10",
+    "window_animation_duration": "0.000000",
+    "window_gap": "8",
+    "window_insertion_point": "last",
+    "window_origin_display": "default",
+    "window_placement": "second_child",
+    "window_zoom_persist": "on"
+  },
+  "expected_rules": [
+    {
+      "app": "^Raycast$",
+      "label": "raycast",
+      "manage": false
+    },
+    {
+      "app": "^System Settings$",
+      "label": "system-settings",
+      "manage": false
+    }
+  ],
+  "launchctl_print_required_fields": [
+    "path = ",
+    "program = "
+  ],
+  "rules_command": [
+    "-m",
+    "rule",
+    "--list"
+  ],
+  "schema": "yabai-7.1.25-runtime-contract-v1",
+  "spaces_command": [
+    "-m",
+    "query",
+    "--spaces"
+  ],
+  "spaces_contract": {
+    "external_spaces_permitted": true,
+    "primary_display": 1,
+    "primary_indices": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ]
+  }
+}

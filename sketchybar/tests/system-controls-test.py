@@ -1,8 +1,10 @@
 #!/usr/bin/python3
+import importlib.util
 import json
 import os
 import pathlib
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -50,22 +52,32 @@ def validate_audio(value):
     check(isinstance(devices, list), 'audio device list is invalid')
     uids = []
     for device in devices:
-        check(isinstance(device, dict) and set(device) == {'directions', 'input', 'name', 'output', 'roles', 'uid'}, 'audio device object is invalid')
+        check(isinstance(device, dict) and set(device) == {'directions', 'eligible_roles', 'input', 'name', 'output', 'roles', 'uid'}, 'audio device object is invalid')
         check(isinstance(device['uid'], str) and device['uid'], 'audio UID is invalid')
         safe_text(device['name'])
         check(isinstance(device['directions'], list) and set(device['directions']).issubset({'input', 'output'}), 'audio directions are invalid')
+        check(isinstance(device['eligible_roles'], list) and set(device['eligible_roles']).issubset({'input', 'output', 'system_output'}), 'audio eligibility is invalid')
         check(isinstance(device['roles'], list) and set(device['roles']).issubset({'input', 'output', 'system_output'}), 'audio roles are invalid')
         for direction in ('input', 'output'):
             state = device[direction]
             if state is None:
                 continue
-            check(set(state) == {'mute', 'volume'}, 'audio direction state is invalid')
+            expected = {'mute', 'volume'}
+            if direction == 'input' and 'active' in state:
+                expected.add('active')
+            check(set(state) == expected, 'audio direction state is invalid')
             volume = state['volume']
             mute = state['mute']
             check(isinstance(volume.get('available'), bool) and isinstance(volume.get('settable'), bool), 'audio volume capability is invalid')
             check(isinstance(mute.get('available'), bool) and isinstance(mute.get('settable'), bool), 'audio mute capability is invalid')
-            check(volume.get('value') is None or isinstance(volume['value'], (int, float)) and 0 <= volume['value'] <= 100, 'audio volume is invalid')
+            check(volume.get('value') is None or isinstance(volume['value'], (int, float)) and not isinstance(volume['value'], bool) and 0 <= volume['value'] <= 100, 'audio volume is invalid')
             check(mute.get('value') is None or isinstance(mute['value'], bool), 'audio mute is invalid')
+            if 'active' in state:
+                check(type(state['active']) is bool,
+                      'audio active-use state must be an exact Boolean')
+                check(direction == 'input' and device['output'] is None
+                      and device['directions'] == ['input'],
+                      'audio active-use state must be input-only and non-duplex')
         uids.append(device['uid'])
     check(len(uids) == len(set(uids)), 'audio UIDs must be unique')
     check(set(item for item in defaults.values() if item is not None).issubset(set(uids)), 'every available audio default must be present in the stable UID inventory')
@@ -94,21 +106,88 @@ def validate_wifi(value):
     return value
 
 
-def execute(binary, arguments, environment=None):
-    return subprocess.run([str(binary)] + arguments, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def execute(binary, arguments, environment=None, input_text=None):
+    return subprocess.run([str(binary)] + arguments, env=environment,
+                          stdin=subprocess.DEVNULL if input_text is None else None,
+                          input=input_text, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+
+
+def execute_bytes(binary, arguments, input_bytes):
+    result = subprocess.run(
+        [str(binary)] + arguments, input=input_bytes,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    try:
+        result.stdout = result.stdout.decode('utf-8', errors='strict')
+        result.stderr = result.stderr.decode('utf-8', errors='strict')
+    except UnicodeDecodeError:
+        raise SystemExit('system-controls byte execution output is not UTF-8')
+    return result
 
 
 source = pathlib.Path(sys.argv[1]).resolve()
-live = len(sys.argv) == 3 and sys.argv[2] == '--live-read'
+live_mode = sys.argv[2] if len(sys.argv) == 3 else None
+check(live_mode in {None, '--live-read', '--live-active-schema'},
+      'system-controls test mode is invalid')
+live = live_mode is not None
+active_schema = live_mode == '--live-active-schema'
 check(source.is_file(), 'system-controls source is missing')
+coordinator_source = source.parent / 'audio-state.py'
+check(coordinator_source.is_file(), 'audio coordinator source is missing')
+sys.dont_write_bytecode = True
+coordinator_spec = importlib.util.spec_from_file_location(
+    'audio_state_system_controls_test', coordinator_source)
+check(coordinator_spec is not None and coordinator_spec.loader is not None,
+      'audio coordinator import specification is unavailable')
+coordinator = importlib.util.module_from_spec(coordinator_spec)
+coordinator_spec.loader.exec_module(coordinator)
+check(callable(getattr(coordinator, 'canonical_identity_bytes', None)),
+      'audio coordinator canonical stdin encoder is unavailable')
 source_text = source.read_text()
 for prohibited in ('killall', 'pkill', 'pgrep', 'pmset', 'networksetup', 'CLLocationManager', 'scanForNetworks', 'setPower', 'SwitchAudioSource'):
     check(prohibited not in source_text, 'prohibited native control surface: ' + prohibited)
-check('ProcessInfo.processInfo.environment' in source_text and 'SYSTEM_CONTROLS_TESTING' in source_text, 'required runtime and compile-only test boundaries are missing')
-check('/usr/bin/caffeinate' in source_text and 'process.arguments = ["-di"]' in source_text, 'caffeinate argv must be exact')
-check('Darwin has no public pidfd equivalent' in source_text and source_text.index('Darwin has no public pidfd equivalent') < source_text.index('let result = termSender(owner.pid)'), 'documented final-identity PID-stop limitation is missing')
-check('KERN_PROCARGS2' in source_text and 'PROC_PIDTBSDINFO' in source_text and 'proc_pidpath' in source_text, 'public process identity boundary is incomplete')
+check('SYSTEM_CONTROLS_TESTING' in source_text,
+      'compile-only system-controls test boundary is missing')
+check('caffeine' not in source_text.lower() and 'KERN_PROCARGS2' not in source_text
+      and 'proc_pidpath' not in source_text,
+      'retired Keep Awake process-control surface must be absent')
+check('kAudioHardwarePropertyProcessObjectList' not in source_text
+      and 'kAudioDevicePropertyHogMode' not in source_text,
+      'microphone active-use state must not collect process identity')
 check('JSONEncoder' in source_text and 'kAudioHardwarePropertyTranslateUIDToDevice' in source_text, 'native JSON/CoreAudio boundaries are incomplete')
+check('IOBluetoothHostController.default()' in source_text and 'kBluetoothHCIPowerStateON' in source_text, 'public IOBluetooth adapter reader is missing')
+check('kAudioDevicePropertyDeviceCanBeDefaultDevice' in source_text and 'kAudioDevicePropertyDeviceCanBeDefaultSystemDevice' in source_text, 'CoreAudio eligibility properties are missing')
+active_use_match = re.search(
+    r'    func activeUse\(device: AudioObjectID\) throws -> Bool\? \{\n(.*?)\n    \}\n\n    func setVolume',
+    source_text, re.DOTALL)
+active_value_match = re.search(
+    r'private func activeUsePropertyValue\(\n(.*?)\n\}\n\nprivate final class CoreAudioBackend',
+    source_text, re.DOTALL)
+check(active_use_match is not None and active_value_match is not None,
+      'CoreAudio active-use read boundary is missing')
+active_use_body = active_use_match.group(1)
+active_value_body = active_value_match.group(1)
+check(active_use_body.count('kAudioDevicePropertyDeviceIsRunningSomewhere') == 2
+      and active_use_body.count('propertyScope.coreAudio') == 2
+      and 'try activeUsePropertyValue(' in active_use_body,
+      'CoreAudio active-use read must bind the selected property scope')
+input_choice = active_value_body.find('if hasProperty(.input)')
+global_choice = active_value_body.find('guard hasProperty(.global) else { return nil }')
+read_choice = active_value_body.find('let sample = try readProperty(propertyScope)')
+check(0 <= input_choice < global_choice < read_choice
+      and 'catch' not in active_value_body,
+      'CoreAudio active-use scope fallback order is invalid')
+check('case .input: return kAudioDevicePropertyScopeInput' in source_text
+      and 'case .global: return kAudioObjectPropertyScopeGlobal' in source_text,
+      'CoreAudio active-use scopes are incomplete')
+check('sample.size == UInt32(MemoryLayout<UInt32>.size)' in active_value_body
+      and 'sample.raw == 0 || sample.raw == 1' in active_value_body,
+      'CoreAudio active-use reads must retain exact UInt32 Boolean validation')
+check('let expectedSize = UInt32(MemoryLayout<UInt32>.size)' in source_text
+      and 'guard size == expectedSize else' in source_text,
+      'other CoreAudio UInt32 reads must retain their exact size contract')
+check('boundedAudioIdentityInput' in source_text and 'maximumBytes = 4096' in source_text and 'FileHandle.standardInput.read(upToCount:' in source_text, 'bounded audio identity stdin boundary is missing')
+check('arguments.count == 3, arguments[0] == "audio", arguments[1] == "set-default"' in source_text and 'input["expected_uid"]' in source_text, 'audio writes must take identities only from bounded stdin')
 
 with tempfile.TemporaryDirectory(prefix='system-controls-test.') as raw:
     base = pathlib.Path(raw).resolve()
@@ -132,17 +211,20 @@ with tempfile.TemporaryDirectory(prefix='system-controls-test.') as raw:
         check(fixtures.get('ok') is True, 'private state fixtures are invalid')
         validate_audio(fixtures.get('audio'))
         validate_wifi(fixtures.get('wifi'))
+        check(fixtures.get('bluetooth') == {'schema': 1, 'ok': True, 'power': 'on'}, 'Bluetooth state fixture is invalid')
         check(set(fixtures.get('audio_write', {})) == {'action', 'mute', 'ok', 'role', 'schema', 'uid', 'volume'} and fixtures['audio_write']['mute'] is None and fixtures['audio_write']['volume'] is None, 'audio write null schema is unstable')
-        check(set(fixtures.get('caffeine_on', {})) == {'ok', 'pid', 'schema', 'stale_marker', 'state'} and fixtures['caffeine_on']['stale_marker'] is None, 'caffeine on null schema is unstable')
-        check(set(fixtures.get('caffeine_off', {})) == {'ok', 'pid', 'schema', 'stale_marker', 'state'} and fixtures['caffeine_off']['pid'] is None, 'caffeine off null schema is unstable')
     one_json(execute(production, ['--self-test']), 64)
     one_json(execute(production, ['--state-fixtures']), 64)
 
     invalid_cases = [
-        [], ['audio'], ['audio', 'raw-property'], ['audio', 'set-default', 'global', 'uid'],
+        [], ['audio'], ['audio', 'raw-property'],
+        ['audio', 'set-default', 'output', 'raw-target', 'raw-default'],
         ['audio', 'set-volume', 'input', '-1'], ['audio', 'set-volume', 'output', '101'],
         ['audio', 'set-volume', 'input', 'nan'], ['audio', 'set-mute', 'system_output', 'on'],
-        ['audio', 'set-mute', 'input', 'toggle'], ['wifi', 'scan'], ['caffeine', 'discover']
+        ['audio', 'set-mute', 'input', 'toggle'],
+        ['audio', 'set-volume', 'output', '50', 'raw-identity'],
+        ['wifi', 'scan'], ['bluetooth', 'toggle'], ['caffeine', 'status'],
+        ['caffeine', 'on'], ['caffeine', 'off'], ['caffeine', 'discover']
     ]
     for arguments in invalid_cases:
         result = execute(production, arguments)
@@ -150,35 +232,70 @@ with tempfile.TemporaryDirectory(prefix='system-controls-test.') as raw:
         check(value.get('ok') is False and value.get('error', {}).get('code') in {'usage', 'invalid_request'}, 'invalid command must fail safely')
         check(set(value.get('error', {})) == {'code', 'fourcc', 'message', 'os_status'} and value['error']['fourcc'] is None and value['error']['os_status'] is None, 'error null schema is unstable')
 
-    isolated = base / 'runtime'
-    isolated.mkdir(mode=0o700)
-    environment = dict(os.environ, TMPDIR=str(isolated))
-    status = one_json(execute(production, ['caffeine', 'status'], environment))
-    check(status.get('state') == 'off' and status.get('stale_marker') is False, 'isolated caffeine status must be off')
-    marker = isolated / ('sketchybar-caffeinate.' + str(os.getuid()) + '.owner')
-    marker.write_text('malformed\n')
-    marker.chmod(0o600)
-    stale = one_json(execute(production, ['caffeine', 'status'], environment))
-    check(stale.get('state') == 'off' and stale.get('stale_marker') is True and marker.read_text() == 'malformed\n', 'status must preserve a stale marker')
-    marker.unlink()
-    target = isolated / 'target'
-    target.write_text('unchanged')
-    marker.symlink_to(target)
-    unsafe = one_json(execute(production, ['caffeine', 'status'], environment), 73)
-    check(unsafe.get('ok') is False and target.read_text() == 'unchanged', 'marker symlink must reject without target mutation')
-    relative = one_json(execute(production, ['caffeine', 'status'], dict(os.environ, TMPDIR='relative')), 73)
-    check(relative.get('ok') is False and not (base / 'relative').exists(), 'relative runtime must reject')
-    weak = base / 'weak-runtime'
-    weak.mkdir(mode=0o755)
-    weak.chmod(0o755)
-    weak_result = one_json(execute(production, ['caffeine', 'status'], dict(os.environ, TMPDIR=str(weak))), 73)
-    check(weak_result.get('ok') is False, 'group/world accessible runtime must reject')
+    hostile_audio_inputs = [
+        '', '{', '[]', '{"expected_uid":1}',
+        '{"expected_uid":"fixture","extra":"unexpected"}',
+        '{"expected_uid":"first","expected_uid":"second"}',
+        ' {"expected_uid":"fixture"}', '{"uid":"fixture"}', 'x' * 4097,
+    ]
+    for input_text in hostile_audio_inputs:
+        value = one_json(execute(
+            production, ['audio', 'set-volume', 'output', '50'],
+            input_text=input_text), 64)
+        check(value.get('ok') is False
+              and value.get('error', {}).get('code') == 'invalid_request',
+              'hostile audio identity stdin must fail before CoreAudio access')
+    default_input = one_json(execute(
+        production, ['audio', 'set-default', 'output'],
+        input_text='{"uid":"fixture","expected_uid":1}'), 64)
+    check(default_input.get('error', {}).get('code') == 'invalid_request',
+          'set-default identity stdin types must be exact')
+
+    canonical_identity = 'sketchybar/audio:stdin-Ω-😀-' + secrets.token_hex(16)
+    positive_stdin_cases = (
+        (['audio', 'set-default', 'output'],
+         {'expected_uid': canonical_identity, 'uid': canonical_identity}),
+        (['audio', 'set-volume', 'output', '50'],
+         {'expected_uid': canonical_identity}),
+        (['audio', 'set-mute', 'input', 'on'],
+         {'expected_uid': canonical_identity}),
+    )
+    for binary in (production, testing_debug, testing_optimized):
+        for arguments, payload in positive_stdin_cases:
+            canonical = coordinator.canonical_identity_bytes(payload)
+            check(canonical == json.dumps(
+                payload, ensure_ascii=False, separators=(',', ':'),
+                sort_keys=True).encode('utf-8'),
+                'positive stdin must use the exact coordinator bytes')
+            accepted = execute_bytes(binary, arguments, canonical)
+            check(accepted.returncode != 64 and accepted.stderr == ''
+                  and accepted.stdout.count('\n') == 1,
+                  'canonical coordinator identity stdin must pass the Swift parser')
+            try:
+                accepted_value = json.loads(accepted.stdout)
+            except json.JSONDecodeError:
+                raise SystemExit('accepted audio identity stdin output is not JSON')
+            check(accepted_value.get('ok') is False
+                  and accepted_value.get('error', {}).get('code')
+                  not in {'usage', 'invalid_request'},
+                  'positive stdin parser case must reach CoreAudio preflight')
 
     if live:
         audio = validate_audio(one_json(execute(production, ['audio', 'state'])))
+        if active_schema:
+            selected_uid = audio['defaults']['input']
+            selected = next((device for device in audio['devices']
+                             if device['uid'] == selected_uid), None)
+            check(selected is not None and selected['directions'] == ['input']
+                  and selected['output'] is None,
+                  'live active-use schema check requires an input-only selected device')
+            check(type(selected['input'].get('active')) is bool,
+                  'live selected input does not expose the exact active-use Boolean')
+            check(all('active' not in device['output']
+                      for device in audio['devices']
+                      if device['output'] is not None),
+                  'live output state exposed active use')
         wifi = validate_wifi(one_json(execute(production, ['wifi', 'state'])))
-        caffeine = one_json(execute(production, ['caffeine', 'status']))
-        check(caffeine.get('state') == 'off' and caffeine.get('stale_marker') is False, 'bar-owned caffeine must be off on the read-only host probe')
         check(wifi['association'] != 'associated' or wifi['mode'] == 'station', 'associated wifi must use station mode')
 
-print('System controls pure, compile, ownership, and privacy-safe read contracts passed' if live else 'System controls pure, compile, and ownership contracts passed')
+print('System controls pure, compile, and privacy-safe read contracts passed' if live else 'System controls pure, compile, and public control contracts passed')

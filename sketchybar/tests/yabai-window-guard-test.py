@@ -18,18 +18,21 @@ focus_source = pathlib.Path(sys.argv[2]).resolve()
 query_source = pathlib.Path(sys.argv[3]).resolve()
 front_source = pathlib.Path(sys.argv[4]).resolve()
 front_text = front_source.read_text()
-for forbidden in ('settings.paths.yabai', 'yabai-windows.sh', 'focus-window.sh', 'lib.shell',
-                  'lib.icons', 'lib.window_pages', 'front_app_switched', 'popup.action',
-                  'popup.on_click', 'mouse.clicked', 'sbar.exec'):
-    check(forbidden not in front_text, f'front-window privacy quarantine retains {forbidden}')
-for required in ('App / title  Native privacy view', 'Window list  Native privacy view',
-                 'Focus window  Provider unavailable', 'Move / swap / resize  Unavailable',
-                 'Close / minimize / zoom  Unavailable', 'Space / display actions  Unavailable'):
-    check(required in front_text, f'front-window privacy quarantine misses {required}')
+for required in ('yabai-windows.sh', 'focus-window.sh', 'lib.shell', 'lib.icons',
+                 'lib.window_pages', 'front_app_switched', 'popup.action',
+                 'popup.on_click', 'window.app', 'window.title', 'window.id'):
+    check(required in front_text, f'front-window integration misses {required}')
+check('Native privacy view' not in front_text and 'Provider unavailable' not in front_text,
+      'front-window static privacy fallback remains')
+check('background = { drawing = false' in front_text and
+      front_text.count('idle_background = false') >= 2,
+      'front-window idle background must stay hidden')
 
 with tempfile.TemporaryDirectory(prefix='yabai-window-guard-test.') as raw:
     base = pathlib.Path(raw)
-    fake = base / 'fake-yabai'
+    home = base / 'home'
+    fake = home / 'Applications/Yabai.app/Contents/MacOS/yabai'
+    fake.parent.mkdir(parents=True)
     guard = base / 'yabai-guard.py'
     focus = base / 'focus-window.sh'
     query = base / 'yabai-windows.sh'
@@ -44,8 +47,8 @@ with tempfile.TemporaryDirectory(prefix='yabai-window-guard-test.') as raw:
     calls = base / 'calls'
     focused = base / 'focused'
     shutil.copy2(guard_source, guard)
-    focus.write_text(focus_source.read_text().replace('/opt/homebrew/bin/yabai', str(fake)))
-    query.write_text(query_source.read_text().replace('/opt/homebrew/bin/yabai', str(fake)))
+    focus.write_text(focus_source.read_text())
+    query.write_text(query_source.read_text())
     for path in (guard, focus, query):
         path.chmod(0o755)
     fake.write_text('''#!/bin/sh
@@ -67,7 +70,7 @@ case "$*" in
 esac
 ''')
     fake.chmod(0o755)
-    environment = dict(os.environ, FAKE_YABAI_CALLS=str(calls), FAKE_YABAI_SPACES=str(spaces_file), FAKE_YABAI_SPACES_SECOND=str(spaces_second), FAKE_YABAI_SPACES_THIRD=str(spaces_third), FAKE_YABAI_SPACES_COUNT=str(spaces_count), FAKE_YABAI_WINDOWS=str(windows_file), FAKE_YABAI_WINDOWS_SECOND=str(windows_second), FAKE_YABAI_WINDOWS_COUNT=str(windows_count), FAKE_YABAI_CURRENT=str(current_file), FAKE_YABAI_FOCUSED=str(focused))
+    environment = dict(os.environ, HOME=str(home), FAKE_YABAI_CALLS=str(calls), FAKE_YABAI_SPACES=str(spaces_file), FAKE_YABAI_SPACES_SECOND=str(spaces_second), FAKE_YABAI_SPACES_THIRD=str(spaces_third), FAKE_YABAI_SPACES_COUNT=str(spaces_count), FAKE_YABAI_WINDOWS=str(windows_file), FAKE_YABAI_WINDOWS_SECOND=str(windows_second), FAKE_YABAI_WINDOWS_COUNT=str(windows_count), FAKE_YABAI_CURRENT=str(current_file), FAKE_YABAI_FOCUSED=str(focused))
     exact = [{'index': index, 'display': 1, 'has-focus': index == 1} for index in range(1, 10)] + [{'index': 10, 'display': 2, 'has-focus': False}]
     windows = [{'id': 11, 'space': 1, 'app': 'Safari', 'title': 'Synthetic'}, {'id': 22, 'space': 2, 'app': 'Calendar', 'title': 'Synthetic'}]
     windows.extend({'id': 100 + index, 'space': (index % 9) + 1, 'app': 'Finder', 'title': 'Primary synthetic'} for index in range(11))

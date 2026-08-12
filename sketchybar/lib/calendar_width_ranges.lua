@@ -1,8 +1,10 @@
--- Conservative outlier blocks for JetBrainsMonoNF-SemiBold at 9 points and
+-- Conservative outlier blocks for JetBrainsMonoNF-SemiBold at 11.5 points and
 -- its supported Tahoe fallback cascade. The release gate rescans every
 -- sanitizer-reachable Unicode scalar and rejects any uncovered wider glyph.
 local M = {
   oversized = {
+    0x102a, 0x102a,
+    0x2e3b, 0x2e3b,
     0xfb50, 0xfdff,
     0x12000, 0x1257f,
   },

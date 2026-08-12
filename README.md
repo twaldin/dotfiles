@@ -14,7 +14,7 @@ my dotfiles: raw nvim on native vim.pack, zsh, tmux, Ghostty, native macOS windo
 | `terminal/ghostty/` | Ghostty config — Hardcore theme, JetBrains Nerd Font |
 | `yabai/` + `skhd/` | recursive native-Space BSP, guarded activation, signed Accessibility wrappers |
 | `aerospace/` | inactive, reversible window-manager fallback |
-| `sketchybar/` | pinned SbarLua bar, native calendar, supported status and control surfaces |
+| `sketchybar/` | pinned SbarLua bar, static calendar status, supported status and control surfaces |
 | `scripts/` | tmux-sessionizer, Ghostty base16 theme switcher, Claude statusline |
 | `zen/` | zen browser userChrome.css + mods export |
 
@@ -53,7 +53,7 @@ tmux plugins need [tpm](https://github.com/tmux-plugins/tpm); nvim pulls its own
 
 The window-manager slice targets Apple-silicon macOS Tahoe. The checked-in launch agents use the macOS short name `twaldin`. For a different account, first replace every wrapper and log path in both plists with that account's absolute paths, then run `plutil -lint` on both files. The activation script rejects paths that do not match the current account or fixed platform prerequisites.
 
-The window-manager scripts fail closed. Create nine native Spaces, install the signed wrappers with `yabai/install-accessibility-wrappers.sh`, approve only those wrappers in Accessibility, then run `yabai/activate-yabai.sh`. Use `yabai/activate-aerospace-rollback.sh` for the guarded rollback. Never run both window managers together.
+The window-manager lifecycle fails closed. On first Home adoption, stop the old yabai/skhd jobs, back up and remove prior launch-agent symlinks, and back up and remove the prior real `~/.config/{yabai,skhd,aerospace}` directories. Create native Spaces 1 through 9 on primary display 1 (external displays may have additional Spaces), publish only reviewed app bundles, run `/usr/bin/python3 -I yabai/deploy-lifecycle.py prepare --adopt-existing`, attest the exact Accessibility approvals, and then run its `activate` action. Use the same module's `rollback` action for guarded fallback. Never run both window managers together.
 
 Install SketchyBar dependencies with `sketchybar/install-deps.sh`, run `sketchybar/scripts/smoke-config.sh`, and reload only after both pass. See `sketchybar/OPERATIONS.md` for permissions, runtime checks, and rollback.
 

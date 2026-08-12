@@ -1,206 +1,156 @@
-# yabai basic-mode operations
+# yabai and skhd operations
 
-This setup uses yabai 7.1.25 and skhd 0.3.9 from `asmvik/formulae`.
-System Integrity Protection stays fully enabled. Do not install or load the
-scripting addition. This configuration targets Apple-silicon macOS Tahoe. The
-activation path requires Homebrew yabai at `/opt/homebrew/bin/yabai`, the Tahoe
-system `jq` at `/usr/bin/jq`, and `/usr/libexec/PlistBuddy`; it fails before
-cutover when one is absent.
+`deploy-lifecycle.py` is the only supported build, installation, activation, and rollback entrypoint. The runtime configuration remains in `yabairc` and `../skhd/skhdrc`.
 
-## Ownership
+## Fixed Home deployment
 
-- Karabiner changes Caps Lock into Hyper: Command-Control-Option-Shift.
-- skhd owns the window and Space chords in the table below.
-- Raycast keeps only non-conflicting Hyper application shortcuts.
-- yabai manages recursive BSP trees on native macOS Spaces.
-- AeroSpace is an installed rollback. It must not run with yabai.
+The reviewed Home deployment uses these exact bundles:
 
-Remove global shortcuts from Raycast **Window Management** actions. Do not
-remove Raycast application shortcuts. macOS symbolic Hyper-1...4 shortcuts
-must stay disabled because skhd owns Hyper-number.
+- `/Users/twaldin/Applications/Yabai.app`
+- `/Users/twaldin/Applications/skhd.app`
+- `/Applications/AeroSpace.app`
 
-## Keys
+The lifecycle manifest binds their bundle identifiers, versions, architectures, executable and `Info.plist` SHA-256 values, CDHashes, source pins, launch-agent bytes, all three launch labels, and the exact fallback path. A change to either ad-hoc-signed primary app invalidates its Accessibility approval.
 
-| Keys | Action |
-| --- | --- |
-| Hyper-H/J/K/L or Hyper-arrows | Focus the adjacent window |
-| Option-Shift-H/J/K/L or Option-Shift-arrows | Move the focused BSP node |
-| Hyper-1...9 | Focus native Space 1...9 |
-| Option-Shift-1...9 | Send the window to native Space 1...9 and follow it |
-| Option-Tab | Focus the recent window |
-| Option-Return | Toggle yabai zoom fullscreen |
-| Option-Backtick | Toggle floating |
-| Option-0 | Balance the current BSP tree |
-| Option-minus/equal | Shrink or grow the focused BSP pane by 0.05 |
+The primary labels are:
 
-Hyper already contains Shift. Hyper-Shift-1 is therefore the same physical
-chord as Hyper-1. Option-Shift-number is the separate send chord.
-Option-Left/Right remain available for native word movement. skhd owns
-Option-Shift-Left/Right for window movement, so those two chords no longer
-perform native word selection.
+- `com.asmvik.yabai`
+- `com.koekeishiya.skhd`
+- alternate legacy label `com.asmvik.skhd`
 
-## Native Spaces
+Every prepare, activation, recovery, and rollback operation gates all three labels.
 
-The primary yabai display (`display == 1`, the built-in display on the current
-hosts) owns global Space indices 1 through 9. Create missing Spaces with the
-Mission Control `add desktop` button. Basic-mode yabai cannot create or destroy
-Spaces. It can focus an existing Space with its gesture fallback and can move a
-window to an existing Space on this macOS version. External displays can own
-additional Spaces, but activation fails unless the primary display still owns
-exactly indices 1 through 9 because the keyboard map addresses those indices.
+## State model
 
-Check the live set:
+The command reports typed states instead of raw process data:
+
+- Transaction: `CLEAN`, `APP_RECOVERY_REQUIRED`, `SUPPORT_RECOVERY_REQUIRED`, or `CONFLICTED_RECOVERY`.
+- Lanes: `UNKNOWN_UNSAFE`, `PARTIAL_UNSAFE`, `PRIMARY_OFF`, `PRIMARY_OFF_FALLBACK_UNAVAILABLE`, `FALLBACK_ACTIVE`, or `PRIMARY_ACTIVE`.
+- Deployment: `IDENTITY_INVALID`, `SUPPORT_NOT_READY`, `APPROVAL_REQUIRED`, `READY`, or `RUNTIME_ACCEPTED`.
+
+No successful state permits AeroSpace with yabai, two skhd lanes, an enabled unloaded alternate job, a mixed app pair, or an unresolved journal.
+Support journals use typed phases. Recovery rolls back only an incomplete support transaction. If the exact support objects, manifest, and app pair reached `committed`, recovery retains them and removes only the stale committed journal.
+
+## First adoption
+
+Run from the checked-out repository. `status` emits typed point-in-time state, does not wait for runtime convergence, and emits no receipt, so routine diagnostics do not grow the receipt directory:
 
 ```sh
-yabai -m query --spaces | jq '.[] | {index, windows, "has-focus"}'
+/usr/bin/python3 -I yabai/deploy-lifecycle.py status
+/usr/bin/python3 -I yabai/deploy-lifecycle.py prepare --adopt-existing
 ```
 
-The bar must build its Space list from this query. It must not use AeroSpace
-workspace data while yabai is active.
+Preparation verifies all three apps and every support destination before it changes a launch label. It also refuses to adopt while any prior yabai/skhd process or launch job is active; stop that prior primary manager through its own safe lifecycle first. The preflight requires each config destination to be absent or already point to the reviewed target, each launch-agent destination to be absent or an exact mode-0600 copy, each private log directory to be absent or exact, and each legacy log name to be absent or a safe owned regular file. It refuses prior real config directories and prior launch-agent symlinks before it stops any primary lane.
 
-## macOS 26 Accessibility wrappers
+After that preflight, preparation converges every primary label off and disabled, installs three exact configuration links plus mode-0600 launch-agent files, creates mode-0700 private log directories, removes the four exact legacy shared-log names, and verifies the app pair again. It does not replace, sign, modify, or rebuild the approved primary apps. The result is `APPROVAL_REQUIRED` and contains the manifest digest. `yabairc` and `skhdrc` call `/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai` directly; the lifecycle does not create or change Homebrew command links.
 
-macOS 26.1 and 26.2 have an Apple-confirmed bug for standalone command-line
-Accessibility clients. This repo builds normal app bundles at fixed paths:
+After the operator confirms that both exact primary apps are enabled in System Settings > Privacy & Security > Accessibility, bind that confirmation to the current manifest:
 
 ```sh
-./yabai/install-accessibility-wrappers.sh
+/usr/bin/python3 -I yabai/deploy-lifecycle.py attest-accessibility --manifest-digest MANIFEST_SHA256
 ```
 
-Add these apps in **System Settings > Privacy & Security > Accessibility**:
+The module does not inspect or change TCC. The attestation is invalid after any manifest or app-pair change. Add and enable the exact `/Applications/AeroSpace.app` fallback in Accessibility too; fallback permission is an attended rollback prerequisite and is not part of the two-app primary attestation.
 
-- `~/Applications/Yabai.app`
-- `~/Applications/skhd.app`
+## Activation
 
-The launch agents run the matching `Contents/MacOS` paths. Approval for the
-Homebrew paths does not approve these wrapper executables.
-
-The wrappers use ad-hoc signatures. Their paths and bundle IDs are stable, but
-their code requirements are not stable after a binary or `Info.plist` change.
-After every yabai or skhd upgrade:
-
-1. Stop and disable both services.
-2. Confirm that no `yabai` or `skhd` process is active.
-3. Run the wrapper installer.
-4. Remove stale Accessibility rows if macOS does not match the new code.
-5. Add and enable both wrapper apps again.
-6. Verify both signatures.
-7. Start yabai and verify its socket before you start skhd.
-
-The installer derives the installed versions, builds and verifies both apps
-before replacement, and restores both old apps if the pair replacement fails.
-It refuses to replace a running wrapper.
-
-## Launch agents
-
-The repository owns the two launch-agent definitions:
+AeroSpace must be fully stopped by the operator before activation. If the status is `FALLBACK_ACTIVE`, `activate` makes no primary transition and requests that attended step.
 
 ```sh
-ln -sfn "$PWD/yabai/launch-agents/com.asmvik.yabai.plist"   "$HOME/Library/LaunchAgents/com.asmvik.yabai.plist"
-ln -sfn "$PWD/yabai/launch-agents/com.koekeishiya.skhd.plist"   "$HOME/Library/LaunchAgents/com.koekeishiya.skhd.plist"
+/usr/bin/python3 -I yabai/deploy-lifecycle.py activate
 ```
 
-They use a fixed system PATH. They restart a crash, but they do not restart a
-normal permission failure. The checked-in wrapper and log paths use the macOS
-short name `twaldin`. For another account, replace those absolute values in
-both plists before linking them, then run `plutil -lint` on both files. The
-activation script rejects wrapper or log paths that do not match the current
-account.
+Activation starts yabai first. It then proves the exact launch job, executable path, process lane, configuration, two rules, and native Spaces 1 through 9 on primary display 1. Additional native Spaces on external displays are permitted. Only then does it start the intended skhd lane and recheck the alternate label, fallback absence, and all primary state. A failure converges all primary labels off and starts only the exact `/Applications/AeroSpace.app` fallback after that proof.
 
-Use the fail-closed activation script for a controlled start:
+Process presence does not prove Accessibility or hotkey behavior. Before runtime acceptance, physically test:
+
+1. Hyper-H/J/K/L and Hyper-arrow directional focus.
+2. Hyper-1 through Hyper-9 native Space focus.
+3. Option-Shift-1 through Option-Shift-9 send-and-follow.
+
+Do not use synthetic input for acceptance. The activation receipt filename contains its SHA-256, so acceptance resolves one exact receipt without scanning and hashing the full directory. After those tests pass, bind the operator result to the activation receipt:
 
 ```sh
-./yabai/activate-yabai.sh
+/usr/bin/python3 -I yabai/deploy-lifecycle.py accept-runtime --activation-receipt-sha256 ACTIVATION_RECEIPT_SHA256
 ```
 
-It refuses to start if AeroSpace, yabai, or skhd is active or if either launch
-agent is already loaded. It verifies both wrapper signatures and plists, starts
-yabai first, waits for the final BSP config, and only then starts skhd. If a
-cutover step fails, it disables both primary jobs and restores AeroSpace only
-after safe process inspection proves that yabai and skhd are absent.
+## Rollback and recovery
 
-A first app-bundle launch can take several seconds. The socket can answer
-before `yabairc` finishes, so the script verifies both the query and final
-config values.
-
-Reload the hotkey file without restarting:
+Rollback always attempts bootout and disable for all three labels. Individual command errors do not end the sequence. Final job, disabled-state, and anonymous process readbacks decide success. Fallback absence never blocks primary shutdown.
 
 ```sh
-skhd -r
+/usr/bin/python3 -I yabai/deploy-lifecycle.py rollback
+/usr/bin/python3 -I yabai/deploy-lifecycle.py recover
 ```
 
-Logs:
+Rollback launches the fallback by its exact absolute path. It never uses application-name lookup. Recovery is idempotent. Unknown or ambiguous objects are preserved and block activation.
+
+## Candidate build and pair publication
+
+`build-only` is the sole wrapper identity-generation path. Give it independently reviewed source hashes, versions, and architectures. It opens source files without following links, copies and hashes from the same descriptor, verifies the staged copy before execution, builds and signs into a new mode-0700 directory, retains all artifacts, and emits `identity.json`. It cannot publish.
 
 ```sh
-tail -n 100 "/tmp/yabai_$USER.err.log"
-tail -n 100 "/tmp/skhd_$USER.err.log"
+/usr/bin/python3 -I yabai/deploy-lifecycle.py build-only \
+  --output "$HOME/Library/Application Support/dotfiles-deploy/wm-lifecycle-v1/candidate-VERSION" \
+  --yabai-source /ABSOLUTE/PATH/yabai \
+  --skhd-source /ABSOLUTE/PATH/skhd \
+  --yabai-source-sha256 REVIEWED_SHA256 \
+  --skhd-source-sha256 REVIEWED_SHA256 \
+  --yabai-version VERSION \
+  --skhd-version VERSION \
+  --yabai-archs 'x86_64 arm64' \
+  --skhd-archs 'arm64'
 ```
 
-## Geometry
+Before a primary version bump, copy the currently deployed `AppSpec` values into `PREVIOUS_APP_SPECS`, then replace the current specs with the independently reviewed candidate identities. The table is empty in the first baseline because no earlier lifecycle-managed pair is approved. A future upgrade without an explicit outgoing identity is intentionally rejected. The contract suite publishes approved version B over approved version A and exercises crash recovery back to A.
 
-SketchyBar occupies the top 32 points. yabai reserves it with
-`external_bar all:32:0`, then applies 10-point outer padding and 8-point window
-gaps. On the built-in 1512-by-982 display, the managed origin is `x=10, y=42`.
-Window animation duration is explicitly `0.0`, so Screen Recording permission
-is not required.
-
-The default root split is 0.55. Discord has an application minimum width near
-800 points. yabai cannot discover or override application minimum sizes. Put
-large applications on separate Spaces or use a compatible tree. Do not balance
-a hand-adjusted tree unless equal ratios are wanted.
-
-Raycast and System Settings are unmanaged overlays. Native macOS window shadows
-stay enabled. Forced shadow control is outside basic mode.
-
-## Durable rollback to AeroSpace
-
-Use the fail-closed rollback script:
+The fallback is also lifecycle-owned and byte-pinned. Do not run `brew upgrade --cask aerospace` against `/Applications/AeroSpace.app`. For a reviewed fallback update, first copy the outgoing `AEROSPACE_SPEC` into `PREVIOUS_FALLBACK_SPECS`. Independently audit the official signed candidate and record its bundle metadata, version output, architectures, executable SHA-256, `Info.plist` SHA-256, canonical tree SHA-256, and CDHash in the new `AEROSPACE_SPEC`. Verify those independently obtained pins without executing unpinned candidate bytes:
 
 ```sh
-./yabai/activate-aerospace-rollback.sh
+/usr/bin/python3 -I yabai/deploy-lifecycle.py verify-fallback-candidate \
+  --path /ABSOLUTE/REVIEWED/AeroSpace.app \
+  --short-version VERSION \
+  --bundle-version NONE \
+  --version-output 'EXACT VERSION OUTPUT' \
+  --archs 'x86_64 arm64' \
+  --executable-sha256 REVIEWED_SHA256 \
+  --info-sha256 REVIEWED_SHA256 \
+  --tree-sha256 REVIEWED_SHA256 \
+  --cdhash REVIEWED_CDHASH
 ```
 
-It unloads and disables skhd before yabai. It opens AeroSpace only after
-process inspection proves that both primary processes are absent. It aborts on
-an inspection error instead of treating that error as a safe state.
+Obtain a new source review before publishing that exact candidate to `/Applications/AeroSpace.app`. Previous reviewed fallback identities remain accepted during the transition. The lifecycle intentionally refuses root-owned package or MDM copies because this Home deployment requires the exact user-owned app identity.
 
-For a full security rollback, also remove both wrapper rows from Accessibility
-and remove the wrapper apps if they will not be evaluated again. Keep
-AeroSpace `start-at-login` false during yabai evaluation. Never run both window
-managers.
+Copy candidate app identities into the runtime manifest only after independent review. Then publish the exact reviewed pair while every primary lane is off:
 
-## Basic-mode boundary
+```sh
+/usr/bin/python3 -I yabai/deploy-lifecycle.py publish-pair --source-root /ABSOLUTE/REVIEWED/CANDIDATE
+```
 
-Do not run `yabai --load-sa`. Whole-Space creation, destruction, reordering,
-and direct switching need the scripting addition. Forced shadows, opacity,
-sticky windows, custom layers, and nonzero yabai animations are also outside
-this setup.
+Pair publication uses a destination-filesystem transaction directory, a mode-0600 fsynced write-ahead manifest before every rename, an exclusive lock, exact object identities, signal recovery, and old-or-new pair convergence. It never deletes an unknown object.
 
-## Validation status
+## Logs and runtime files
 
-On the Work host, the wrapper workaround and the window-manager runtime were
-live-proven on 2026-08-06 before the account-path guard was added. AeroSpace is
-stopped. Wrapper-backed yabai and skhd are active, and the yabai socket answers
-queries. Historical key automation supplied smoke coverage for Hyper focus and Space
-navigation before the current no-synthetic-HID rule. It is not acceptance
-proof. Nine native Spaces exist. Option-Shift-number distributed live windows
-across native Spaces. The live config reports BSP layout, split ratio 0.55,
-10-point padding, 8-point gaps, a 32-point external bar, and zero animation.
-Each host still needs attended physical-key verification before skhd or its
-hotkeys are accepted.
+Launch-agent stdout and stderr redirects use:
 
-The account-path guard has passed ShellCheck, shell syntax checks, plist lint,
-and exact read-only comparisons against the current Work plists. It was not
-invoked because the active services must not be disturbed. When it is actually
-run on a new host, a successful guarded activation is expected to verify the
-account-specific plist values, wrapper signatures, yabai socket, final yabai
-configuration, and process survival. It does not prove skhd Accessibility
-approval or hotkey registration:
-`skhd` can remain alive when those controls do not work. After activation, use
-physical keys to verify directional focus, Space focus, and send-and-follow.
-Exercise rollback separately under attended conditions; do not use synthetic
-HID or treat process presence as keyboard proof.
+- `~/Library/Logs/yabai/`
+- `~/Library/Logs/skhd/`
 
-Remaining manual checks are physical-key feel, Raycast Window Management
-shortcut cleanup, guarded rollback on the Home host, and final SketchyBar
-visual and interaction acceptance.
+Both directories are mode 0700. Both launch agents apply umask 077. The redirects no longer target shared `/tmp` paths.
+
+The programs still create their required private runtime paths in `/tmp`, normally mode 0600:
+
+- `/tmp/yabai_$USER.socket`
+- `/tmp/yabai_$USER.lock`
+- `/tmp/skhd_$USER.pid`
+
+These runtime paths are not log redirects. Diagnostics report only reduced lane states and counts; they do not print process identifiers or raw process listings.
+
+## Scope limits
+
+- System Integrity Protection stays enabled.
+- The scripting addition is not installed or loaded.
+- Automatic native Space rearrangement must stay disabled.
+- Primary display 1 must own exactly native Spaces 1 through 9. Additional external-display Spaces are permitted.
+- Raycast and any other global shortcut owner must not overlap the documented bindings.
+- A successful automated activation is not final acceptance. Physical keyboard tests and an explicit runtime-acceptance receipt are required.

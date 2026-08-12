@@ -2,18 +2,18 @@ import AppKit
 import CoreText
 import Foundation
 
-guard let detailFont = NSFont(name: "JetBrainsMonoNF-Medium", size: 8),
-      let titleFont = NSFont(name: "JetBrainsMonoNF-SemiBold", size: 9),
-      let dateFont = NSFont(name: "JetBrainsMonoNF-SemiBold", size: 9),
-      let clockFont = NSFont(name: "JetBrainsMonoNF-Medium", size: 9) else {
+guard let detailFont = NSFont(name: "JetBrainsMonoNF-Medium", size: 10),
+      let titleFont = NSFont(name: "JetBrainsMonoNF-SemiBold", size: 11.5),
+      let dateFont = NSFont(name: "JetBrainsMonoNF-Regular", size: 11.5),
+      let clockFont = NSFont(name: "JetBrainsMonoNF-Regular", size: 11.5) else {
     FileHandle.standardError.write(Data("Required exact calendar font faces are unavailable\n".utf8))
     exit(1)
 }
 let requiredFaces = [
     (detailFont, "JetBrainsMonoNF-Medium"),
     (titleFont, "JetBrainsMonoNF-SemiBold"),
-    (dateFont, "JetBrainsMonoNF-SemiBold"),
-    (clockFont, "JetBrainsMonoNF-Medium"),
+    (dateFont, "JetBrainsMonoNF-Regular"),
+    (clockFont, "JetBrainsMonoNF-Regular"),
 ]
 for (font, expectedName) in requiredFaces where font.fontName != expectedName {
     FileHandle.standardError.write(Data("Calendar font face substitution is prohibited\n".utf8))
@@ -34,23 +34,23 @@ func sketchyWidth(_ text: String, font: NSFont) -> Int {
     Int(glyphPathWidth(text, font: font) + 1.5)
 }
 
-guard sketchyWidth("M", font: titleFont) == 5,
-      sketchyWidth("M", font: detailFont) == 5,
-      sketchyWidth("会", font: titleFont) == 10,
-      sketchyWidth("🙂", font: titleFont) == 12 else {
+guard sketchyWidth("M", font: titleFont) == 6,
+      sketchyWidth("M", font: detailFont) == 6,
+      sketchyWidth("会", font: titleFont) == 12,
+      sketchyWidth("🙂", font: titleFont) == 15 else {
     FileHandle.standardError.write(Data("Calendar source-faithful font widths changed\n".utf8))
     exit(1)
 }
 for value in 0x20...0x7E {
     let scalar = Unicode.Scalar(value)!
     let text = String(Character(scalar))
-    if !titleFont.coveredCharacterSet.contains(scalar) || glyphPathWidth(text, font: titleFont) > 5.4 {
+    if !titleFont.coveredCharacterSet.contains(scalar) || glyphPathWidth(text, font: titleFont) > 6.9 {
         FileHandle.standardError.write(Data("Calendar ASCII narrow allow-list changed\n".utf8))
         exit(1)
     }
 }
-guard glyphPathWidth("󰃭 ", font: titleFont) <= 10.8,
-      glyphPathWidth("…", font: titleFont) <= 5.4 else {
+guard glyphPathWidth("󰃭 ", font: titleFont) <= 9.0,
+      glyphPathWidth("…", font: titleFont) <= 5.7 else {
     FileHandle.standardError.write(Data("Calendar trusted prefix or ellipsis width changed\n".utf8))
     exit(1)
 }
@@ -108,7 +108,7 @@ for offset in stride(from: 0, to: fields.count - 1, by: 8) {
     }
     if overflow == "1" {
         guard display.hasSuffix("…"), display != "󰃭 " + input,
-              display.unicodeScalars.count > 3 else {
+              display.unicodeScalars.count >= 3 else {
             FileHandle.standardError.write(Data("Calendar bounded overflow ellipsis failed: \(name)\n".utf8))
             exit(1)
         }
@@ -120,21 +120,21 @@ for offset in stride(from: 0, to: fields.count - 1, by: 8) {
     }
     if name == "japanese-combining" {
         let tail = Array(display.unicodeScalars.suffix(2)).map(\.value)
-        if tail != [0x3099, 0x2026] {
+        if display.unicodeScalars.count > 3 && tail != [0x3099, 0x2026] {
             FileHandle.standardError.write(Data("Calendar Japanese combining cluster was split\n".utf8))
             exit(1)
         }
     }
     if name == "hangul-conjoining" {
         let tail = Array(display.unicodeScalars.suffix(2)).map(\.value)
-        if tail != [0x11A8, 0x2026] {
+        if display.unicodeScalars.count > 3 && tail != [0x11A8, 0x2026] {
             FileHandle.standardError.write(Data("Calendar Hangul conjoining cluster was split\n".utf8))
             exit(1)
         }
     }
     if name == "indic-conjoining" {
         let tail = Array(display.unicodeScalars.suffix(2)).map(\.value)
-        if tail != [0x0937, 0x2026] {
+        if display.unicodeScalars.count > 3 && tail != [0x0937, 0x2026] {
             FileHandle.standardError.write(Data("Calendar Indic conjoining cluster was split\n".utf8))
             exit(1)
         }
@@ -147,21 +147,15 @@ guard seen == requiredFixtures else {
 }
 
 let detailSamples = [
-    "in 8d · 99d+ ↗",
-    "ends in 99d+ · 99d+ ↗",
-    "ends in 23h59m · 23h59m ↗",
-    "ends in 98d23h · 98d23h ↗",
-    "time unavailable ↗",
-    "all day ↗",
-    "in 98d23h · all day ↗",
-    "STALE",
+    "in 8d", "ends 99d+", "ends 23h59m", "ends 98d23h",
+    "time unavailable", "all day", "STALE", "LOADING",
 ]
-for sample in detailSamples where sketchyWidth(sample, font: detailFont) > Int(ceil(Double(sample.unicodeScalars.count) * 4.8 + 1.5)) {
+for sample in detailSamples where sketchyWidth(sample, font: detailFont) > Int(ceil(Double(sample.unicodeScalars.count) * 6.0 + 1.5)) {
     FileHandle.standardError.write(Data("Calendar intrinsic detail budget failed\n".utf8))
     exit(1)
 }
 for sample in ["Wed Sep 30", "12:59 PM"] {
-    let limit = sample.contains(":") ? 53 : 54
+    let limit = sample.contains(":") ? 54 : 69
     let font = sample.contains(":") ? clockFont : dateFont
     if sketchyWidth(sample, font: font) > limit {
         FileHandle.standardError.write(Data("Calendar date/time width budget failed\n".utf8))

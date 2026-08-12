@@ -59,14 +59,14 @@ function M.countdown(event, now)
   local start_time, end_time = tonumber(event.start), tonumber(event["end"])
   if not start_time or not end_time or end_time <= start_time then return { phase = "unavailable", detail = "time unavailable" } end
   if event.allDay then
-    if now < start_time then return { phase = "before", detail = "in " .. compact_duration(start_time - now) .. " · all day" } end
+    if now < start_time then return { phase = "before", detail = "in " .. compact_duration(start_time - now) } end
     if now < end_time then return { phase = "all_day", detail = "all day" } end
     return { phase = "ended", detail = "ended" }
   end
   if now < start_time then
-    return { phase = "before", detail = "in " .. compact_duration(start_time - now) .. " · " .. compact_duration(end_time - start_time) }
+    return { phase = "before", detail = "in " .. compact_duration(start_time - now) }
   end
-  if now < end_time then return { phase = "during", detail = "ends in " .. compact_duration(end_time - now) .. " · " .. compact_duration(end_time - start_time) } end
+  if now < end_time then return { phase = "during", detail = "ends " .. compact_duration(end_time - now) } end
   return { phase = "ended", detail = "ended" }
 end
 
@@ -77,55 +77,6 @@ end
 function M.format_date(timestamp)
   return os.date("%b %d", timestamp)
 end
-
-local function meeting_path(host, path)
-  path = tostring(path or ""):lower()
-  if host == "meet.google.com" then return path:match("^/[a-z][a-z][a-z]%-[a-z][a-z][a-z][a-z]%-[a-z][a-z][a-z]") ~= nil end
-  if host == "teams.microsoft.com" or host == "teams.live.com" or host == "teams.microsoft.us" then
-    return path:match("^/l/meetup%-join/") ~= nil or path:match("^/meet/") ~= nil
-  end
-  if host == "webex.com" or host:sub(-10) == ".webex.com" then
-    return path:match("^/meet/") ~= nil or path:match("^/join/") ~= nil or path:match("^/webappng/sites/.+/meeting/") ~= nil
-  end
-  if host == "zoom.us" or host:sub(-8) == ".zoom.us" then
-    return path:match("^/[jsw]/%d+") ~= nil or path:match("^/wc/join/%d+") ~= nil or path:match("^/wc/%d+/%d+") ~= nil or path:match("^/my/[%w._%-]+") ~= nil
-  end
-  return false
-end
-
-function M.safe_meeting_url(value)
-  local url = tostring(value or ""):match("^%s*(.-)%s*$"):gsub("&amp;", "&")
-  if #url > 4096 then return nil end
-  url = url:gsub("[.,%)%]%}]+$", "")
-  local authority = url:match("^https://([^/%?#]+)")
-  if not authority or authority:find("@", 1, true) then return nil end
-  local host = authority:match("^([^:]+)$") or authority:match("^([^:]+):443$")
-  if not host then return nil end
-  host = host:lower():gsub("%.$", "")
-  local path = url:match("^https://[^/%?#]+([^?#]*)") or "/"
-  if meeting_path(host, path) then return url end
-  return nil
-end
-
-local function candidates(text)
-  local result = {}
-  for value in tostring(text or ""):gmatch([[https?://[^%s<>%"']+]]) do result[#result + 1] = value end
-  return result
-end
-
-function M.meeting_url(event)
-  if type(event) ~= "table" then return nil end
-  local explicit = M.safe_meeting_url(event.url)
-  if explicit then return explicit end
-  for _, key in ipairs({ "notes", "location" }) do
-    for _, value in ipairs(candidates(event[key])) do
-      local safe = M.safe_meeting_url(value)
-      if safe then return safe end
-    end
-  end
-  return nil
-end
-
 
 local function split_plain(value, separator)
   local result, start = {}, 1
@@ -417,14 +368,14 @@ function M.parse_events(output, tokens)
     local start_time, end_time, all_day, duration_days = parse_datetime(properties[2])
     if not start_time then return nil, "datetime" end
     if not title then title = "Upcoming event" end
-    local url, location, notes, uid
+    local uid
     for property_index = 3, #properties do
-      local property = properties[property_index]:gsub(tokens.newline, "\n")
-      if property:sub(1, 5) == "url: " and not url and not uid then url = property:sub(6)
-      elseif property:sub(1, 10) == "location: " and not location and not uid then location = property:sub(11)
-      elseif property:sub(1, 7) == "notes: " and not notes and not uid then notes = property:sub(8)
-      elseif property:sub(1, 5) == "uid: " and not uid and property_index == #properties then uid = M.clean_text(property:sub(6), 512, 2048)
-      else return nil, "property" end
+      local property = properties[property_index]
+      if property:sub(1, 5) == "uid: " and not uid and property_index == #properties then
+        uid = M.clean_text(property:sub(6), 512, 2048)
+      else
+        return nil, "property"
+      end
     end
     if not uid then return nil, "uid" end
     local identity = uid .. "\0" .. tostring(start_time)
@@ -432,7 +383,7 @@ function M.parse_events(output, tokens)
     identities[identity] = true
     events[#events + 1] = {
       title = title, start = start_time, ["end"] = end_time, allDay = all_day, duration_days = duration_days,
-      meeting_url = M.meeting_url({ url = url, location = location, notes = notes }), sort_id = identity,
+      sort_id = identity,
     }
   end
   table.sort(events, function(left, right)

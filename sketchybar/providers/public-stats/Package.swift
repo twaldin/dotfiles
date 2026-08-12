@@ -1,9 +1,9 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 5.10
 import PackageDescription
 
 let package = Package(
     name: "PublicStats",
-    platforms: [.macOS(.v15)],
+    platforms: [.macOS(.v14)],
     products: [
         .executable(name: "sketchybar-public-stats", targets: ["PublicStats"])
     ],
@@ -13,11 +13,13 @@ let package = Package(
             resources: [.copy("Resources/PrivacyInfo.xcprivacy")],
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("DiskArbitration"),
                 .linkedFramework("IOKit"),
                 .linkedFramework("Metal"),
                 .linkedFramework("Network"),
+                .linkedFramework("SystemConfiguration"),
             ]
         ),
     ],
-    swiftLanguageModes: [.v6]
+    swiftLanguageVersions: [.v5]
 )

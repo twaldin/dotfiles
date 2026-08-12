@@ -1,310 +1,157 @@
 # SketchyBar operations
 
+The Home deployment uses SketchyBar 2.24.0 from `/opt/homebrew/bin/sketchybar` and Lua 5.5.x. The configuration is `/Users/twaldin/.config/sketchybar`.
+
+## Layout
+
+The left side contains Spaces, the front window, Wi-Fi, Bluetooth, Display, sound output, microphone input, and battery. The device controls stay left of the notch.
+
+Spaces require the signed Yabai 7.1.25 app at `$HOME/Applications/Yabai.app`. This personal layout requires exactly nine global Spaces. They must have indices 1 through 9, and all must be on display 1. If the Yabai query or topology fails, all nine Space cells turn orange. App ligatures clear, and the cells have no focus or hover affordance. Scrolling fails closed. Each click on an orange cell opens or rebuilds one bounded diagnostic popup anchored to Space 1. The popup reports the query or topology failure. It repeats the exact app version, path, Space count, indices, and display requirement. It has one real action that opens the official Yabai setup guide. It does not show a focus control.
+
+The right side contains CPU, GPU, RAM, NET, SSD, TMP, and then Calendar at the far-right edge. The six metric items are independent. Each item has its own popup. TMP always shows the highest recognized CPU and GPU temperatures in fixed order, for example `C73 G61`; a truly absent source uses its own em dash, so complete absence is `C— G—`. A failed refresh can keep the last accepted pair for at most 20 seconds. The fixed 72-point TMP host uses a compact value face for three-digit readings, fits the full accepted `C130 G130` range, and takes exactly 24 points from the Calendar event surface. The right cluster stays at `5 × (48 + 4) + (72 + 4) + 164 + 148 = 648` points. SketchyBar 2.24.0 has no separate item accessibility-label property, so the visible compact label keeps explicit `C` and `G` semantics. Calendar is static and display-only. Its provider requests only title and date/time plus a transient UID for stable sorting. It does not request notes, location, or URL, and it does not open Calendar or meeting URLs.
+
+## Popups and controls
+
+Left-click an item to open or close its popup.
+
+- CPU and RAM show 120-sample graphs, sections, and aggregate details. CPU also shows neutral logical-core activity, uptime, highest recognized CPU temperature, cluster-weighted frequency, and CPU power. The popups do not collect process or application identity.
+- GPU shows measured device, renderer, and tiler utilization, a 120-sample graph, highest recognized GPU temperature, GPU power, and public Metal capability facts.
+- NET shows a 120-sample, fixed logarithmic throughput graph, separate current download and upload rates, and provider-session download and upload totals. The session totals are measured lower bounds. They start with each provider instance, stay monotonic for that instance, and do not infer traffic during read gaps, sleep, route changes, or counter resets.
+- SSD shows used, free, and total Data-volume capacity. It also shows a 120-sample read-plus-write history and separate read, write, and combined rates for the Data backing device. These are backing-target rates, not APFS per-volume accounting. If the target is shared, the values include I/O from the System volume or other APFS volumes. Invalid gaps are not inferred.
+- TMP shows public thermal and memory-pressure states, the active source-scoped power mode, recognized CPU/GPU temperatures, CPU/GPU/ANE/memory power, and bounded fan RPM/mode/target/range telemetry. Fan and power writes remain visibly inert until the privileged owner is approved and installed.
+- Wi-Fi shows supported CoreWLAN association, service/mode, independent signal and noise values, transmit rate, security, PHY, MCS, channel, band, and channel width plus an explicit desired-state radio action. An associated network stays visibly associated when macOS redacts its name. A populated name is accepted only from CoreWLAN or the fixed current-network node in Apple `system_profiler`; neighboring network names are never parsed. The helper replaces the raw interface with a session-bound opaque handle before Lua or an action argument receives it.
+- Bluetooth distinguishes unavailable inventory from proved zero and reports bounded, proved truncation. Every retained device shows explicit paired and connected state. Public IOBluetooth supplies exact RSSI, device class, cached service-profile facts, and actions; fixed Apple `system_profiler`, `ioreg`, and `pmset` fields add address-correlated battery components when present. A missing battery, RSSI, type, or profile is omitted instead of labeled unknown. Connect and disconnect use stale-state preflight and readback. Adapter power remains read-only.
+- Sound output and microphone show verified CoreAudio state. A nonzero `warning_count` means only that one or more non-fatal audio facts could not be read or published; both popups use that exact broad statement and do not claim a device was omitted. Their sliders, mute controls, and eligible device actions bind the exact displayed device and render only confirmed readback state. The bar requests a selected-microphone refresh every two seconds. This fixed cadence is a deliberate privacy-indicator exception to the power-aware hardware-metrics cadence: a slower idle cadence could delay the first indication after capture starts. A 40-read measurement after the input-first/global-fallback implementation on this host used about 90 ms of wall time and 58 ms of aggregate CPU time per request, which is about 2.9% of one CPU core at the two-second cadence. A busy read or write coalesces one immediate follow-up refresh instead of dropping the freshness request. If work is still busy at the next two-second tick, the prior active or idle mark and text are hidden immediately while the last confirmed device, mute, volume, and default facts remain. The native state read has a two-second deadline. A normal transition is visible after the next request; a stalled transaction cannot leave a visible active or idle claim past the next tick plus small launch and scheduling overhead. Before an active-use query, the native owner proves that the selected device has input streams and has no output streams. It queries the public `kAudioDevicePropertyDeviceIsRunningSomewhere` UInt32 Boolean at input scope first. Only when `AudioObjectHasProperty` is false at input scope does it query the global device scope for driver compatibility. A present input-scoped property always takes precedence. This precedence trusts the selected driver’s input-scoped value without a second-scope corroboration. A malformed value, wrong size, or read error at the chosen scope omits use state and never causes another-scope read. Output-only and duplex devices never reach either query. Confirmed active use adds a solid dot and the semantic recording color; confirmed idle adds an open circle. An absent use value has neither mark, so it is not shown as proof of idle. A confirmed device whose mute and use values are both absent has a separate unclaimed slate rendering; it does not look the same as a missing device. The popup heading and state row give visible active or idle text. The hidden bar label keeps the same semantic text only as a `sketchybar --query` diagnostic. A failed refresh immediately clears the active-use claim while it retains the last confirmed device facts. This device/microphone active state has no process attribution or history. If neither scope has the property, or the chosen read errors or is malformed, the active-use row and text are absent; the UI makes no unknown or unavailable use claim.
+- Battery keeps public IOPowerSources as the basic-state owner. It renders charge and time only when the public facts form a consistent state. It never renders a qualitative Health row. One Cycles row uses the exact public or popup-only hardware count. It stays absent while either read is pending, uses the available exact count if the other read fails, and makes no claim when proved counts conflict. Hardware detail uses explicit Raw current capacity, Raw maximum capacity, Raw design capacity, Nominal capacity, and Raw maximum / design labels, plus signed current, voltage, and temperature. A successful read with no renderable facts says that no battery hardware readings were reported. Adapter watts/current appear only when the attached-adapter dictionary proves each value; detached numeric rows are absent. With the popup open, a wake or power-source event retires in-flight public and hardware reads and hides their prior popup facts until fresh reads complete. In both the open and closed cases, the bar keeps its last accepted percentage until the replacement public read completes or its 70-second deadline expires; an expired read changes the bar to an em dash. Every public and hardware read has the same 70-second deadline. Public state refreshes about every 30 seconds. Popup-only hardware state refreshes every fourth routine tick, about every 120 seconds, only while that popup generation stays open. These recurring pending windows briefly remove the Cycles row and, during a hardware read, the Hardware readings section. A failed or expired public transport retries at the next approximately 30-second tick. A failed or expired hardware transport retries at the next approximately 120-second popup-open tick. Failure copy says that automatic retry continues and that reopening retries now; the fixed main-System-Settings Battery handoff remains. The popup exposes no identity, history, or operation-looking hardware control and does not claim Apple Maximum Capacity or infer health from a raw ratio.
+- Display requires exactly one launchd-parented BetterDisplay app instance, then uses exact-version, exact-artifact, stable-target, double-confirmed reads. Extra CLI clients do not count as app instances. If the app-instance or another read gate fails, the current state is unavailable. An opaque target handle remains stable across reads while its UUID and tag marker are unchanged; a target change, missing map, or safe corrupt map rotates the handle and revokes the prior value. Fixed numeric refresh rates remain numeric. The closed variable-refresh set is `ProMotion`, `Variable`, `Adaptive`, or an ascending `min-maxHz` range from 1 through 1000 Hz. An unrecognized active refresh value fails the state read closed. An invalid or missing current mode omits the complete optional mode list; invalid non-current modes are omitted. A readable brightness value is required for Display state. Brightness actions and any reported hardware-contrast, display-volume, or explicit mute on/off actions use a fresh expected-state check, one bounded write, independent readback, and one verified best-effort restore. The target is the display under the pointer when each read starts. Because the bar is on all displays, the always-visible item uses a neutral `Display confirmed` label instead of repeating one display’s values on every bar. Opening the popup first shows a neutral header and a fixed pointer-target confirmation state with no controls. It reserves the normal popup area and keeps the BetterDisplay and System Settings handoffs visible. Controls appear only after that fresh exact-target read completes. A 15-second UI deadline changes a stalled confirmation to unavailable and rejects its late result. Brightness stays visible after confirmation; unsupported contrast and display-audio rows and actions are omitted. An unproved role uses an em dash. Raw display identifiers remain in an owner-only runtime map and native stdin. Rotation, HDR, mirror, power, disconnect, and connection controls are absent because Pro is unavailable or rollback is not reliable.
+
+Stat, connectivity, sound, microphone, battery, Display, and front-window popups contain explicit app or fixed main-System-Settings handoffs. The label names the section to select manually; no private pane URL is used. Right-click remains a shortcut. A Wi-Fi power change or Bluetooth device action can interrupt connectivity. Bluetooth adapter power stays in System Settings. Calendar remains display-only and does not open Calendar or meeting URLs.
+
+## Metrics and native helpers
+
+`install-deps.sh` builds and installs:
+
+- `$HOME/.local/share/sketchybar-provider/sketchybar-public-stats` for CPU, RAM, the strict current memory-pressure state, primary-IPv4-route network rates and provider-session totals, Data-volume capacity, Data backing-device I/O rates, GPU capability, and public system-condition events.
+- `$HOME/.local/share/sketchybar-controls/system-controls` for public IOBluetooth reads/device actions and verified CoreAudio reads/writes.
+- `$HOME/.local/share/sketchybar-hardware/hardware-metrics` for identifier-free IOAccelerator and IOReport utilization, power, and frequency reads.
+- `$HOME/.local/share/sketchybar-display/betterdisplay-control` for a narrow BetterDisplay DNC display transaction with correlated response, readback, and restore.
+
+The hardware and BetterDisplay control sources are exact-hash checked before the complete smoke gate, copied into private hash-checked snapshots, and compiled only from those snapshots after the gate passes. Each binary and its exact semantic source marker publish as one locked transaction; any marker, identity, hash, self-test, live-state, or post-publication failure restores the complete prior pair. The hardware helper is installed in an owner-only directory, self-tested with exact silent output, and validated through a closed JSON contract. The connectivity Swift source is hash-bound, compiled into an owner-only per-user app bundle on first use, ad-hoc signed with its fixed bundle identifier, and strict-signature checked before every use. Its Info.plist contains only the exact location usage text needed for macOS network-name authorization. Both Battery Swift helpers are source-hash-bound and compiled into private per-user caches on first use. The hardware-detail helper reads a strict allowlist from the private AppleSmartBattery registry contract and sanitizes every result before Lua receives it. The BetterDisplay helper has the same source/binary publication boundary and validates the exact installed signed vendor artifact before every transaction. DNC is an unauthenticated local broadcast bus, so correlation does not protect against a malicious process in the same login context; its output is advisory under that threat.
+
+`native/` is a source-only, non-built, non-installed fan-in of three frozen first-party prototypes. It is inert at runtime. `native/APPROVED-ARTIFACTS.tsv` is its approval receipt, and the offline smoke gate verifies it with `tests/native-approved-artifacts-test.py`.
+
+Within the current macOS user-session trust boundary, every incoming `system_metrics_v3` event is rejected before UI mutation unless its complete v3-only schema, producer identity, monotonic sequence, 15-second freshness, finite Lua-exact numeric ranges, independent rate/total validity, and cross-field relations pass `lib/stats_contract.lua`. The consumer does not accept a `system_metrics_v2` event. This v3-only rule applies to the metrics domain; the independent `system_cpu_detail_v1` and `system_battery_v2` auxiliary contracts stay unchanged. A lower valid network session total from the same provider instance is rejected. A new producer clears that monotonic floor, all metric histories, and the old producer identity. An invalid network-rate or SSD-I/O sample clears its rate history. This is event-contract validation, not sender authentication: SketchyBar custom events can be triggered by any process already running as the same user, and a same-user-writable nonce file would not change that boundary.
+
+The public provider remains unprivileged, read-only, and limited to public frameworks. It uses the Stats-default primary IPv4 route with 64-bit route counters and the exact bounded Stats digit-count parent rule for the Data backing target. It publishes no interface name or index, BSD name, volume or media identity, registry name or ID, raw lifetime counter, or process identity. The named pressure sysctl and the `Statistics`, `Bytes (Read)`, and `Bytes (Write)` registry strings are unsupported compatibility contracts. If one changes, only that domain becomes unavailable; the provider does not scan more registry data, call a command, use a private fallback, or guess. No root, helper, entitlement, Full Disk Access, Accessibility, Screen Recording, Location, packet capture, raw disk access, or network-capture permission is used. A separate read-only helper uses private, unsupported IOAccelerator and IOReport schemas and fails closed when its closed capability contract changes. Hardware samples run every 2 seconds only while a CPU/GPU/TMP popup is visible, every 5 seconds on normal AC idle state, and every 15 seconds on battery or Low Power Mode. One transport failure can retain a visibly delayed sample for at most 20 seconds; a valid explicit-unavailable result clears the affected values immediately. No sample history is written to disk.
+
+Battery uses public IOPowerSources and IOPM battery-cycle APIs through a closed first-party helper. Wi-Fi uses `networksetup` for explicit bounded power writes, CoreWLAN for richer reads, and only the fixed current-network `system_profiler` node as a name/PHY/channel fallback. If the associated name stays redacted, “Allow network name · Location” foregrounds the signed helper and calls Core Location’s documented When In Use request. The callback reads the complete Wi-Fi state again. A prior denial, restriction, or disabled Location Services instead opens the main System Settings app and returns the still-current permission state; it never claims a grant. No private Settings URL is used. Bluetooth power, pairing, exact RSSI, cached profiles, inventory, and connection actions use first-party public IOBluetooth. Fixed read-only Apple profiler, HID registry, and accessory-power outputs are address-correlated inside the Python helper. Raw addresses and identifiers never reach Lua, public JSON, action argv, logs, or persistent state; the first-party native read contract returns addresses only to Python for private correlation, and a connect or disconnect sends the selected address only through the bounded native stdin contract. No Control Center cache, Bluetooth preference cache, CoreBluetooth UUID, third-party controller, scan, or persistent history is used.
+
+Stats.app 3.0.10 has no robust general local integration bus. Its preferences, widget app-group data, LevelDB cache, cloud credentials, and privileged XPC helper are not used. The exact signed Stats 3.0.10 build 832 bundled `smc` executable is used only with fixed read commands for temperature and fan telemetry after bundle, team, version, and executable-hash validation. Its write commands and privileged helper are never called. SketchyBar aliases remain pixel captures and do not forward clicks.
+
 ## Install and reload
 
-This release supports Apple-silicon Tahoe hosts only and requires the reviewed
-Homebrew prefix at `/opt/homebrew`. Installation rejects other architectures
-before dependency changes. The native helper target is exactly
-`arm64-apple-macosx15.0`; its thin architecture is checked with public
-`lipo -archs` before self-test or publication.
-
-Run dependency setup manually. It never runs during a bar reload.
+Run the first-party dependency and deployment transaction:
 
 ```sh
-~/.config/sketchybar/install-deps.sh
-~/.config/sketchybar/scripts/smoke-config.sh
-sketchybar --reload
-SKETCHYBAR_REQUIRE_LIVE_SHAPE=1 ~/.config/sketchybar/scripts/smoke-config.sh
+sketchybar/install-deps.sh
 ```
 
-The first smoke is the complete offline gate. Reload happens only after it is
-green. The required live invocation then repeats that gate and verifies the
-newly loaded source fingerprint plus content-redacted geometry; it cannot pass
-against the prior configuration. Hotload can satisfy the same fingerprint, but
-the final release procedure uses the explicit reload shown above. Offline
-installer validation leaves `SKETCHYBAR_REQUIRE_LIVE_SHAPE` unset because no
-live bar is required.
+`install-deps.sh` completes the full offline smoke gate before it calls `scripts/sketchybar-launch-agent.py`. The installer accepts no path, fixture, or environment override. It validates the reviewed closed plist contract, the source and destination files, the per-user `LaunchAgents` directory, and private launch logs. It then replaces only `~/Library/LaunchAgents/homebrew.mxcl.sketchybar.plist`, boots out the prior loaded job when present, bootstraps the reviewed plist, and reads back the exact live program, configuration argument, and private log paths. Output is a closed identifier-free verdict. Every `launchctl` call has a timeout and its raw output stays private.
 
-The native source is immutable at SHA-256
-`e695b4a98f69436fbcc22f83750ca683a98fc1d5057e7858bb92b4417603afb3`.
-The installer rejects a different repository source before any Homebrew
-mutation or compilation. The prior exact implementation approval applies only
-to its predecessor and is not reused for this interaction revision. Current
-source requires its own direct and cross-harness reviews, complete offline
-native gate, and attended physical interaction acceptance.
+The transaction takes a fresh destination and loaded-state preflight before mutation. For a loaded prior job, the on-disk plist must match one of two closed formula-derived schemas: the reviewed configured service or the original unconfigured Homebrew service. Its observable program, arguments, and log paths must also match the live job before bootout, so the rollback source is recoverable. A transaction failure atomically restores the exact prior plist bytes, mode, presence, and loaded or unloaded state, then reads back the restored observable program, arguments, log paths, and a stable running process state. A first install failure restores an absent destination and an unloaded job. The success readback also requires the exact plist path, a stable running process, and an accepted last-exit state; the process identifier is validated privately and is never printed.
 
-The calendar SF Symbol navigation contract fixture is immutable at SHA-256
-`3b7119c0d6d7bf98ccdeac7bfc8ea7e22fc78892c0f8b661d095cff0cb12bc04`. The standalone smoke and direct offline gates verify it
-before Swift compilation. The offline gate compiles arm64 debug and optimized
-binaries and runs the same self-test in both. It also retains both anonymous
-same-host render pairs before it checks byte determinism, so a failure remains
-diagnosable. This check does not claim identical pixels across different hosts.
+A separate fixed `rollback incomplete` verdict and exit 2 means an operating-system failure prevented that restoration. Stop and inspect the owner, type, link count, and mode of the per-user plist and log paths before another attempt. For this personal deployment, recovery is to boot out the label if it is still loaded, remove only the validated real single-link per-user plist, and rerun `install-deps.sh`. A normal fixed `installation failed` verdict and exit 1 made no unreported partial success. Do not use `brew services restart sketchybar`: the formula-generated service has no `--config` argument and can load a hidden default 25-point bar with no items.
 
-`install-deps.sh` runs that full offline smoke gate after every dependency
-installation and fails the install if the gate fails. Lua, icalBuddy, blueutil, and media-control are intentionally live Homebrew formula
-inputs, not reproducibly frozen artifacts. Any Homebrew update invalidates the
-prior runtime proof until the full gate passes again. Lua and luac are accepted
-only from the supported 5.5.x line. The reproducibly frozen inputs are SbarLua,
-stats provider 0.8.2, and the checksum-pinned font assets described below.
+The reviewed plist is based on the Homebrew formula service and uses `/opt/homebrew/opt/sketchybar/bin/sketchybar` with the exact `--config /Users/twaldin/.config/sketchybar/sketchybarrc` arguments. It retains the formula session types, interactive process type, keep-alive behavior, `LANG`, and bounded service `PATH`. It omits `Umask` and `ThrottleInterval` because either key makes `launchctl bootstrap` fail with EIO on the supported macOS 26.2 host.
 
-`install-deps.sh` installs and Brew-pins `stats_provider` 0.8.2 from the
-vendored formula captured at upstream tap commit
-`57f2b989bddd3f365d51db84cdd806c948cef8e8`. The installer verifies the
-formula SHA-256, securely publishes it into a local no-git frozen Homebrew tap,
-and installs that fully qualified formula, so later upstream tap releases cannot
-change a clean install. Every run installs or reinstalls that formula and then
-validates the resolved Cellar path, version, architecture-specific executable
-SHA-256, and Brew pin; a preexisting version-matching executable is not accepted.
-It also installs checksum-pinned
-`sketchybar-app-font` v2.0.71 assets. SbarLua is built once at commit
-`dba9cc421b868c918d5c23c408544a28aadf2f2f` under
-`~/.local/share/sketchybar_lua`. Checksum-pinned assets validate their canonical
-owned parents and existing files, then publish verified 0644 same-directory
-staging files atomically. SbarLua builds into an owned staging HOME; its
-single-link 0755 module and 0600 provenance marker publish as a rollback-safe,
-file-and-directory-fsynced pair inside a canonical owned directory with no
-group/other write. The marker records both the pinned commit and exact installed
-module SHA-256; every wrapper start validates both against the same no-follow
-module inode before Lua loads it. Same-directory
-hard-link backups restore exact prior bytes, modes, device, and inode if marker
-publication fails or a handled `SIGHUP`, `SIGINT`, or `SIGTERM` interrupts the
-pair update; stages and backup names are removed. `SIGKILL` cannot be handled,
-so a mismatched pair fails closed until the next installer recovery. For migration,
-the wrapper accepts the prior one-line marker only when both its exact pinned
-commit and the separately pinned approved legacy module SHA-256 match. New
-two-line markers bind their own module SHA-256. The calendar helper uses a canonical owned directory with no group/other write
-and validates single-link 0755/0644 live and staging files. Its exact bounded v2
-marker binds the source SHA-256, `arm64-apple-macosx15.0` target, `-O` build mode,
-and installed binary SHA-256. An existing helper is executed for self-test only
-after no-follow marker/binary identity, hash, and exact arm64 `lipo` validation;
-legacy, wrong-binary, or wrong-architecture state rebuilds without execution. It
-is compiled into an owned same-directory temporary, must pass its native self-test,
-and is then installed with atomic binary and provenance-marker renames. Every
-transaction holds the stable owned single-link 0600 `lockf` lock before it
-inspects recovery state; a concurrent writer returns temporary failure without
-normalizing the active writer's namespace. Candidate files and rollback backup
-entries are fsynced before live mutation; the destination directory is fsynced after pair publication, rollback restoration, and backup/stage cleanup. SIGKILL or power loss can retain the owned 0700 `.calendar-install-transaction` namespace. Its fixed 0600 manifest records the publication phase, pair presence, and exact prior plus candidate device/inode identities. After the next build and self-test, the locked transaction validates the complete namespace. It idempotently restores the recorded prior pair for every incomplete phase, or retains the already durable new pair for `pair-published`, before it removes recovery state. Only then can it make and fsync a fresh manifested backup snapshot and publish another pair. Missing, extra, unsafe, or identity-mismatched recovery state fails closed unchanged; unrelated main-directory lookalikes are never touched. Same-directory hard-link backups restore the exact prior binary and marker if a detected post-binary marker commit fails. Startup and EXIT rollback create new hard links without consuming the recovery links; a crash at any restore or cleanup point remains idempotently recoverable. An owned canonical empty fixed namespace is normalized as cleanup residue before new state. The lock path is revalidated against the held descriptor before recovery, destructive rollback steps, and each publication phase. Candidate paths are revalidated by exact identity before and after publication and are removed on failure only if they still identify the recorded staging files. Calendar rollback ignores additional handled signals until exact pair restoration and cleanup finish. A failed build or self-test does not overwrite the installed helper. Reloads do not download or compile anything.
+The launchd stdout/stderr directory is `~/Library/Logs/sketchybar`. The installer creates or validates it as an owner-only mode-0700 real directory and precreates both single-link regular log files as mode 0600. Lua/provider logs and helper session maps are separate mode-0600 files in validated mode-0700 per-user directories below macOS `TMPDIR`.
 
-## Resting bar and controls
+Before the deployment transaction commits, the installer performs a bounded content-free bar query. It requires drawing on, height 36, and the exact reviewed 29-item list, including the six CPU, GPU, RAM, NET, SSD, and TMP stat hosts. A mismatch restores the prior plist and loaded state. `install-deps.sh` repeats the same check as a postcondition. Neither check prints the query response.
 
-The resting bar uses a fully transparent, non-topmost base. `_HIHideMenuBar=1`
-keeps native menu content out of that layer. Sharp graphite blocks remain above
-the base for selection, grouping, hover, and popups. Bar items and SketchyBar
-popups use zero corner radius; all shadows and blur remain disabled.
-
-- Left: every available primary-display native Space with case-insensitive app ligatures, then a
-  fixed 100-point focused-app block. A `front_app_switched` event invalidates
-  stale state, then a topology-guarded Yabai query confirms the focused app and
-  full window/app list before content is rendered. The center stays empty on every display.
-- Right: a touching sequence of square color levels on every configured display.
-  The intrinsic next-event block is bounded at 256 points and touches the fixed
-  116-point date/time anchor, which touches the fixed 168-point six-cell system
-  block: system activity, battery, microphone, audio, Bluetooth, and Wi-Fi.
-  Event/date/system use progressively lighter graphite-blue fills. Every system
-  cell remains 28 points and its Nerd Font glyph is centered in that full cell.
-  Hover changes only the local fill and foreground; it never changes geometry
-  or adds an outline. Amber/red warning states keep their semantic foreground.
-  An open popup host uses the same active fill instead of cutting a dark hole
-  through the continuous block. CPU/memory and live graphs remain out of this
-  release slice; the separate-domain stats redesign follows as its own slice.
-- Selection and normal data use graphite, neutral gray, and off-white. Amber and
-  red are reserved for genuine warning/critical state.
-
-Interactions:
-
-- Space left click focuses through Yabai; scroll cycles native Spaces only when
-  Yabai is available. App slots share a 340-point strip fairly. Without Yabai,
-  both click and scroll focus are intentionally disabled because macOS has no
-  safe public numeric Space-focus API. The fallback is the static guarded
-  `1..9` primary-Space visual invariant used by the shipped Yabai/Hyper setup;
-  it is not live enumeration and exposes no actions or app ligatures. Window
-  data is queried only after the exact Yabai Space invariant is accepted. It does not read the
-  undocumented Spaces plist or sum separate-monitor Spaces. Yabai actions are
-  enabled only when its primary `display == 1` indices sort to the exact global
-  sequence `1..9`; any subset or non-1-based result fails back to static mode.
-  The final focus helper independently rechecks that same snapshot before every
-  action. Numeric clicks remain valid while an external Space is focused;
-  relative scroll requires one focused primary Space and computes bounded 1↔9
-  wrap targets instead of passing raw `prev` or `next`.
-- Focused-app hover keeps its 100-point width. Left click opens the window panel
-  only through the exact primary 1..9 topology guard. Rows show detailed titles;
-  the final helper brackets two matching bounded stable records for the requested
-  window with three exact-topology checks immediately before it focuses a
-  validated numeric ID. A topology change after the final check and before the
-  Yabai focus syscall is the unavoidable limit of Yabai's nontransactional API;
-  the helper does not use an unbounded recheck loop. The flat
-  popup paginates deterministically at ten windows per page, so every sorted
-  primary or external window remains reachable without an irreversible cap.
-  Exact primary Spaces 1..9 gate service validity, but the list intentionally includes
-  and focuses current windows on external displays with higher Space indices.
-  Window content is held transiently and emitted only after a second
-  exact-topology check.
-- The next-event preview opens a safe meeting URL when one is available, with
-  one Calendar fallback. A left click on date/time queries only SketchyBar's
-  public per-display item rectangles and opens or toggles the native AppKit
-  calendar panel at the exact clicked 116×32 rect. Non-left date clicks do
-  nothing. Wi-Fi, Bluetooth, audio, microphone, battery, and system activity
-  open purpose-built panels. The date panel includes a rendered month grid and
-  agenda. Network/system use compact metric grids and section hierarchy, not a
-  graph or a flat undifferentiated list. Every panel uses one continuous outer
-  surface: only its top header has a resting fill; secondary headings and rows
-  are flat, and only the active action-row hover receives a temporary fill.
-- One popup exists globally. Same-host click closes it; another host replaces it.
-  A 130 ms grace covers the pointer crossing between host and panel. Display
-  changes, wake, reload, and leaving both dismiss it.
-- Action rows have a centralized fixed-geometry hover state. Passive metrics do
-  not look clickable. One bar hover exists globally and prior state resets before
-  the next surface appears.
-- Right click opens Wi-Fi, Bluetooth, Sound, or Battery settings where
-  applicable. Calendar event and date/time group right and middle clicks are no-ops.
-- Audio changes require explicit popup actions; scrolling the bar item does not
-  mutate state. The Audio and Microphone panels expose true mute, capability-aware
-  level sliders, and device selectors. A muted device keeps its confirmed stored
-  level visible for restore context while the mute state remains explicit.
-- Bluetooth cache invalidates when the light connected-device fingerprint
-  changes. VPN recognizes NetworkExtension connections, split `utun` tunnels,
-  and a running Tailscale tunnel.
-
-Refresh policy:
-
-- Native Space/window/front-app events are primary; enabled five-second Space and
-  focused-window reconciliation is only a safety net.
-- Wi-Fi state and network counters reconcile every five seconds. An open network panel updates live and refreshes VPN
-  every eight seconds; its extra loop stops on close.
-- Bluetooth and audio/microphone bar state use 30-second fallbacks plus events
-  where macOS provides them. Open audio or microphone panels reconcile input
-  every five seconds. Slow Bluetooth `system_profiler` runs on intent with a
-  60-second cache invalidated by the light fingerprint.
-- `system_stats` pushes CPU/RAM/disk/battery/uptime every three seconds. An open
-  system panel updates on those events and refreshes only processes/VPN every
-  eight seconds; its extra loop stops on close.
-- Calendar text updates every 30 seconds; the bounded next-event preview uses one
-  generation-guarded `icalBuddy` query every 60 seconds. The installed exact
-  JetBrains Mono Nerd Font faces and SketchyBar CoreText dynamic widths allocate
-  8-point outer edges and an 8-point internal gap. Only printable ASCII and the
-  trusted calendar glyph use the verified 5.4-point narrow advance. Each
-  non-ASCII scalar reserves 24 points, except a scan-verified 64-point outlier tier.
-  A complete sanitizer-reachable CoreText glyph-path and typographic-advance
-  scan must prove both tiers against the installed 9-point face and its public
-  fallback cascade. Generated,
-  checksum-pinned Unicode 17 properties ensure that the selector never cuts
-  combining, joined emoji, regional-pair, Hangul conjoining, or grouped
-  unknown-script sequences. A complete title remains unchanged when it fits; a
-  bounded title ends with a visible ellipsis. Native font-oracle fixtures cover
-  ASCII, CJK, emoji, decomposed marks, Hangul, Indic, Cyrillic, Greek, and
-  hostile fallback text including U+FDFD.
-  The actual event block never exceeds 256 points, and event plus the 116-point
-  date anchor never exceeds 372 points. The countdown remains left-aligned.
-  `settings.calendar_show_titles` defaults to `true` for this personal setup, so
-  the resting bar exposes event titles to anyone who can see the display or a
-  screen share. Set it to `false` for generic `Upcoming event` text. Rich agenda
-  and battery-health helpers run only on intent. Data-volume capacity refreshes
-  about every five minutes.
-
-## Lifecycle and diagnostics
-
-Lua callback errors stay at `${TMPDIR:-/tmp}/sketchybar-lua-$UID/lua.log`.
-The wrapper requires an owned, non-symlink 0700 per-user Lua runtime and execs
-through the same `O_NOFOLLOW`/same-inode helper into an owned, single-link 0600
-regular log.
-Each verified Lua exec safely resets only that private descriptor; the wrapper
-uses no shell log redirection.
-All external UI strings pass through the shared bounded UTF-8 display sanitizer. It rejects invalid UTF-8, every current Unicode format scalar, variation selectors, tag/default-invisible controls, surrogates, private-use code points, and Unicode noncharacters before calendar, window, media, network, VPN, device, or popup text reaches SketchyBar.
-
-Provider output stays in the owned 0700 per-user runtime directory at
-`${TMPDIR:-/tmp}/sketchybar-stats-provider-$UID/provider.log`; it is an owned,
-non-symlink 0600 regular file opened with `O_NOFOLLOW`. Each verified provider
-exec safely resets that owned descriptor to bound growth; diagnostic append mode
-never truncates or follows an unsafe path. The provider PID, pre-fork launch intent,
-and launcher lock are in the same runtime directory. The launcher fsyncs the
-owned intent before fork. The child first claims and fsyncs that same intent inode with its own PID,
-then atomically publishes its PID before exact provider exec and removes/fsyncs
-the intent. A later launcher never removes pending intent. It waits briefly and then fails
-closed while any intent remains, whether its recorded owner is live or dead. A
-true crash before child claim therefore needs attended removal after process
-verification; this deliberate wedge prevents a second fork under scheduler
-uncertainty. PID publication refuses to overwrite a different live PID and
-uses an exclusive `O_NOFOLLOW` 0600 temporary, full write and sync, atomic
-replacement, and final same-inode validation. A
-crash-owned fixed temporary is recovered only when it is an owned, non-symlink,
-single-link 0600 regular file; unsafe temporary paths remain unchanged and fail
-closed. The launcher builds a complete owned 0700 unique staging directory with one
-no-follow, exclusive, fsynced 0600 owner record, fsyncs the stage, and uses macOS
-`renameatx_np(RENAME_EXCL)` to publish the whole `launcher.lock` directory without
-an empty visible state. Owner cleanup and confirmed-dead recovery revalidate the directory and record,
-then use the same no-replace primitive to move the complete lock to the fixed
-quarantine. After revalidation, a second no-replace rename detaches that complete
-quarantine to a unique cleanup directory and fsyncs the runtime before entry
-removal. Crashes during deletion therefore leave only invisible unique complete
-or empty cleanup residue, never a blocking empty fixed quarantine. Incomplete
-unique stages and detached cleanup residue are invisible to lock acquisition;
-any replacement or occupied or malformed fixed quarantine safely wedges. Only a
-validated live lock holder, validated live quarantine holder, or exclusive-publish
-`EEXIST` winner that revalidates as an exact safe live lock returns contention
-status 75 and becomes a no-op success. Unsafe, dead, malformed, or unrecoverable
-states return nonzero and append one generic diagnostic to the private provider
-log. The launcher preserves every existing recorded holder
-independent of relative, absolute, default, or explicit invocation spelling. PID
-reuse can safely wedge the launcher until manual cleanup, but cannot permit
-concurrent launch. It migrates prior owned PID metadata, verifies the full expected provider
-command, and fails closed if an owned process does not stop. It never uses
-`killall` or `pkill`.
-
-Useful checks:
+The privileged fan/power owner is a separate reviewed payload. `install-deps.sh` does not install it. The offline smoke gate builds and tests it only in a private `TMPDIR` scratch directory. It does not load a daemon or write fan or power state. Run its isolated gate with:
 
 ```sh
-sketchybar --query bar
-sketchybar --query space.1
-sketchybar --query front_window
-sketchybar --query status
-ps -axo pid=,command= | grep -E '[l]ua .*/sketchybar/bootstrap.lua|[s]tats_provider'
-df -k /System/Volumes/Data
+sketchybar/privileged/fan-power-owner/scripts/verify.sh
 ```
 
-The network sampler detects the default route; it never assumes `en0`. Rates
-use an atomic previous tuple, real elapsed time, nonnegative deltas, and a
-fixed logarithmic 100 MiB/s scale. The Data-volume sample uses
-`df /System/Volumes/Data`. Slow callbacks are generation guarded and coalesced.
+After explicit approval, the exact attended install command is:
 
-## Permissions and manual checks
+```sh
+/usr/bin/sudo -- /bin/sh -ceu '
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+umask 077
+source=/Users/twaldin/dotfiles/sketchybar/privileged/fan-power-owner/install.sh
+expected=bc386b90e07830791a9f155be6a33bf3e65cfd4b09d09f63f61c4482d0ac0205
+[ -f "$source" ] && [ ! -L "$source" ]
+[ "$(/usr/bin/stat -f "%Su %HT %Lp %l" "$source")" = "twaldin Regular File 755 1" ]
+[ "$(/usr/bin/shasum -a 256 "$source" | /usr/bin/cut -d" " -f1)" = "$expected" ]
+work=$(/usr/bin/mktemp -d /private/var/tmp/fan-power-owner-bootstrap.XXXXXX)
+trap "/bin/rm -rf $work" EXIT HUP INT TERM
+[ "$(/usr/bin/stat -f "%u %g %HT %Lp" "$work")" = "0 0 Directory 700" ]
+bootstrap_code=aW1wb3J0IG9zLHN0YXQsc3lzCnMsZCxuPXN5cy5hcmd2WzFdLHN5cy5hcmd2WzJdLGludChzeXMuYXJndlszXSkKYz1beCBmb3IgeCBpbiBzLnNwbGl0KG9zLnNlcCkgaWYgeF0KZj1vcy5vcGVuKG9zLnNlcCxvcy5PX1JET05MWXxvcy5PX0RJUkVDVE9SWXxvcy5PX0NMT0VYRUMpCnRyeToKIGZvciB4IGluIGNbOi0xXToKICBxPW9zLm9wZW4oeCxvcy5PX1JET05MWXxvcy5PX0RJUkVDVE9SWXxvcy5PX05PRk9MTE9XfG9zLk9fQ0xPRVhFQyxkaXJfZmQ9Zik7b3MuY2xvc2UoZik7Zj1xCiBpPW9zLm9wZW4oY1stMV0sb3MuT19SRE9OTFl8b3MuT19OT0ZPTExPV3xvcy5PX0NMT0VYRUN8b3MuT19OT05CTE9DSyxkaXJfZmQ9ZikKZmluYWxseTogb3MuY2xvc2UoZikKdD1vcy5mc3RhdChpKQppZiBub3Qgc3RhdC5TX0lTUkVHKHQuc3RfbW9kZSkgb3IgdC5zdF9ubGluayE9MSBvciB0LnN0X3NpemUhPW4gb3IgdC5zdF9tb2RlJjBvMDIyOiBvcy5jbG9zZShpKTtyYWlzZSBTeXN0ZW1FeGl0KDEpCm89b3Mub3BlbihkLG9zLk9fV1JPTkxZfG9zLk9fQ1JFQVR8b3MuT19FWENMfG9zLk9fTk9GT0xMT1d8b3MuT19DTE9FWEVDLDBvNTAwKQp0cnk6CiB3aGlsZSBuOgogIGI9b3MucmVhZChpLG1pbihuLDY1NTM2KSkKICBpZiBub3QgYjogcmFpc2UgU3lzdGVtRXhpdCgxKQogIG4tPWxlbihiKQogIHdoaWxlIGI6CiAgIHo9b3Mud3JpdGUobyxiKQogICBpZiB6PDE6IHJhaXNlIFN5c3RlbUV4aXQoMSkKICAgYj1iW3o6XQogaWYgb3MucmVhZChpLDEpOiByYWlzZSBTeXN0ZW1FeGl0KDEpCmZpbmFsbHk6IG9zLmNsb3NlKGkpO29zLmNsb3NlKG8pCg==
+/usr/bin/python3 -I -S -c "$(/usr/bin/printf %s "$bootstrap_code" | /usr/bin/base64 -D)" \
+  "$source" "$work/install.sh" 24307
+[ "$(/usr/bin/shasum -a 256 "$work/install.sh" | /usr/bin/cut -d" " -f1)" = "$expected" ]
+exec "$work/install.sh" "$@"
+' fan-power-owner-bootstrap install --target-user twaldin --manifest-sha256 08d951629b2d5c75c543bc9c559c827470cf772e3e14516a6b837aeefd6f3bfd
+```
 
-- `icalBuddy` can request Calendar access. Without it, the panel shows
-  `Calendar permission required`. The configuration does not read Calendar
-  files directly.
-- Tahoe can redact SSID from `networksetup`/`ipconfig` even when Wi-Fi has a
-  valid route. The panel then shows `—`. Location Services for the process that
-  starts SketchyBar can expose it; do not grant broader file access.
-- Yabai supplies window lists, app-to-Space mapping, and focus. Until its real
-  Cellar binary has Accessibility permission, the service is running, and its
-  primary topology is exactly 1..9, the bar correctly shows static Space numbers
-  and `Window list needs Yabai` without querying or exposing window content.
-- No item uses a private Control Center alias. Screen Recording, Full Disk
-  Access, and scripting additions are not required.
-- The native calendar launch uses public SketchyBar bounding rectangles and
-  public CoreGraphics/AppKit display geometry. The helper selects an exact
-  mapped rect only while the pointer is still inside it; a moved-pointer abort
-  does nothing and preserves focus. It does not use global Accessibility,
-  state-report files, hard-coded production display geometry, or synthetic HID.
-  A left-click toggle remains visible when the pointer moves. Escape, a second
-  date click, an outside physical mouse-down, screen change, wake, or an event
-  action closes it explicitly. Accessory-app deactivation alone never closes it.
-  Production validates its exact frame, four-point gap, display inset, and
-  one-window contract after ordering; a failed contract closes without opening
-  an unrelated Calendar window.
-- Pointer automation is currently blocked because `osascript` lacks Assistive
-  Access (`-25211`). Before activation on a deployment host, a human must check
-  VoiceOver, Full Keyboard Access, focus rings, Increase Contrast, pointer
-  dismissal, safe-link actions, multi-display anchoring, hover, scroll,
-  popup-boundary crossing, and slider drag at each display scale. Calendar and
-  Accessibility permission prompts are attended gates; do not reset TCC.
-- Popup rows are scoped to the active display. Resting controls return to all
-  displays after the popup closes.
+The fixed attended root-shell argument hash-binds and executes a root-owned installer copy before the lifecycle lock, root-owned source snapshot, embedded client CDHash, installed signatures and immutable flags, authenticated status, and rollback proof must all pass. A normal exit 1 proved restoration. Exit 2 means rollback or lifecycle-lock cleanup is incomplete. Stop and use `privileged/fan-power-owner/README.md`; do not retry. No agent ran the attended command.
 
-## Rollback
+The exact attended safe-uninstall command is:
 
-The prior shell configuration is at:
+```sh
+/usr/bin/sudo -- /bin/sh -ceu '
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+umask 077
+source=/Users/twaldin/dotfiles/sketchybar/privileged/fan-power-owner/install.sh
+expected=bc386b90e07830791a9f155be6a33bf3e65cfd4b09d09f63f61c4482d0ac0205
+[ -f "$source" ] && [ ! -L "$source" ]
+[ "$(/usr/bin/stat -f "%Su %HT %Lp %l" "$source")" = "twaldin Regular File 755 1" ]
+[ "$(/usr/bin/shasum -a 256 "$source" | /usr/bin/cut -d" " -f1)" = "$expected" ]
+work=$(/usr/bin/mktemp -d /private/var/tmp/fan-power-owner-bootstrap.XXXXXX)
+trap "/bin/rm -rf $work" EXIT HUP INT TERM
+[ "$(/usr/bin/stat -f "%u %g %HT %Lp" "$work")" = "0 0 Directory 700" ]
+bootstrap_code=aW1wb3J0IG9zLHN0YXQsc3lzCnMsZCxuPXN5cy5hcmd2WzFdLHN5cy5hcmd2WzJdLGludChzeXMuYXJndlszXSkKYz1beCBmb3IgeCBpbiBzLnNwbGl0KG9zLnNlcCkgaWYgeF0KZj1vcy5vcGVuKG9zLnNlcCxvcy5PX1JET05MWXxvcy5PX0RJUkVDVE9SWXxvcy5PX0NMT0VYRUMpCnRyeToKIGZvciB4IGluIGNbOi0xXToKICBxPW9zLm9wZW4oeCxvcy5PX1JET05MWXxvcy5PX0RJUkVDVE9SWXxvcy5PX05PRk9MTE9XfG9zLk9fQ0xPRVhFQyxkaXJfZmQ9Zik7b3MuY2xvc2UoZik7Zj1xCiBpPW9zLm9wZW4oY1stMV0sb3MuT19SRE9OTFl8b3MuT19OT0ZPTExPV3xvcy5PX0NMT0VYRUN8b3MuT19OT05CTE9DSyxkaXJfZmQ9ZikKZmluYWxseTogb3MuY2xvc2UoZikKdD1vcy5mc3RhdChpKQppZiBub3Qgc3RhdC5TX0lTUkVHKHQuc3RfbW9kZSkgb3IgdC5zdF9ubGluayE9MSBvciB0LnN0X3NpemUhPW4gb3IgdC5zdF9tb2RlJjBvMDIyOiBvcy5jbG9zZShpKTtyYWlzZSBTeXN0ZW1FeGl0KDEpCm89b3Mub3BlbihkLG9zLk9fV1JPTkxZfG9zLk9fQ1JFQVR8b3MuT19FWENMfG9zLk9fTk9GT0xMT1d8b3MuT19DTE9FWEVDLDBvNTAwKQp0cnk6CiB3aGlsZSBuOgogIGI9b3MucmVhZChpLG1pbihuLDY1NTM2KSkKICBpZiBub3QgYjogcmFpc2UgU3lzdGVtRXhpdCgxKQogIG4tPWxlbihiKQogIHdoaWxlIGI6CiAgIHo9b3Mud3JpdGUobyxiKQogICBpZiB6PDE6IHJhaXNlIFN5c3RlbUV4aXQoMSkKICAgYj1iW3o6XQogaWYgb3MucmVhZChpLDEpOiByYWlzZSBTeXN0ZW1FeGl0KDEpCmZpbmFsbHk6IG9zLmNsb3NlKGkpO29zLmNsb3NlKG8pCg==
+/usr/bin/python3 -I -S -c "$(/usr/bin/printf %s "$bootstrap_code" | /usr/bin/base64 -D)" \
+  "$source" "$work/install.sh" 24307
+[ "$(/usr/bin/shasum -a 256 "$work/install.sh" | /usr/bin/cut -d" " -f1)" = "$expected" ]
+exec "$work/install.sh" "$@"
+' fan-power-owner-bootstrap uninstall --target-user twaldin --manifest-sha256 08d951629b2d5c75c543bc9c559c827470cf772e3e14516a6b837aeefd6f3bfd
+```
 
-`~/.local/share/sketchybar-rollback/shell-config-before-sbarlua-20260806T1545`
+Uninstall removes nothing until the same installed release proves all fans are Automatic. It then verifies those exact hashes, signatures, immutable flags, socket, and loaded state again under the lifecycle lock before removal.
 
-Stop SketchyBar, restore that directory into `~/.config/sketchybar`, and start
-SketchyBar again. The backup is outside this repository.
+To run only the reviewed deployment transaction after an already-passed gate:
+
+```sh
+sketchybar/scripts/sketchybar-launch-agent.py
+```
+
+To stop the job:
+
+```sh
+/bin/launchctl bootout gui/$(/usr/bin/id -u)/homebrew.mxcl.sketchybar
+```
+
+A nonempty absolute macOS `TMPDIR` with a canonical, owner-owned mode-0700 directory is a hard requirement for the `sketchybarrc`, `provider-launch.sh`, `install-deps.sh`, and `smoke-config.sh` shell entrypoints. For these entrypoints, exit 64 means that `TMPDIR` is missing or is not absolute. Exit 73 means that its directory cannot be resolved or fails the ownership or mode check. Before runtime logs exist, a launch wrapper writes only this generic error to the private launchd stderr file above; it never prints the path. The audio, battery, and connectivity Python helpers instead fail closed with exit 1 and no diagnostic for an unsafe temporary-directory boundary.
+
+## Verification
+
+Run the complete offline configuration gate:
+
+```sh
+sketchybar/scripts/smoke-config.sh
+```
+
+Then run the anonymous live microphone active-use schema check. It confirms only that the selected input exposes the exact public Boolean schema through the input-first/global-fallback read path. It does not check whether the value changes with capture, and it prints only a fixed verdict with no device or process identity:
+
+```sh
+/usr/bin/python3 sketchybar/tests/system-controls-test.py sketchybar/scripts/system-controls.swift --live-active-schema
+```
+
+Then reload the bar and physically test each popup, enabled slider, toggle, device choice, Space action, and front-window action. During attended acceptance, start a real microphone capture and confirm that the dot glyph, recording color, semantic state, and popup row change to active. Stop capture and confirm that all four return to idle within the bounded refresh transaction. This is an observation step only; do not use synthetic input. For Display, test brightness and each optional control that is present, confirm its readback, confirm unsupported contrast and audio controls are absent, and confirm mode, refresh-rate, rotation, HDR, mirror, power, and layout actions are absent. Click a real macOS Notification Center notification and confirm that its overlay stays outside the Yabai BSP tree. Visual and click acceptance is attended. Do not use synthetic input for final acceptance.
+
+Complete Wi-Fi scan/join sheets, Bluetooth discovery/pairing sheets, keyboard navigation, VoiceOver, and popup scrolling require a full signed native AppKit owner. This host currently has no Developer ID identity, so the release uses explicit fixed-app System Settings handoffs for those flows. The narrower ad-hoc-signed network-name helper owns only its documented foreground Core Location request and readback; it does not scan, join, track location, or retain the name.
