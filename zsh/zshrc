@@ -1,6 +1,9 @@
 # If you come from bash you might have to change your $PATH.
 # export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
 
+# Codex/ChatGPT app shells are interactive non-login shells, so they do not read .zprofile.
+[ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)"
+
 eval "$(oh-my-posh init zsh --config ~/pure-modified.omp.json)"
 export PATH="$HOME/.cargo/bin:$PATH"
 export PATH="$HOME/.local/share/bob/nvim-bin:$PATH"
