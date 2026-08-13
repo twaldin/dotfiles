@@ -170,30 +170,32 @@ refresh_apps = function(availability_token)
   local token = windows_generation
   shell.exec_quiet({ settings.config_dir .. "/scripts/yabai-windows.sh", "all" }, function(windows, exit_code)
     if token ~= windows_generation or availability_token ~= refresh_generation or not yabai_available then return end
+    -- A transient window-query failure (guard exit mid Space animation) must not
+    -- blank the last accepted state; a real Yabai outage clears through the
+    -- availability path instead. Only an accepted response replaces state.
+    if exit_code ~= 0 or type(windows) ~= "table" then return end
     local next_apps = {}
     local next_selected_space = nil
     local next_focused_app = ""
-    if exit_code == 0 and type(windows) == "table" then
-      local seen = {}
-      for _, window in ipairs(windows) do
-        local index = tonumber(window.space)
-        if window["has-focus"] == true then
-          next_selected_space = index
-          next_focused_app = type(window.app) == "string" and shell.display(window.app) or ""
-        end
-        local app = type(window.app) == "string" and shell.display(window.app) or ""
-        local real_window = window.role == nil or window.role == "AXWindow"
-        if real_window and index and index >= 1 and index <= 9 and app ~= "" and app:lower() ~= "superwhisper" and icons.for_app(app) then
-          next_apps[index] = next_apps[index] or {}
-          seen[index] = seen[index] or {}
-          if not seen[index][app] then
-            seen[index][app] = true
-            next_apps[index][#next_apps[index] + 1] = app
-          end
+    local seen = {}
+    for _, window in ipairs(windows) do
+      local index = tonumber(window.space)
+      if window["has-focus"] == true then
+        next_selected_space = index
+        next_focused_app = type(window.app) == "string" and shell.display(window.app) or ""
+      end
+      local app = type(window.app) == "string" and shell.display(window.app) or ""
+      local real_window = window.role == nil or window.role == "AXWindow"
+      if real_window and index and index >= 1 and index <= 9 and app ~= "" and app:lower() ~= "superwhisper" and icons.for_app(app) then
+        next_apps[index] = next_apps[index] or {}
+        seen[index] = seen[index] or {}
+        if not seen[index][app] then
+          seen[index][app] = true
+          next_apps[index][#next_apps[index] + 1] = app
         end
       end
-      for _, apps in pairs(next_apps) do table.sort(apps) end
     end
+    for _, apps in pairs(next_apps) do table.sort(apps) end
     apps_by_space = next_apps
     selected_space = next_selected_space
     focused_app = next_focused_app
@@ -268,7 +270,13 @@ for index = 1, 9 do
   item:set({ background = { drawing = false } })
   item:subscribe("space_change", function(env)
     selected[index] = env.SELECTED == true or env.SELECTED == "true"
-    if selected[index] then selected_space = index; render_apps(settings.space_count) end
+    if selected[index] then
+      -- The focused app recorded for the previous Space must not bleed onto the
+      -- newly selected Space while the replacement windows query is in flight.
+      if selected_space ~= index then focused_app = "" end
+      selected_space = index
+      render_apps(settings.space_count)
+    end
     local idle_color = not yabai_available and colors.state.actionable
       or selected[index] and colors.accent or colors.muted
     if hover.is_active(item) then

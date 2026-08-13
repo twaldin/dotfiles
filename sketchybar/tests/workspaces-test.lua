@@ -183,7 +183,7 @@ check(objects["space.1"].properties.icon.color ~= require("colors").state.action
 
 window_result, window_exit = {}, 1
 refresh_spaces()
-check(window_query_count == 2 and objects["space.1"].properties.label.drawing == false, "failed windows response must clear apps and focused injection")
+check(window_query_count == 2 and objects["space.1"].properties.label.drawing == true, "failed windows response must retain the last accepted apps")
 window_result, window_exit = {}, 0
 refresh_spaces()
 check(window_query_count == 3 and objects["space.1"].properties.label.drawing == false, "empty windows response must clear apps and focused injection")
@@ -193,6 +193,11 @@ check(window_query_count == 4 and objects["space.1"].properties.label.drawing ==
 window_result = { { space = 1, app = "Safari", ["has-focus"] = true } }
 refresh_spaces()
 check(window_query_count == 5 and objects["space.1"].properties.label.drawing == true, "accepted current windows response restores current apps")
+for _, callback in ipairs(objects["space.2"].subscriptions.space_change or {}) do callback({ SELECTED = "true" }) end
+check(objects["space.2"].properties.label.drawing == false,
+  "space switch must not bleed the prior focused app onto the new Space")
+for _, callback in ipairs(objects["space.2"].subscriptions.space_change or {}) do callback({ SELECTED = "false" }) end
+for _, callback in ipairs(objects["space.1"].subscriptions.space_change or {}) do callback({ SELECTED = "true" }) end
 window_result = {
   { space = 1, app = "Safari", role = "AXWindow", ["has-focus"] = true },
   { space = 1, app = "Calendar", role = "AXWindow", ["has-focus"] = false },

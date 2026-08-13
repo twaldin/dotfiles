@@ -19,7 +19,7 @@ local M = {
     calendar_event_width = 164, calendar_date_width = 148,
     notch_reserve = 200, minimum_notched_width = 1512,
   },
-  release_fingerprint = "6bdc4e3b955f0ef19a1d4b3b55eb1f67ee6c6cf6a9e0e536ca620105e3461ef7",
+  release_fingerprint = "8ea7412f1701367c2d097dd60a996224f5d209989fbf6aebfd29cfbd6018cd0e",
   calendar_show_titles = true,
   left_layout = {
     -- 640 points plus the bar's 8-point edge padding equals the same

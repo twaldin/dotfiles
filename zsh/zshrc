@@ -49,7 +49,7 @@ claude-glm() {
 alias nosleep="sudo pmset -a disablesleep 1"
 alias yessleep="sudo pmset -a disablesleep 0"
 alias vi="nvim"
-alias pi="nvm use 20 && pi"
+alias pi="nvm use 24 && pi"
 
 # Atomically paste stdin into a flt agent's tmux pane (bracketed paste).
 # Survives terminal lag — the paste starts and ends as one unit, no Enter mid-paste.
