@@ -7,6 +7,15 @@ local icons = require("lib.icons")
 local window_pages = require("lib.window_pages")
 local generation = 0
 local app_name, title = "Desktop", ""
+-- Label metrics derive from the configured front width so the item can never
+-- overcommit its slot: icon span and paddings below mirror the initializer.
+local ICON_SPAN = 22 + 4
+local LABEL_PADDING = 4 + 6
+local function label_metrics(has_glyph)
+  local width = settings.left_layout.front_width - LABEL_PADDING - (has_glyph and ICON_SPAN or 0)
+  return width, math.max(4, math.floor(width / 7))
+end
+local INITIAL_LABEL_WIDTH, INITIAL_LABEL_CHARS = label_metrics(false)
 local item = sbar.add("item", "front_window", {
   position = "left",
   updates = true,
@@ -24,19 +33,20 @@ local item = sbar.add("item", "front_window", {
     padding_right = 0,
     font = settings.type.bar_app,
   },
-  label = { string = "Desktop", color = colors.primary, max_chars = 8, width = 54, align = "left", padding_left = 4, padding_right = 6 },
+  label = { string = "Desktop", color = colors.primary, max_chars = INITIAL_LABEL_CHARS, width = INITIAL_LABEL_WIDTH, align = "left", padding_left = 4, padding_right = 6 },
   background = { drawing = false, color = colors.surface, height = settings.surface_height, corner_radius = 0 },
   popup = { align = "left" },
 })
 
 local function render()
   local glyph = icons.for_app(app_name)
+  local label_width, label_chars = label_metrics(glyph ~= nil)
   item:set({
     width = settings.left_layout.front_width,
     icon = { string = glyph or "", drawing = glyph ~= nil },
     label = {
-      string = shell.ellipsis(app_name, glyph and 10 or 13),
-      width = glyph and 74 or 94, max_chars = glyph and 10 or 13,
+      string = shell.ellipsis(app_name, label_chars),
+      width = label_width, max_chars = label_chars,
     },
   })
 end

@@ -21,8 +21,9 @@ if "width = settings.battery_width" not in (ROOT / "items/battery.lua").read_tex
     raise SystemExit("battery width does not use the left-island budget")
 if front.count("settings.left_layout.front_width") < 2:
     raise SystemExit("front-window creation and updates do not share the width budget")
-if "max_chars = glyph and 10 or 13" not in front:
-    raise SystemExit("front-window label lacks a strict character bound")
+if ("local function label_metrics(" not in front or front.count("label_metrics(") < 3
+        or "math.floor(width / 7)" not in front):
+    raise SystemExit("front-window label bound is not derived from the width budget")
 combined = settings + front + workspaces
 if "q_layout" in combined:
     raise SystemExit("inert q_layout state remains")
