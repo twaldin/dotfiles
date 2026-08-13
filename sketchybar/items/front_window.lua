@@ -24,7 +24,7 @@ local item = sbar.add("item", "front_window", {
     padding_right = 0,
     font = settings.type.bar_app,
   },
-  label = { string = "Desktop", color = colors.primary, max_chars = 11, width = 74, align = "left", padding_left = 4, padding_right = 6 },
+  label = { string = "Desktop", color = colors.primary, max_chars = 8, width = 54, align = "left", padding_left = 4, padding_right = 6 },
   background = { drawing = false, color = colors.surface, height = settings.surface_height, corner_radius = 0 },
   popup = { align = "left" },
 })

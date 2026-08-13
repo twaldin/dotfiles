@@ -34,13 +34,31 @@ local function render_apps(count)
   local available = math.max(0, settings.spaces_width_limit - (24 + settings.spacing.item) * count)
   local remaining = math.floor(available / 20)
 
-  -- Give the selected workspace enough context first, then distribute the
-  -- remaining slots across the other workspaces. The old round-robin rule
-  -- capped every workspace at one icon on the shipped nine-space layout.
+  -- Coverage first: every occupied workspace gets one icon before any
+  -- workspace gets a second, walking the selected workspace first and then
+  -- ascending indices. The order is stable, so hopping Spaces never
+  -- reshuffles which occupied workspaces stay visible.
+  local order = {}
   if selected_space and selected_space >= 1 and selected_space <= count then
-    local selected_apps = visible_apps(selected_space)
-    allocations[selected_space] = math.min(2, #selected_apps, remaining)
-    remaining = remaining - allocations[selected_space]
+    order[1] = selected_space
+  end
+  for index = 1, count do
+    if index ~= order[1] then order[#order + 1] = index end
+  end
+  for _, index in ipairs(order) do
+    if remaining > 0 and allocations[index] == 0 and #visible_apps(index) > 0 then
+      allocations[index] = 1
+      remaining = remaining - 1
+    end
+  end
+  -- Then give the selected workspace a second icon of context before the
+  -- leftover slots round-robin across the rest.
+  if order[1] and remaining > 0 then
+    local selected_apps = visible_apps(order[1])
+    if allocations[order[1]] < math.min(2, #selected_apps) then
+      allocations[order[1]] = allocations[order[1]] + 1
+      remaining = remaining - 1
+    end
   end
   local progress = true
   while remaining > 0 and progress do

@@ -209,13 +209,33 @@ check(window_query_count == 6 and objects["space.1"].properties.label.width == 6
   "selected workspace receives three current app icons")
 check(not objects["space.1"].properties.label.string:find(":activity_monitor:", 1, true),
   "non-window Yabai records cannot leave stale workspace icons")
+window_result = {
+  { space = 1, app = "Ghostty", role = "AXWindow", ["has-focus"] = true },
+  { space = 2, app = "Zen", role = "AXWindow", ["has-focus"] = false },
+  { space = 3, app = "Slack", role = "AXWindow", ["has-focus"] = false },
+  { space = 4, app = "Discord", role = "AXWindow", ["has-focus"] = false },
+}
+refresh_spaces()
+for index = 1, 4 do
+  check(objects["space." .. index].properties.label.drawing == true,
+    "all four occupied workspaces must keep icon coverage simultaneously")
+end
+window_result[1]["has-focus"] = false
+window_result[4]["has-focus"] = true
+refresh_spaces()
+for index = 1, 4 do
+  check(objects["space." .. index].properties.label.drawing == true,
+    "icon coverage must stay stable when the selected workspace changes")
+end
+window_result = { { space = 1, app = "Safari", role = "AXWindow", ["has-focus"] = true } }
+refresh_spaces()
 defer_windows = true
 refresh_spaces()
-check(window_query_count == 7 and #pending_windows == 1, "stale callback fixture must hold one accepted windows response")
+check(window_query_count == 10 and #pending_windows == 1, "stale callback fixture must hold one accepted windows response")
 local pre_switch_label = objects["space.1"].properties.label.string
 for _, callback in ipairs(objects["space.1"].subscriptions.front_app_switched or {}) do callback({ INFO = "Calendar" }) end
 local switched_label = objects["space.1"].properties.label.string
-check(window_query_count == 8 and #pending_windows == 2 and switched_label == pre_switch_label, "front-app event content must stay ignored until guarded replacement data arrives")
+check(window_query_count == 11 and #pending_windows == 2 and switched_label == pre_switch_label, "front-app event content must stay ignored until guarded replacement data arrives")
 pending_windows[1](window_result, 0)
 check(objects["space.1"].properties.label.string == switched_label, "pre-switch windows callback must not overwrite current front-app state")
 
@@ -255,12 +275,12 @@ check(objects["space.1"].properties.background.drawing == false
   "rebuilt recovery popup must leave its orange host visually static")
 require("lib.popup").close()
 
-check(window_query_count == 8, "Yabai subset must not query windows")
+check(window_query_count == 11, "Yabai subset must not query windows")
 pending_windows[2](window_result, 0)
 check(objects["space.1"].properties.label.drawing == false, "stale out-of-order windows callback must not restore cleared apps")
 defer_windows = false
 for _, callback in ipairs(objects["space.1"].subscriptions.front_app_switched or {}) do callback({ INFO = "Safari" }) end
-check(objects["space.1"].properties.label.drawing == false and window_query_count == 8, "static fallback must ignore front-app content and not query windows")
+check(objects["space.1"].properties.label.drawing == false and window_query_count == 11, "static fallback must ignore front-app content and not query windows")
 check(not action_routes_focus(), "Yabai subset must not enable workspace actions")
 
 yabai_spaces = {
@@ -269,7 +289,7 @@ yabai_spaces = {
 }
 refresh_spaces()
 for index = 1, 9 do check(objects["space." .. index].properties.associated_space == index and objects["space." .. index].properties.label.drawing == false, "non-1-based Yabai data must use content-free static fallback") end
-check(window_query_count == 8, "non-1-based Yabai data must not query windows")
+check(window_query_count == 11, "non-1-based Yabai data must not query windows")
 check(not action_routes_focus(), "non-1-based Yabai data must not enable workspace actions")
 local hovered_space = objects["space.1"]
 for _, callback in ipairs(hovered_space.subscriptions["mouse.entered"] or {}) do callback({}) end
