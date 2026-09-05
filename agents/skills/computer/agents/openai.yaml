@@ -1,0 +1,3 @@
+interface:
+  display_name: "Computer"
+  short_description: "Prefer native desktop tools; identify capability gaps"

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Browser"
+  short_description: "Prefer native browser tools; discover fallbacks for gaps"

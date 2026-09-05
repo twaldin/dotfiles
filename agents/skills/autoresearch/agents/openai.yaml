@@ -1,0 +1,3 @@
+interface:
+  display_name: "Autoresearch"
+  short_description: "Hillclimb a measurable target within this session"

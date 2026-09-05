@@ -1,0 +1,5 @@
+interface:
+  display_name: "Zoom Out"
+  short_description: "Map this code's place in the larger system"
+policy:
+  allow_implicit_invocation: false

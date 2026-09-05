@@ -1,0 +1,27 @@
+{
+  "disabledProviders": [
+    "claude", "claude-md", "claude-plugins", "codex", "gemini", "opencode",
+    "cursor", "windsurf", "cline", "github", "vscode", "agent-plugins",
+    "omp-plugins", "mcp-json", "omp-managed", "agents"
+  ],
+  "skills": {
+    "enabled": true,
+    "enableCodexUser": false,
+    "enableClaudeUser": false,
+    "enableClaudeProject": false,
+    "enablePiUser": false,
+    "enablePiProject": true,
+    "enableAgentsUser": false,
+    "enableAgentsProject": false
+  },
+  "commands": {
+    "enableClaudeUser": false,
+    "enableClaudeProject": false,
+    "enableOpencodeUser": false,
+    "enableOpencodeProject": false
+  },
+  "mcp": { "enableProjectConfig": false },
+  "autolearn": { "enabled": false, "autoContinue": false },
+  "advisor": { "enabled": false },
+  "ask": { "timeout": 0 }
+}

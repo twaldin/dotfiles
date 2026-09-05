@@ -1,0 +1,44 @@
+# Agent setup
+
+One maintained skill library, small project guidance, and native harnesses. OMP runs tickets; Codex can be used entirely on its own.
+
+`skills.json` selects 25 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. The work-system guide is project-scoped, not part of the global catalog.
+
+## Install and verify
+
+Requires Python 3.11+ and Bun for existing OMP YAML settings. Run separately on each machine:
+
+```sh
+python3 agents/install.py                         # preview
+python3 agents/install.py --apply                 # archive and install
+python3 agents/verify.py                          # native OMP, no model turn
+python3 agents/verify_codex.py                    # native Codex, no model turn
+```
+
+`~/.agents/skills` is the canonical discovery path. Codex, Claude, OMP, Pi, Factory, Cursor, and other detected global skill directories point to it. Generated skill/reference files live in `~/.local/share/agent-setup/library`. Codex's native `.system` skills and installed native plugins remain separate from the selected catalog. Generated vendor plugin manifests are omitted so skill names are consistent across harnesses.
+
+Global AGENTS/CLAUDE entry points link to `instructions.md`: concise writing, simple solutions, local authentication, and respect for project scope. Native browser/computer tools come first. Herdr is the only retained custom hook. Old custom MCP servers, imported workflow plugins, and legacy instruction/skill copies are archived; native capabilities and model accounts stay local.
+
+## Project scope
+
+Open conversations in the actual repository or worktree. A project source contains a short `AGENTS.md`, optional selected `skills/`, and its pipeline when enrolled in ticket execution:
+
+```sh
+python3 agents/install.py --project /path/to/repo --project-source /path/to/guidance --apply
+python3 agents/verify.py /path/to/repo/nested --project /path/to/repo
+python3 agents/verify_codex.py /path/to/repo /path/to/repo/nested
+```
+
+Repeat `--project` for existing worktrees sharing a profile. Installation adds the work-system skill, local ignored project entry points, and native discovery exclusions. Team-owned skill files remain intact; Codex hides their old skill names and explicitly enables the selected canonical paths. The filters are shared across worktrees. New checkouts/worktrees need the same installation and verification before being called clean. Nested subsystem instructions still apply and must be checked for conflicting process.
+
+The installer backs up every replaced path under `~/.local/state/agent-setup/backups` and records a manifest. `--restore <backup>` restores only if none of those paths changed afterward; otherwise use the manifest for selective recovery without overwriting newer work. Credentials, native sessions, Git history, and running sessions are never synchronized or reset. Existing conversations retain old context; verify with fresh sessions.
+
+## Work system
+
+[tickets/](tickets/) contains the small Linear-to-OMP dispatcher. One session owns each ticket through its project's pipeline, including waits and landing validation. Linear holds the human task, decisions, status, and deliverable links. Optional private notes, detailed review evidence, errors, and native sessions stay on the executing host.
+
+Work and personal are separate deployments. Lindy code, accounts, project guidance, and sessions stay on work. Home executes the personal queue; Deckbox has the same general setup but is not a second dispatcher. No duplicate ownership, shared credential store, or new manager agent is introduced.
+
+The home catch-up directory is `~/agent-system`. Its README records the current rollout and points to the actual sources, local configuration, private notes, and Linear. Live Lindy ownership changes only through a deliberate later cutover.
+
+Upstream: Matt Pocock skills at `3cca18b368ae95cdbdebbff572ccafa662551015`; Vercel references at `063bee94c3f4df8453406c830b0a7df0f2860278`. Source metadata and licenses are retained. Do not run their bulk installers over this selected library.
