@@ -37,7 +37,7 @@ The installer backs up every replaced path under `~/.local/state/agent-setup/bac
 
 [tickets/](tickets/) contains the small Linear-to-OMP dispatcher. One session owns each ticket through its project's pipeline, including waits and landing validation. Linear holds the human task, decisions, status, and deliverable links. Optional private notes, detailed review evidence, errors, and native sessions stay on the executing host.
 
-Work and personal are separate deployments. Lindy code, accounts, project guidance, and sessions stay on work. Home executes the personal queue; Deckbox has the same general setup but is not a second dispatcher. No duplicate ownership, shared credential store, or new manager agent is introduced.
+Work and personal are separate deployments. Lindy code, accounts, project guidance, and sessions stay on work. Home executes the personal queue; Deckbox has the same general setup but is not a second dispatcher. Personal owners merge after their project checks and reviews pass, unless Tim specifies a ticket override. For Lindy, Tim enables PR auto-merge himself and the existing pipeline merges when ready. No duplicate ownership or shared credential store is introduced.
 
 The home catch-up directory is `~/agent-system`. Its README records the current rollout and points to the actual sources, local configuration, private notes, and Linear. Live Lindy ownership changes only through a deliberate later cutover.
 

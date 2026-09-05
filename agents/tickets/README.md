@@ -1,6 +1,6 @@
 # Linear → OMP
 
-One process polls one Linear workspace. Each authorized ticket gets one worktree and one native OMP session. That session follows its project's pipeline through implementation, review, feedback, Tim's merge, and landing validation. Temporary reviewers do not take over ownership. There is no stage scheduler or Symphony runtime fork.
+One process polls one Linear workspace. Each authorized ticket gets one worktree and one native OMP session. That session follows its project's pipeline through implementation, review, feedback, merge, and landing validation. Temporary reviewers do not take over ownership. There is no stage scheduler or Symphony runtime fork.
 
 ```sh
 omp-tickets status
@@ -11,6 +11,8 @@ omp-tickets retry TWA-7    # explicit retry of its existing owner
 ```
 
 `~/.config/omp-linear/config.json` pins the executing hostname, workspace and authenticated assignee. `repos` supplies checkout, GitHub repository/account, pipeline and optional model. `projects` maps outcome projects to repositories; an optional `default_repo` suits a one-repo workspace. Use one repo label only for otherwise ambiguous cross-repo tickets. Conflicts and unknown routes fail closed.
+
+`merge_policy` records the workspace default; `repos.<key>.merge_policy` overrides it. The owner reads this policy through the work-system skill and project pipeline; the dispatcher does not merge PRs or interpret ticket prose. Personal work defaults to `auto`: merge after the project's checks and reviews pass. Lindy uses `tim-enables-auto`: Tim enables auto-merge, then the existing pipeline merges when ready. A current explicit instruction from Tim can override a ticket's default. Keep required validation and branch protections intact. After changing a policy, let active turns finish and use the existing `retry` command to wake parked owners with the updated guidance when needed.
 
 Only Tim's assigned Todo tickets dispatch. Backlog/Triage/Canceled or reassignment withdraw execution. Real dependencies gate work. `pilot_issues` is an optional allowlist: an empty list admits nothing; removing the key allows configured, eligible Todo tickets. Concurrency limits running turns, not outputs: findings, artifacts, one PR, and stacks are supported. Attach every required PR to Linear so all are watched.
 
