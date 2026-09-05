@@ -22,6 +22,8 @@ The local SQLite record holds execution identity, delivered event fingerprints a
 
 Parked owners remain watched and release their coding slots. Every new Linear comment is delivered, regardless of author or prefix. A worker's own meaningful update can cause a no-op wake; its instructions say to finish quietly. Events arriving during a turn are not silently acknowledged. GitHub checks/reviews are read on current PR heads, with pagination; larger queues/stacks may need a longer poll interval to respect API limits.
 
+This also applies when a turn marks the ticket Done: new comments, scope changes or GitHub events keep the existing owner watched until a follow-up wake has received them. An owner's own outcome comment can require one quiet acknowledgement wake. The runner does not decide whether feedback is resolved; the owner checks acceptance before completion.
+
 Completion comes from ticket acceptance and project prose. Ready to Merge and Merged remain watched; an approval or green check alone is not Done. After required landing checks, the owner marks Done. Missing/corrupt sessions or missing owned worktrees require explicit recovery rather than silently discarding context. Owner locks survive a polling-process restart and a killed Python wrapper.
 
 One dispatcher host per deployment. Home runs personal work; Deckbox is not a competing dispatcher. Lindy cutover remains separate. Credentials, sessions and worktrees stay on their owning host.

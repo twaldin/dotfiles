@@ -516,7 +516,10 @@ Current PR/check/review snapshot:
             record.update(phase='parked', event=digest(event), failures=0, retry_at=0, error=None)
             if after['state']['id'] == config['teams'][after['team']['id']]['states']['Done']:
                 after_pr = pr_snapshot(repo, record['branch'], env, after)
-                record.update(phase='done', pr_event=digest(after_pr), event=digest(issue_event(after)))
+                # Done cannot acknowledge feedback that this turn never received.
+                # Keep watching until one quiet wake has seen every current event.
+                if record['event'] == digest(issue_event(after)) and record['pr_event'] == digest(after_pr):
+                    record['phase'] = 'done'
             store.save(record)
         except Withdrawn:
             record = store.get(key) or record

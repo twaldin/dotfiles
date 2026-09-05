@@ -575,8 +575,55 @@ p=Path(sys.argv[sys.argv.index('--session-dir')+1]);p.mkdir(exist_ok=True)
             api.issue=worker_state
             with patch.object(runner,'prepare_workspace',return_value=(work,dict(os.environ))),patch.object(runner,'pr_snapshot',return_value=[]):
                 runner.run_worker(cfg,store,api,ID)
+                # The owner's outcome comment gets one quiet acknowledgement wake.
+                self.assertEqual(store.get(ID)['phase'],'parked')
+                runner.run_worker(cfg,store,api,ID)
             self.assertEqual(store.get(ID)['phase'],'done')
             self.assertEqual(store.get(ID)['session_id'],'findings-session')
+
+    def test_done_delivers_feedback_arriving_during_turn_to_same_owner(self):
+        for change in ['comment', 'description', 'review']:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);cfg=config(root);store=runner.Store(root/'state');api=FakeLinear(issue('In Review'))
+                work=root/'worktree';work.mkdir();pipeline=root/'PIPELINE.md';pipeline.write_text('Preserve acceptance.')
+                fake=root/'fake-omp';fake.write_text('''#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+a=sys.argv;p=Path(a[a.index('--session-dir')+1]);p.mkdir(exist_ok=True)
+f=Path(a[a.index('--resume')+1]) if '--resume' in a else p/'native.jsonl'
+if not f.exists():f.write_text(json.dumps({'type':'session','id':'feedback-owner'})+'\\n')
+with f.open('a') as h:h.write(json.dumps({'type':'message','resumed':'--resume' in a})+'\\n')
+''');fake.chmod(0o755)
+                cfg['omp']=str(fake);cfg['repos']['hone']['pipeline']=str(pipeline)
+                record={'id':ID,'identifier':'TWA-7','repo':'hone','phase':'claimed','branch':'ticket/twa-7','worktree':str(work),'session':None,'failures':0}
+                store.save(record);directory=store.directory(record);directory.mkdir()
+                native=directory/'sessions/native.jsonl';original=api.issue
+                def worker_state(key):
+                    if native.exists():
+                        api.item['state']=issue('Done')['state']
+                        if change=='comment':api.item['comments']['nodes']=[{'id':'finding','body':'The acceptance finding is unresolved.'}]
+                        if change=='description':api.item['description']='Preserve the unmodified first-visit check.'
+                    return original(key)
+                api.issue=worker_state
+                # Completed tickets disappear from the normal polling query.
+                api.issues=lambda: [] if api.item['state']['name']=='Done' else [original(ID)]
+                def prs(*args):return [{'state':'MERGED','reviews':['Unresolved finding'] if change=='review' and native.exists() else []}]
+                with patch.object(runner,'prepare_workspace',return_value=(work,dict(os.environ))),patch.object(runner,'pr_snapshot',side_effect=prs),patch.object(runner,'github_env',return_value={}):
+                    runner.run_worker(cfg,store,api,ID)
+                    parked=store.get(ID)
+                    self.assertEqual(parked['phase'],'parked')
+                    events=runner.tick(cfg,store,api,launch=False)
+                    self.assertEqual(len(events),1)
+                    runner.run_worker(cfg,store,api,ID)
+                    final=store.get(ID)
+                    self.assertEqual(final['phase'],'done')
+                    self.assertEqual(final['session'],parked['session'])
+                    self.assertEqual(final['session_id'],'feedback-owner')
+                    self.assertIn('"resumed": true',native.read_text())
+                    prompt=(directory/'prompt.txt').read_text()
+                    expected={'comment':'The acceptance finding is unresolved.','description':'Preserve the unmodified first-visit check.','review':'Unresolved finding'}[change]
+                    self.assertIn(expected,prompt)
+                    self.assertEqual(runner.tick(cfg,store,api,launch=False),[])
 
 
 if __name__=='__main__':unittest.main()

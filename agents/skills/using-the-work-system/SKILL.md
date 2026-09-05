@@ -25,4 +25,6 @@ Use the actual workspace states as applicable: **In Progress**, **In Review**, *
 
 When waiting, end the turn. The dispatcher resumes this same session when Linear or GitHub changes. A wake containing only your own prior update needs no reply. Determine Done from ticket acceptance and the project pipeline: code must reach its intended destination and pass applicable landing checks; findings-only work can finish without a PR and must leave no unshipped edits. Approval, green CI, or an ended turn alone is not completion. Preserve human comments and unrelated labels.
 
+Immediately before marking a PR ready, enabling an authorized merge path, merging, or marking Done, refresh the ticket description/comments and the current PR state/reviews. Address new actionable feedback against acceptance. Investigate an unexpected draft transition before undoing it. Refresh and preserve existing private notes when writing evidence; another conversation may have added a finding during your turn.
+
 `omp-tickets status` is private diagnostics. Configuration, recovery, and explicit retry are setup maintenance, not ordinary worker tasks.
