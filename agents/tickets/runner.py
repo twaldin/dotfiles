@@ -727,13 +727,17 @@ def tick(config, store, linear, *, launch=True):
         return record.get('phase') == 'starting' and now - record.get('requested_at', 0) < 30
     active = sum(store.busy(record) or pending(record) for record in records.values())
     for issue in sorted(issues.values(), key=lambda i: (i.get('priority') or 5, i['identifier'])):
-        record = records.get(issue['id'])
+        # Linear reads can outlast an owner turn. Use its current outcome rather
+        # than reviving the running snapshot captured before those reads.
+        record = store.get(issue['id'])
         try:
-            owned = has_owner(record)
             if record and (store.busy(record) or pending(record)):
-                if launch and owned and not policy.deferred(issue, config, record['repo']):
+                if launch and has_owner(record) and not policy.deferred(issue, config, record['repo']):
                     publish(config, store, linear, store.get(record['id']), issue)
                 continue
+            # The owner can finish between the read above and the lock check.
+            record = store.get(issue['id'])
+            owned = has_owner(record)
             if not assigned_to_owner(issue, config):
                 if launch and record:
                     reconcile_input(config, store, record, issue)

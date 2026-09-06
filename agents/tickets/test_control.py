@@ -162,6 +162,34 @@ class OwnerOutcomes(unittest.TestCase):
         record=self.store.get(ID)
         self.assertEqual(self.api.item['state']['name'],'In Review')
         self.assertIsNone(runner.wake_reason(self.api.item,record,runner.issue_event(self.api.item),self.pr,time.time()))
+    def test_owner_finishing_during_intake_read_is_not_restarted(self):
+        for lifecycle,phase,stage,state in [('complete','done','complete','Done'),('waiting','parked','review','In Review')]:
+            for boundary in ['intake','lock']:
+                with self.subTest(lifecycle=lifecycle,boundary=boundary):
+                    self.outcome({'lifecycle':lifecycle,'stage':stage,'evidence':'Reviewed result recorded.'})
+                    (self.root/'delay').write_text('1.2')
+                    (self.root/'ready').unlink(missing_ok=True)
+                    original_issues=self.api.issues;original_busy=self.store.busy;busy_calls=0
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        task=pool.submit(self.run_owner)
+                        deadline=time.monotonic()+5
+                        while not (self.root/'ready').exists() and time.monotonic()<deadline:time.sleep(.01)
+                        self.assertTrue((self.root/'ready').exists())
+                        self.assertEqual(self.store.get(ID)['phase'],'running')
+                        def finish_during_read():
+                            if boundary=='intake':task.result(timeout=5)
+                            return original_issues()
+                        def finish_before_lock_check(record):
+                            nonlocal busy_calls
+                            busy_calls+=1
+                            if boundary=='lock' and busy_calls==2:task.result(timeout=5)
+                            return original_busy(record)
+                        with patch.object(self.api,'issues',side_effect=finish_during_read),patch.object(self.store,'busy',side_effect=finish_before_lock_check),patch.object(runner.subprocess,'Popen') as popen:
+                            events=runner.tick(self.cfg,self.store,self.api)
+                            popen.assert_not_called()
+                    self.assertEqual(events,[])
+                    self.assertEqual(self.store.get(ID)['phase'],phase)
+                    self.assertEqual(self.api.item['state']['name'],state)
     def test_unfinished_exit_retries_without_false_completion(self):
         (self.root/'mode').write_text('unfinished')
         self.run_owner();record=self.store.get(ID)
