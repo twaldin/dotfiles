@@ -1,17 +1,20 @@
-# Writing a useful ticket
+# Conversations and tickets
 
-The Linear description is the human-facing agreement: intent, scope, and observable acceptance. Keep it small enough to read easily. Fold decisions that change the task back into that description. Link maintained specifications where useful.
+Read the workspace's configured authoring reference and repository profile. Inspect existing tickets, PRs, ownership and current source before creating or scoping work. Use the native question tool for decisions you cannot establish from that context.
 
-Use the selected grilling, wayfinding, and to-tickets skills to clarify and split outcomes. Scale the result to the task:
+The internal brief is the maintained scope, decisions, constraints and acceptance. Linear presents that agreement concisely and holds durable human questions/answers. Detailed investigations and logs stay private. A Linear edit is new input for the owner to reconcile; it does not replace a saved worker or silently change its repository.
 
-- What should change or become known, and why?
-- What belongs in scope, and what constraints actually matter?
-- How will we know the outcome is achieved?
+Create one executable ticket per repository, linking tickets for a cross-repository effort. Assign it to the configured user. Select teams, efforts and required labels according to this workspace's rules. Personal policy may create/use a repository label; Lindy may require unrelated conventions such as an on-call label. Infer neither from generic engine rules.
 
-Put investigation trails, implementation suggestions, detailed check/review evidence, and runner data outside Linear. When extra agent context is useful, use `~/.local/state/omp-linear/<issue-uuid>/notes.md` on the executing host (directory 700, file 600). It is optional and supplements the ticket; it cannot silently change public scope or acceptance. Resolve the UUID through Linear rather than guessing. The runner supplies this path to its owner. Notes alone do not dispatch or wake work; the current ticket state controls authorization.
+Record a known route with `omp-tickets register <issue> --repo <key>`. A conversation in a registered repository can supply that route directly. This does not dispatch work. Keep ideas deferred; the configured intake state requests an owner. Initially this is Todo in both deployments. Thin tickets may get brief owner investigation, then a question and a wait; authorship by a teammate or agent is not an authorization class.
 
-Set Tim as assignee, choose the outcome project, and use the smallest routing signal the configuration needs. Add genuine technical dependencies as blocking relations. Backlog holds ideas; Triage holds unresolved intake decisions; Todo authorizes executable work. Read the live board and current code before adding or promoting a ticket. Preserve existing ownership and check any dispatch allowlist.
+For an existing ticket:
 
-A scoped investigation is executable even when its answer is unknown. A task with unclear permission, ownership, or desired change is not. Let the worker choose findings, artifacts, one PR, or a stack unless the required output matters to acceptance. Put shared review/merge policy in the project pipeline rather than every ticket. Record an explicit ticket override only when Tim requests one, for example “Wait for Tim's approval before merging this ticket.” Agents cannot grant themselves exceptions to a human gate.
+- Read `omp-tickets show <issue>`, current Linear discussion and deliverables.
+- Record Tim's answer on Linear, or let his direct comment reach the existing owner. A question can be answered by any conversation; resolve it through the actual discussion, not a comment prefix or shared account identity.
+- When scope changes, save the updated internal brief to a local text file and run `omp-tickets refine <issue> --input <file>`. Keep the concise Linear description consistent with the agreement. This wakes the same owner.
+- For an explicit pause, use `omp-tickets hold <issue> --reason '<reason>'` and record the human explanation on Linear. It stops the current turn/helpers and preserves work. `release <issue>` resumes the same owner; a brief edit alone does not release a hold. Configured deferred/start states provide the workspace's Linear control surface too.
 
-For docs cleanup, correct demonstrated inaccuracies and remove demonstrated duplication or obsolete process. A name like plan, spec, or handoff is not evidence that a file is disposable. Preserve useful constraints, decisions, research, third-party material, and user content. Keep uncertain removals as specific follow-ups. Finding no justified change is a valid result; do not invent a cosmetic PR.
+Tim coordinates competing conversations. Reread current context and preserve others' changes; do not add semantic conflict arbitration or revision approval rituals.
+
+A finding can be the right deliverable. Preserve useful project knowledge and unrelated work; a docs audit with no justified edit needs no cosmetic PR. Put reusable pipeline rules in the profile, and ticket-specific overrides in its brief and human agreement.

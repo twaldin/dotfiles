@@ -1,29 +1,55 @@
-# Linear → OMP
+# Linear and native OMP owners
 
-One process polls one Linear workspace. Each authorized ticket gets one worktree and one native OMP session. That session follows its project's pipeline through implementation, review, feedback, merge, and landing validation. Temporary reviewers do not take over ownership. There is no stage scheduler or Symphony runtime fork.
+One dispatcher polls one workspace. A ticket gets one worktree and one native OMP session through investigation, questions, implementation, review, merge and landed acceptance. The owner follows its repository pipeline; the dispatcher delivers input and scheduled wakeups.
+
+## Configuration and registry
+
+`~/.config/omp-linear/config.json` pins the executing host, authenticated workspace/user, state directory, concurrency and poll cadence. An optional `registry` path loads maintained `repos`, `routes`, `teams`, `workflow`, `merge_policy`, `authoring` and `default_repo`. Credentials remain in native machine-local stores. The service reloads policy between polls; changing deployment identity requires a deliberate restart.
+
+Each repository records `github`, `github_user`, checkout `path`, `profile` directory, `pipeline`, optional `base`, `model`, `merge_policy` and `workflow` overrides. Profile preparation uses the existing installer in project-only mode, backs up changes and verifies native OMP/Codex discovery. Subsequent worktrees receive it automatically before their owner starts. A host without Codex records that limitation.
+
+`routes.labels` maps label UUIDs to repository keys; `routes.teams` and optional `routes.projects` provide other workspace hints. `default_repo` needs no public repository field. A conversation can directly register a ticket's repository. Existing ownership uses its saved route even if display hints change. A workspace may explicitly configure `routes.label_prefix`; the engine supplies no repository-label prefix. Migrate old conventions into policy before enabling the updated dispatcher.
+
+Workspace `workflow` supports:
+
+- `start_states`: existing state UUIDs/names that request an owner. Configure `["Todo"]` for the selected initial personal/work defaults; an absent mapping requests no owners.
+- `defer_states` / `cancel_states` and `defer_types` / `cancel_types`: explicit withdrawal mappings. Defaults defer Backlog/Triage types and stop canceled/duplicate work.
+- `excluded_labels`: optional intake exclusions chosen by this workspace.
+- `states`: publication keys such as active/review/ready/landed/complete mapped to existing state names or UUIDs. An absent or empty map publishes no statuses. Unknown/unmapped stages leave the current field alone.
+- `attention_labels`: optional existing label UUIDs/names used for human attention. Updates touch only these labels and preserve unrelated ones.
+
+Team and repository workflow overrides refine the workspace mapping. `teams.<uuid>.states` records existing name-to-ID mappings. The shared engine requires no custom team, state or label. Personal repository labels and Lindy's existing authoring conventions belong in their maintained policy.
+
+`pilot_issues` is an optional UUID/readable-identifier allowlist. Empty admits no new work; removing it admits eligible registered work. It does not remove an existing owner's identity. Concurrency counts running turns; waiting owners release their slots.
+
+## Conversation and owner commands
 
 ```sh
 omp-tickets status
-omp-tickets check          # candidates, no dispatch; stop the service first
-omp-tickets once
-omp-tickets serve
-omp-tickets retry TWA-7    # explicit retry of its existing owner
+omp-tickets attention
+omp-tickets show TWA-7
+omp-tickets enroll --input /absolute/path/repository.json
+omp-tickets register TWA-7 --repo website
+omp-tickets refine TWA-7 --input /absolute/path/brief.md
+omp-tickets hold TWA-7 --reason 'Wait for the scope discussion'
+omp-tickets release TWA-7
+omp-tickets retry TWA-7
 ```
 
-`~/.config/omp-linear/config.json` pins the executing hostname, workspace and authenticated assignee. `repos` supplies checkout, GitHub repository/account, pipeline and optional model. `projects` maps outcome projects to repositories; an optional `default_repo` suits a one-repo workspace. Use one repo label only for otherwise ambiguous cross-repo tickets. Conflicts and unknown routes fail closed.
+Enrollment input contains `key`, `repository` and optional `routing.label_id`. Create/reuse human fields through the workspace's authoring guidance; the engine validates supplied identities and retains the registry mapping. Enrollment does not itself promote Backlog work or create another dispatcher.
 
-`merge_policy` records the workspace default; `repos.<key>.merge_policy` overrides it. The owner reads this policy through the work-system skill and project pipeline; the dispatcher does not merge PRs or interpret ticket prose. Personal work defaults to `auto`: merge after the project's checks and reviews pass. Lindy uses `tim-enables-auto`: Tim enables auto-merge, then the existing pipeline merges when ready. A current explicit instruction from Tim can override a ticket's default. Keep required validation and branch protections intact. After changing a policy, let active turns finish and use the existing `retry` command to wake parked owners with the updated guidance when needed.
+The global using-the-work-system skill directs any ticket conversation to workspace/project guidance. A small optional `~/.config/agent-setup/workspaces.json` index can identify the owning host/configuration when this machine has no deployment. Run operations on the owning host; ordinary coding conversations need no ticket.
 
-Only Tim's assigned Todo tickets dispatch. Backlog/Triage/Canceled or reassignment withdraw execution. Real dependencies gate work. `pilot_issues` is an optional allowlist: an empty list admits nothing; removing the key allows configured, eligible Todo tickets. Concurrency limits running turns, not outputs: findings, artifacts, one PR, and stacks are supported. Attach every required PR to Linear so all are watched.
+An owner ends each turn with `settle`, supplying JSON with `lifecycle` active/waiting/complete, optional publication `stage`, `attention`, `next_check_at` (Unix timestamp), and acceptance `evidence` for completion. Its environment identifies the current ticket/turn/configuration. The skill contains the command and field guidance. An unfinished exit retries the same owner; exhausted retries become private attention.
 
-Linear is human-facing. Keep intent, scope, observable acceptance, useful decisions, state, deliverable links, and a short outcome there. The runner posts no claim/retry comments and creates no infrastructure-error labels. Detailed context and evidence can live in `~/.local/state/omp-linear/<issue-uuid>/notes.md` (700 directory, 600 file). It is optional and cannot silently change ticket acceptance. No hidden Linear metadata is used as private storage.
+## Durable behavior
 
-The local SQLite record holds execution identity, delivered event fingerprints and retries. Native OMP session files are the transcript; stdout is discarded instead of duplicated. Private worker/stderr logs retain operational diagnostics. A turn that ends while still In Progress is retried so unfinished work cannot silently park. Three failed attempts pause for explicit retry; inspect `status` or the private monitor. No secrets should be printed by workers.
+The private SQLite record holds the canonical brief, explicit holds, attention, lifecycle and next check separately from runtime snapshots. Transactional control updates survive a worker saving an older runtime snapshot. They do not arbitrate conflicting conversations. Tim and the agents coordinate scope through ordinary discussion.
 
-Parked owners remain watched and release their coding slots. Every new Linear comment is delivered, regardless of author or prefix. A worker's own meaningful update can cause a no-op wake; its instructions say to finish quietly. Events arriving during a turn are not silently acknowledged. GitHub checks/reviews are read on current PR heads, with pagination; larger queues/stacks may need a longer poll interval to respect API limits.
+A Linear start/defer transition is an explicit input. Other permitted statuses/labels publish internal progress; failed publication is retried without preventing authorized coding. Questions and answers stay concise on Linear. Holds stop the current process group and preserve the native session/worktree; release returns to that owner. While Linear is unreadable, owner guidance permits coding but requires waiting before merge/deploy until new input can be checked.
 
-This also applies when a turn marks the ticket Done: new comments, scope changes or GitHub events keep the existing owner watched until a follow-up wake has received them. An owner's own outcome comment can require one quiet acknowledgement wake. The runner does not decide whether feedback is resolved; the owner checks acceptance before completion.
+Every changed ticket/PR snapshot is delivered regardless of comment author or prefix. A worker's own update can cause one quiet acknowledgement. Completed owners remain observed, with configurable `completed_poll_seconds` (default 300). Changes arriving during or after the final turn are not acknowledged from an unread snapshot. Scheduled checks wake the same owner. GitHub snapshots include PR head, draft/auto-merge signals, paginated checks, statuses, reviews/comments and all attached PRs in a stack.
 
-Completion comes from ticket acceptance and project prose. Ready to Merge and Merged remain watched; an approval or green check alone is not Done. After required landing checks, the owner marks Done. Missing/corrupt sessions or missing owned worktrees require explicit recovery rather than silently discarding context. Owner locks survive a polling-process restart and a killed Python wrapper.
+Personal `auto` owners use the normal permitted merge path after required review/checks/acceptance, respecting holds and branch protections. Lindy `tim-enables-auto` means Tim enables auto-merge; owners watch its existing pipeline and verify landed/deployed acceptance. Repository-specific deployment interpretation stays in the pipeline reference and owner.
 
-One dispatcher host per deployment. Home runs personal work; Deckbox is not a competing dispatcher. Lindy cutover remains separate. Credentials, sessions and worktrees stay on their owning host.
+Native sessions are the transcript; stdout is discarded. Diagnostics and evidence stay in the private state directory. Missing/corrupt sessions or owned worktrees require explicit recovery. Keep ownership locks, local auth and original Git identities across rollout and restarts.

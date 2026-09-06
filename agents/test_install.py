@@ -87,7 +87,7 @@ class SharedInstall(unittest.TestCase):
             for relative in ['.codex/skills', '.claude/skills', '.agent/skills', '.omp/skills', '.pi/agent/skills', '.factory/skills']:
                 self.assertEqual((home / relative).resolve(), target)
             self.assertFalse((target / 'obsolete').exists())
-            self.assertFalse((target / 'using-the-work-system').exists())
+            self.assertTrue((target / 'using-the-work-system/SKILL.md').is_file())
             self.assertTrue((target / '.system/native/SKILL.md').is_file())
             self.assertEqual(fingerprint(auth), before[auth])
             cfg = tomllib.loads((home / '.codex/config.toml').read_text())
@@ -129,6 +129,33 @@ class SharedInstall(unittest.TestCase):
                 self.assertEqual(len(ignored.stdout.splitlines()), 3)
             result = subprocess.run(command, check=True, capture_output=True, text=True)
             self.assertIn('0 changes', result.stdout)
+
+    def test_project_only_preserves_global_models_tools_and_workflow(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            home=Path(scratch)
+            command=[sys.executable,str(Path(__file__).with_name('install.py')),'--home',str(home)]
+            subprocess.run(command+['--apply'],check=True,capture_output=True)
+            native=home/'.omp/agent/config.yml'
+            before=read_settings(native)
+            before['modelRoles']['default']='local/explicit-session-preference'
+            before['localFutureSetting']={'preserve':True}
+            native.write_text(yaml_value(before))
+            repo=home/'project';repo.mkdir()
+            subprocess.run(['git','init','-q',str(repo)],check=True)
+            profile=home/'profile';profile.mkdir()
+            (profile/'AGENTS.md').write_text('Project guidance.')
+            (profile/'WORKFLOW.md').write_text('Check and verify the landed result.')
+            auth=home/'.omp/agent/local-account';auth.write_text('fixture native credential')
+            fingerprint_before=fingerprint(auth)
+            args=command+['--project-only','--project',str(repo),'--project-source',str(profile)]
+            subprocess.run(args+['--apply'],check=True,capture_output=True)
+            actual=read_settings(native)
+            self.assertEqual({k:v for k,v in actual.items() if k!='disabledProviders'},
+                             {k:v for k,v in before.items() if k!='disabledProviders'})
+            self.assertEqual(fingerprint(auth),fingerprint_before)
+            self.assertEqual((repo/'WORKFLOW.md').read_text(),(profile/'WORKFLOW.md').read_text())
+            self.assertTrue((repo/'WORKFLOW.md').is_symlink())
+            self.assertIn('0 changes',subprocess.run(args,check=True,capture_output=True,text=True).stdout)
 
 
 if __name__ == '__main__':

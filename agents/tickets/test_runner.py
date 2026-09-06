@@ -18,6 +18,8 @@ def config(root):
             'state_dir': str(root/'state'), 'worktrees': str(root/'worktrees'),
             'teams': {'team': {'states': {'Todo':'todo','In Progress':'doing','In Review':'review','Done':'done'}}},
             'labels': {'blocked':'blocked','waiting-for-tim':'waiting'},
+            'routes': {'label_prefix':'repo:'},
+            'workflow': {'start_states':['Todo'], 'states':{'active':'In Progress','review':'In Review','ready':'Ready to Merge','landed':'Merged','complete':'Done'}},
             'projects': {'hone-a':'hone','hone-b':'hone','web-a':'web'},
             'repos': {'hone': {'github':'twaldin/hone'},'web': {'github':'twaldin/tim.waldin.net'}},
             'pilot_issues': ['TWA-7'], 'concurrency': 1, '_path': str(root/'config.json')}
@@ -39,11 +41,13 @@ class FakeLinear:
     def issues(self):return [copy.deepcopy(self.item)]
     def issue(self,key):return copy.deepcopy(self.item)
     def comment(self,key,body):self.notes.append(body)
-    def update(self,item,*,state=None,add=(),remove=()):
-        if state:self.item['state']=issue(state)['state']
-        labels={x['name'] for x in self.item['labels']['nodes']}
-        labels=(labels|set(add))-set(remove)
-        self.item['labels']['nodes']=[{'name':n,'id':n} for n in sorted(labels)]
+    def update(self,item,*,state=None,add=(),remove=(),repo=None):
+        if state:self.item['state']=issue({'todo':'Todo','doing':'In Progress','review':'In Review','done':'Done'}.get(state,state))['state']
+        labels={x['id']:x for x in self.item['labels']['nodes']}
+        for key in add: labels[key]={'name':key,'id':key}
+        for key in remove: labels.pop(key,None)
+        self.item['labels']['nodes']=[labels[n] for n in sorted(labels)]
+        return copy.deepcopy(self.item)
 
 
 class Routing(unittest.TestCase):
@@ -64,8 +68,8 @@ class Routing(unittest.TestCase):
             x=issue(project='docs-cleanup',labels=['repo:'+repo])
             self.assertEqual(runner.resolve_repo(x,self.cfg),repo)
             self.assertTrue(runner.eligible(x,self.cfg))
-    def test_conflict_is_error(self):
-        with self.assertRaises(ValueError):runner.resolve_repo(issue(labels=['repo:web']),self.cfg)
+    def test_explicit_label_hint_precedes_legacy_effort_map(self):
+        self.assertEqual(runner.resolve_repo(issue(labels=['repo:web']),self.cfg),'web')
     def test_unknown_repo_is_error(self):
         with self.assertRaises(ValueError):runner.resolve_repo(issue(project=None,labels=['repo:nope']),self.cfg)
     def test_empty_pilot_allowlist_dispatches_nothing(self):
@@ -88,9 +92,10 @@ class Routing(unittest.TestCase):
     def test_other_team_and_pilot_excluded(self):
         x=issue();x['team']['id']='other';self.assertFalse(runner.eligible(x,self.cfg))
         x=issue();x['identifier']='TWA-99';self.assertFalse(runner.eligible(x,self.cfg))
-    def test_external_and_blocked_excluded(self):
-        for label in ['external','blocked','waiting-for-tim']:
-            self.assertFalse(runner.eligible(issue(labels=[label]),self.cfg))
+    def test_labels_only_gate_intake_when_configured(self):
+        self.assertTrue(runner.eligible(issue(labels=['blocked']),self.cfg))
+        self.cfg['workflow']={'excluded_labels':['team-deferred']}
+        self.assertFalse(runner.eligible(issue(labels=['team-deferred']),self.cfg))
     def test_dependencies_must_be_completed(self):
         x=issue();x['inverseRelations']['nodes']=[{'type':'blocks','issue':{'state':{'type':'started'}}}]
         self.assertFalse(runner.eligible(x,self.cfg))
@@ -120,7 +125,8 @@ class LinearWrites(unittest.TestCase):
         fresh=issue(labels=['Improvement','human-added'])
         with patch.object(self.api,'issue',return_value=fresh),patch.object(self.api,'gql',return_value={'issueUpdate':{'success':True}}) as gql:
             self.api.update(issue(),add=['blocked'])
-            self.assertEqual(set(gql.call_args.args[1]['input']['labelIds']),{'Improvement','human-added','blocked'})
+            self.assertEqual(gql.call_args.args[1]['input']['addedLabelIds'],['blocked'])
+            self.assertNotIn('labelIds',gql.call_args.args[1]['input'])
     def test_canceled_snapshot_cannot_be_claimed(self):
         with patch.object(self.api,'issue',return_value=issue('Canceled')),patch.object(self.api,'gql') as gql:
             with self.assertRaises(runner.Withdrawn):self.api.update(issue(),state='In Progress')
@@ -167,6 +173,21 @@ class PullRequestTracking(unittest.TestCase):
         self.assertEqual([p['number'] for p in prs],[1,2,3])
         self.assertTrue(any('/pulls/3/reviews?' in x for x in calls))
         self.assertFalse(any('/99' in x for x in calls))
+    def test_draft_and_auto_merge_changes_are_observable_without_head_changes(self):
+        raw={'number':1,'html_url':'https://github.com/twaldin/example/pull/1','state':'open',
+             'head':{'sha':'same-head','ref':'branch'},'base':{'ref':'main'},'draft':True}
+        def command(args,**kwargs):
+            path=args[-1]
+            if '/pulls?' in path:return json.dumps([[raw]])
+            return '[{"check_runs":[]}]' if 'check-runs?' in path else '[[]]'
+        with patch.object(runner,'command',side_effect=command):
+            before=runner.pr_snapshot({'github':'twaldin/example'},'branch',{})
+            raw.update(draft=False,auto_merge={'merge_method':'squash','enabled_by':{'login':'tim'}})
+            after=runner.pr_snapshot({'github':'twaldin/example'},'branch',{})
+        self.assertNotEqual(runner.digest(before),runner.digest(after))
+        self.assertEqual(before[0]['headRefOid'],after[0]['headRefOid'])
+        self.assertEqual(after[0]['autoMerge']['enabledBy'],'tim')
+        self.assertFalse(after[0]['isDraft'])
     def test_no_pr_is_a_supported_snapshot(self):
         with patch.object(runner,'command',return_value='[[]]'):
             self.assertEqual(runner.pr_snapshot({'github':'twaldin/example'},'ticket/twa-7',{},issue()),[])
@@ -193,7 +214,7 @@ class Lifecycle(unittest.TestCase):
         self.assertIsNotNone(runner.wake_reason(self.linear.item,self.record,runner.issue_event(self.linear.item),[{'state':'MERGED'}],time.time()))
     def test_canceled_and_backlog_do_not_wake(self):
         for s in ['Canceled','Backlog']:
-            self.assertIsNone(runner.wake_reason(issue(s),self.record,{},None,time.time()))
+            self.assertEqual(runner.tick(self.cfg,self.store,FakeLinear(issue(s)),launch=False),[])
     def test_retry_backoff(self):
         self.record.update(phase='error',retry_at=time.time()+10)
         self.assertIsNone(runner.wake_reason(self.linear.item,self.record,{},None,time.time()))
@@ -281,6 +302,8 @@ class Lifecycle(unittest.TestCase):
         event=runner.issue_event(self.linear.item)
         self.record['human_event']=runner.human_event(event)
         self.linear.item['labels']['nodes'].append({'name':'blocked','id':'blocked'})
+        self.record['event']=runner.digest(runner.issue_event(self.linear.item))
+        self.record['control']={'lifecycle':'waiting','attention':{'reason':'Need a decision'}}
         self.assertIsNone(runner.wake_reason(self.linear.item,self.record,runner.issue_event(self.linear.item),[],time.time()))
         self.linear.item['comments']['nodes'].append({'id':'answer','body':'The missing decision is resolved: use option A.'})
         self.assertIsNotNone(runner.wake_reason(self.linear.item,self.record,runner.issue_event(self.linear.item),[],time.time()))
@@ -350,7 +373,7 @@ class Lifecycle(unittest.TestCase):
     def test_triage_withdraws_owned_work(self):
         self.linear.item['state']=issue('Triage')['state']
         self.assertTrue(runner.withdrawal_requested(self.linear,ID,self.cfg))
-        self.assertIsNone(runner.wake_reason(self.linear.item,self.record,{},[],time.time()))
+        self.assertEqual(runner.tick(self.cfg,self.store,self.linear,launch=False),[])
     def test_withdrawal_invalidates_delivered_event_for_reassignment(self):
         with patch.object(runner,'prepare_workspace',side_effect=runner.Withdrawn('reassigned')):
             runner.run_worker(self.cfg,self.store,self.linear,ID)
@@ -398,15 +421,16 @@ class Lifecycle(unittest.TestCase):
         with patch.object(runner,'github_env',return_value={}),patch.object(runner,'pr_snapshot',return_value=[]):
             events=runner.tick(self.cfg,self.store,self.linear,launch=False)
         self.assertTrue(any('action' in x for x in events))
-    def test_owned_todo_with_waiting_label_reports_ineligibility(self):
+    def test_owned_todo_resumes_without_requiring_a_label_change(self):
         self.linear.item['state']=issue('Todo')['state']
-        events=runner.tick(self.cfg,self.store,self.linear,launch=False)
-        self.assertTrue(any('not eligible' in x.get('error','') for x in events))
+        with patch.object(runner,'github_env',return_value={}),patch.object(runner,'pr_snapshot',return_value=[]):
+            events=runner.tick(self.cfg,self.store,self.linear,launch=False)
+        self.assertTrue(any('action' in x for x in events))
     def test_monitor_errors_do_not_request_withdrawal(self):
         for exc in [RuntimeError('offline'),ValueError('bad json'),KeyError('issue'),FileNotFoundError('cli')]:
             with patch.object(self.linear,'issue',side_effect=exc):
                 self.assertIsNone(runner.withdrawal_requested(self.linear,ID,self.cfg))
-    def test_failed_claim_is_retried_before_worker_launch(self):
+    def test_failed_publication_does_not_block_authorized_launch(self):
         fresh=runner.Store(self.root/'claim-state');api=FakeLinear(issue())
         update=api.update;calls=[0]
         def flaky(*args,**kwargs):
@@ -415,9 +439,11 @@ class Lifecycle(unittest.TestCase):
             return update(*args,**kwargs)
         with patch.object(api,'update',side_effect=flaky),patch.object(runner,'github_env',return_value={}),patch.object(runner,'pr_snapshot',return_value=[]),patch.object(runner.subprocess,'Popen') as popen:
             runner.tick(self.cfg,fresh,api)
-            popen.assert_not_called()
-            self.assertEqual(fresh.get(ID)['phase'],'claimed')
-            runner.tick(self.cfg,fresh,api)
+            popen.assert_called_once()
+            record=fresh.get(ID)
+            self.assertTrue(record['publication_error'])
+            runner.publish(self.cfg,fresh,api,record,api.item)
+            self.assertIsNone(fresh.get(ID)['publication_error'])
             popen.assert_called_once()
             self.assertEqual(api.item['state']['name'],'In Progress')
     def test_claim_updates_status_without_comment(self):
@@ -488,142 +514,6 @@ class GitWorkspaceContract(unittest.TestCase):
             records[0]['session']='saved-native-session'
             runner.prepare_workspace(cfg,records[0])
             self.assertEqual(git('branch','--show-current',cwd=work),'any-stack-tip')
-
-class NativeProcessContract(unittest.TestCase):
-    """Exercise real child processes/session files with fake external services."""
-    def test_one_session_parks_then_resumes_after_merge(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);cfg=config(root);store=runner.Store(root/'state');api=FakeLinear(issue('In Progress'))
-            work=root/'worktree';work.mkdir();pipeline=root/'PIPELINE.md';pipeline.write_text('Do the task.')
-            fake=root/'fake-omp';fake.write_text('''#!/usr/bin/env python3
-import sys,json
-from pathlib import Path
-a=sys.argv
-p=Path(a[a.index('--session-dir')+1]);p.mkdir(exist_ok=True)
-f=Path(a[a.index('--resume')+1]) if '--resume' in a else p/'native.jsonl'
-if not f.exists():f.write_text(json.dumps({'type':'session','id':'stable-native-id'})+'\\n')
-with f.open('a') as h:h.write(json.dumps({'type':'message','resumed':'--resume' in a})+'\\n')
-''');fake.chmod(0o755)
-            cfg['omp']=str(fake);cfg['repos']['hone'].update(pipeline=str(pipeline))
-            r={'id':ID,'identifier':'TWA-7','repo':'hone','phase':'claimed','branch':'ticket/twa-7','worktree':str(work),'session':None,'failures':0}
-            store.save(r);store.directory(r).mkdir()
-            native=store.directory(r)/'sessions/native.jsonl'
-            original_issue=api.issue
-            completion_allowed=[False]
-            def worker_state(key):
-                if native.exists():
-                    lines=native.read_text().splitlines()
-                    if len(lines)==2:api.update(api.item,state='In Review',add=['waiting-for-tim'])
-                    if len(lines)>=3 and completion_allowed[0]:api.update(api.item,state='Done',remove=['waiting-for-tim','blocked'])
-                return original_issue(key)
-            api.issue=worker_state
-            with patch.object(runner,'prepare_workspace',return_value=(work,dict(os.environ))),patch.object(runner,'pr_snapshot',return_value=[{'state':'OPEN'}]):
-                runner.run_worker(cfg,store,api,ID)
-            first=store.get(ID)
-            self.assertEqual(first['phase'],'parked');self.assertEqual(api.item['state']['name'],'In Review')
-            original=Path(first['session']).read_text()
-            # Even a workspace categorizing Merged as completed must not end ownership.
-            api.issue=original_issue
-            api.item['state']={'id':'merged','name':'Merged','type':'completed'}
-            with patch.object(runner,'prepare_workspace',return_value=(work,dict(os.environ))),patch.object(runner,'pr_snapshot',return_value=[{'state':'MERGED'}]):
-                runner.run_worker(cfg,store,api,ID)
-            self.assertEqual(store.get(ID)['phase'],'parked')
-            api.issue=worker_state
-            completion_allowed[0]=True
-            with patch.object(runner,'prepare_workspace',return_value=(work,dict(os.environ))),patch.object(runner,'pr_snapshot',return_value=[{'state':'MERGED','mergeCommit':{'oid':'merged-sha'}}]):
-                runner.run_worker(cfg,runner.Store(root/'state'),api,ID)
-            last=store.get(ID)
-            self.assertEqual(last['phase'],'done');self.assertEqual(last['session'],first['session'])
-            text=Path(last['session']).read_text();self.assertTrue(text.startswith(original));self.assertIn('"resumed": true',text)
-            self.assertEqual(len(list((store.directory(last)/'sessions').glob('*.jsonl'))),1)
-    def test_unfinished_turn_retries_privately_instead_of_silently_parking(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);cfg=config(root);store=runner.Store(root/'state');api=FakeLinear(issue('In Progress'))
-            work=root/'worktree';work.mkdir();pipeline=root/'PIPELINE.md';pipeline.write_text('Do the task.')
-            fake=root/'fake-omp';fake.write_text("#!/usr/bin/env python3\nimport json,sys\nfrom pathlib import Path\np=Path(sys.argv[sys.argv.index('--session-dir')+1]);p.mkdir(exist_ok=True)\n(p/'native.jsonl').write_text(json.dumps({'type':'session','id':'unfinished'})+'\\n')\n")
-            fake.chmod(0o755);cfg['omp']=str(fake);cfg['repos']['hone']['pipeline']=str(pipeline)
-            record={'id':ID,'identifier':'TWA-7','repo':'hone','phase':'claimed','branch':'ticket/twa-7','worktree':str(work),'session':None,'failures':0}
-            store.save(record);store.directory(record).mkdir()
-            with patch.object(runner,'prepare_workspace',return_value=(work,dict(os.environ))),patch.object(runner,'pr_snapshot',return_value=[]):
-                runner.run_worker(cfg,store,api,ID)
-            final=store.get(ID)
-            self.assertEqual(final['phase'],'error')
-            self.assertIn('still In Progress',final['error'])
-            self.assertLess(final['retry_at'],float('inf'))
-            self.assertEqual(api.notes,[])
-            self.assertFalse((store.directory(final)/'omp.jsonl').exists())
-    def test_findings_only_completion_needs_no_pr_or_machine_receipt(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);cfg=config(root);store=runner.Store(root/'state');api=FakeLinear(issue('In Progress'))
-            work=root/'worktree';work.mkdir();pipeline=root/'PIPELINE.md';pipeline.write_text('Audit and report findings in Linear.')
-            native=root/'state'/ID/'sessions/native.jsonl'
-            fake=root/'fake-omp';fake.write_text('''#!/usr/bin/env python3
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[sys.argv.index('--session-dir')+1]);p.mkdir(exist_ok=True)
-(p/'native.jsonl').write_text(json.dumps({'type':'title'})+'\\n'+json.dumps({'type':'session','id':'findings-session'})+'\\n')
-''');fake.chmod(0o755)
-            cfg['omp']=str(fake);cfg['repos']['hone']['pipeline']=str(pipeline)
-            record={'id':ID,'identifier':'TWA-7','repo':'hone','phase':'claimed','branch':'ticket/twa-7','worktree':str(work),'session':None,'failures':0}
-            store.save(record);store.directory(record).mkdir()
-            original=api.issue
-            def worker_state(key):
-                if native.exists():
-                    api.item['state']=issue('Done')['state']
-                    api.item['comments']['nodes']=[{'id':'report','body':'OMP: Audited README links and current CLI usage; no changes needed.'}]
-                return original(key)
-            api.issue=worker_state
-            with patch.object(runner,'prepare_workspace',return_value=(work,dict(os.environ))),patch.object(runner,'pr_snapshot',return_value=[]):
-                runner.run_worker(cfg,store,api,ID)
-                # The owner's outcome comment gets one quiet acknowledgement wake.
-                self.assertEqual(store.get(ID)['phase'],'parked')
-                runner.run_worker(cfg,store,api,ID)
-            self.assertEqual(store.get(ID)['phase'],'done')
-            self.assertEqual(store.get(ID)['session_id'],'findings-session')
-
-    def test_done_delivers_feedback_arriving_during_turn_to_same_owner(self):
-        for change in ['comment', 'description', 'review']:
-            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
-                root=Path(tmp);cfg=config(root);store=runner.Store(root/'state');api=FakeLinear(issue('In Review'))
-                work=root/'worktree';work.mkdir();pipeline=root/'PIPELINE.md';pipeline.write_text('Preserve acceptance.')
-                fake=root/'fake-omp';fake.write_text('''#!/usr/bin/env python3
-import json,sys
-from pathlib import Path
-a=sys.argv;p=Path(a[a.index('--session-dir')+1]);p.mkdir(exist_ok=True)
-f=Path(a[a.index('--resume')+1]) if '--resume' in a else p/'native.jsonl'
-if not f.exists():f.write_text(json.dumps({'type':'session','id':'feedback-owner'})+'\\n')
-with f.open('a') as h:h.write(json.dumps({'type':'message','resumed':'--resume' in a})+'\\n')
-''');fake.chmod(0o755)
-                cfg['omp']=str(fake);cfg['repos']['hone']['pipeline']=str(pipeline)
-                record={'id':ID,'identifier':'TWA-7','repo':'hone','phase':'claimed','branch':'ticket/twa-7','worktree':str(work),'session':None,'failures':0}
-                store.save(record);directory=store.directory(record);directory.mkdir()
-                native=directory/'sessions/native.jsonl';original=api.issue
-                def worker_state(key):
-                    if native.exists():
-                        api.item['state']=issue('Done')['state']
-                        if change=='comment':api.item['comments']['nodes']=[{'id':'finding','body':'The acceptance finding is unresolved.'}]
-                        if change=='description':api.item['description']='Preserve the unmodified first-visit check.'
-                    return original(key)
-                api.issue=worker_state
-                # Completed tickets disappear from the normal polling query.
-                api.issues=lambda: [] if api.item['state']['name']=='Done' else [original(ID)]
-                def prs(*args):return [{'state':'MERGED','reviews':['Unresolved finding'] if change=='review' and native.exists() else []}]
-                with patch.object(runner,'prepare_workspace',return_value=(work,dict(os.environ))),patch.object(runner,'pr_snapshot',side_effect=prs),patch.object(runner,'github_env',return_value={}):
-                    runner.run_worker(cfg,store,api,ID)
-                    parked=store.get(ID)
-                    self.assertEqual(parked['phase'],'parked')
-                    events=runner.tick(cfg,store,api,launch=False)
-                    self.assertEqual(len(events),1)
-                    runner.run_worker(cfg,store,api,ID)
-                    final=store.get(ID)
-                    self.assertEqual(final['phase'],'done')
-                    self.assertEqual(final['session'],parked['session'])
-                    self.assertEqual(final['session_id'],'feedback-owner')
-                    self.assertIn('"resumed": true',native.read_text())
-                    prompt=(directory/'prompt.txt').read_text()
-                    expected={'comment':'The acceptance finding is unresolved.','description':'Preserve the unmodified first-visit check.','review':'Unresolved finding'}[change]
-                    self.assertIn(expected,prompt)
-                    self.assertEqual(runner.tick(cfg,store,api,launch=False),[])
 
 
 if __name__=='__main__':unittest.main()

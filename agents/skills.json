@@ -24,9 +24,12 @@
     "zoom-out": "skills/zoom-out",
     "frontend": "skills/frontend",
     "writing": "skills/writing",
-    "video-reader": "skills/video-reader"
+    "video-reader": "skills/video-reader",
+    "using-the-work-system": "skills/using-the-work-system"
   },
-  "project": {"using-the-work-system": "skills/using-the-work-system"},
+  "project": {
+    "using-the-work-system": "skills/using-the-work-system"
+  },
   "replaces": {
     "grill": "grill-me",
     "diagnose": "diagnosing-bugs",

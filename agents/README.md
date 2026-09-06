@@ -2,7 +2,7 @@
 
 One maintained skill library, small project guidance, and native harnesses. OMP runs tickets; Codex can be used entirely on its own.
 
-`skills.json` selects 25 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. The work-system guide is project-scoped, not part of the global catalog.
+`skills.json` selects 26 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. The work-system guide is globally discoverable and loads workspace/repository policy only for relevant ticket operations.
 
 ## Install and verify
 
@@ -37,13 +37,13 @@ python3 agents/verify.py /path/to/repo/nested --project /path/to/repo
 python3 agents/verify_codex.py /path/to/repo /path/to/repo/nested
 ```
 
-Repeat `--project` for existing worktrees sharing a profile. Installation adds the work-system skill, local ignored project entry points, and native discovery exclusions. Team-owned skill files remain intact; Codex hides their old skill names and explicitly enables the selected canonical paths. The filters are shared across worktrees. New checkouts/worktrees need the same installation and verification before being called clean. Nested subsystem instructions still apply and must be checked for conflicting process.
+Repeat `--project` for existing worktrees sharing a profile. Installation adds the work-system skill, local ignored project entry points, and native discovery exclusions. Team-owned skill files remain intact; Codex hides their old skill names and explicitly enables the selected canonical paths. The filters are shared across worktrees. Registered ticket worktrees receive project-only installation and verification automatically. Standalone checkouts can use --project-only with --project and --project-source after global setup; this preserves global models and local settings while updating discovery exclusions. Nested subsystem instructions still apply and must be checked for conflicting process.
 
 The installer backs up every replaced path under `~/.local/state/agent-setup/backups` and records a manifest. `--restore <backup>` restores only if none of those paths changed afterward; otherwise use the manifest for selective recovery without overwriting newer work. Credentials, native sessions, Git history, and running sessions are never synchronized or reset. Existing conversations retain old context; verify with fresh sessions.
 
 ## Work system
 
-[tickets/](tickets/) contains the small Linear-to-OMP dispatcher. One session owns each ticket through its project's pipeline, including waits and landing validation. Linear holds the human task, decisions, status, and deliverable links. Optional private notes, detailed review evidence, errors, and native sessions stay on the executing host.
+[tickets/](tickets/) contains the small Linear-to-OMP dispatcher. One session owns each ticket through its project's pipeline, including waits and landing validation. Linear holds the human task, decisions, status, and deliverable links. Canonical briefs, owner outcomes, holds, attention and wake bookkeeping stay privately on the executing host, alongside review evidence, diagnostics and native sessions. Linear fields are configured intake/publication mappings.
 
 Work and personal are separate deployments. Lindy code, accounts, project guidance, and sessions stay on work. Home executes the personal queue; Deckbox has the same general setup but is not a second dispatcher. Personal owners merge after their project checks and reviews pass, unless Tim specifies a ticket override. For Lindy, Tim enables PR auto-merge himself and the existing pipeline merges when ready. No duplicate ownership or shared credential store is introduced.
 
