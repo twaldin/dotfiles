@@ -1,4 +1,24 @@
 {
+  "modelRoles": {
+    "default": "openai-codex/gpt-6-astra:high",
+    "task": "anthropic/claude-fable-5-1:high",
+    "slow": "openai-codex/gpt-5.6-sol:xhigh",
+    "tiny": "openai-codex/gpt-5.6-luna",
+    "advisor": "xai-oauth/grok-4.6:xhigh",
+    "smol": "anthropic/claude-opus-5:medium",
+    "plan": "openai-codex/gpt-6-astra:high",
+    "review": "xai-oauth/grok-4.6:xhigh"
+  },
+  "task": {
+    "agentModelOverrides": {
+      "reviewer": "@review",
+      "security-reviewer": "@review"
+    }
+  },
+  "modelRoleStorage": "global",
+  "defaultThinkingLevel": "auto",
+  "theme": { "dark": "dark-tokyo-night", "light": "light" },
+  "symbolPreset": "nerd",
   "disabledProviders": [
     "claude", "claude-md", "claude-plugins", "codex", "gemini", "opencode",
     "cursor", "windsurf", "cline", "github", "vscode", "agent-plugins",

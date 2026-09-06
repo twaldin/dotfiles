@@ -16,11 +16,14 @@ from adapt import adapt
 
 SOURCE = Path(__file__).resolve().parent
 HERDR = 'herdr-omp-agent-state.ts'
-KEEP_SETTINGS = {
-    'providers', 'auth', 'modelRoles', 'enabledModels', 'enabledProviders',
-    'modelProviderOrder', 'modelTags', 'modelRoleStorage', 'defaultThinkingLevel',
-    'cycleOrder', 'theme', 'symbolPreset', 'setupVersion', 'shellPath',
-    'browser', 'computer', 'tools', 'ssh',
+LOCAL_SETTINGS = {
+    'providers', 'auth', 'enabledModels', 'enabledProviders',
+    'modelProviderOrder', 'modelTags', 'setupVersion', 'shellPath',
+    'browser', 'computer', 'tools', 'ssh', 'dev',
+}
+SHARED_PREFERENCES = {
+    'modelRoles', 'modelRoleStorage', 'defaultThinkingLevel',
+    'cycleOrder', 'theme', 'symbolPreset',
 }
 RETIRE_NATIVE = [
     'skills', 'rules', 'hooks', 'tools', 'commands', 'prompts', 'managed-skills',
@@ -276,10 +279,10 @@ def main():
                          '.pi/agent/AGENTS.md', '.factory/AGENTS.md']:
             plan(home / relative, 'link', SOURCE / 'instructions.md')
         clean_harnesses(home, plan)
-        settings = {k: v for k, v in old.items() if k in KEEP_SETTINGS}
+        settings = {k: v for k, v in old.items() if k in LOCAL_SETTINGS | SHARED_PREFERENCES}
         baseline = json.loads((SOURCE / 'omp.json').read_text())
-        if set(baseline) & KEEP_SETTINGS:
-            raise ValueError('Shared baseline must not overwrite machine-local model/tool settings')
+        if set(baseline) & LOCAL_SETTINGS:
+            raise ValueError('Shared baseline must not overwrite machine-local authentication, tools or connections')
         # Retain deliberate model-provider exclusions, not obsolete discovery sources.
         previous_disabled = old.get('disabledProviders', [])
         known_discovery = set(baseline['disabledProviders']) | {'native', 'agents-md', 'builtin-defaults', 'ssh-json'}
@@ -295,7 +298,8 @@ def main():
         baseline['disabledProviders'] += scopes
         settings.update(baseline)
         settings['skills']['customDirectories'] = [str(canonical)]
-        plan(native / 'config.yml', 'write', yaml_value(settings).encode())
+        # Preserved and shared keys overlap; keep repeated renders byte-identical.
+        plan(native / 'config.yml', 'write', yaml_value(dict(sorted(settings.items()))).encode())
         plan(native / 'AGENTS.md', 'link', SOURCE / 'instructions.md')
         for name in RETIRE_NATIVE:
             if name != 'skills':
@@ -317,7 +321,7 @@ def main():
             if not (project_source / 'AGENTS.md').is_file():
                 parser.error('Project source must contain AGENTS.md')
             prior_project = read_settings(project / '.omp/config.yml')
-            project_settings = {k: v for k, v in prior_project.items() if k in KEEP_SETTINGS}
+            project_settings = {k: v for k, v in prior_project.items() if k in LOCAL_SETTINGS | SHARED_PREFERENCES}
             project_skills = project_source / 'skills'
             catalog = Path(temp) / ('project-skills-' + hashlib.sha256(str(project).encode()).hexdigest()[:16])
             catalog.mkdir()

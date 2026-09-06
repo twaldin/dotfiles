@@ -19,6 +19,12 @@ python3 agents/verify_codex.py                    # native Codex, no model turn
 
 Global AGENTS/CLAUDE entry points link to `instructions.md`: concise writing, simple solutions, local authentication, and respect for project scope. Native browser/computer tools come first. Herdr is the only retained custom hook. Old custom MCP servers, imported workflow plugins, and legacy instruction/skill copies are archived; native capabilities and model accounts stay local.
 
+`omp.json` is the shared OMP baseline. It owns model roles and the explicitly listed shared preferences; installation replaces the entire role map, so removed roles such as vision stay unset. Keep permanent shared changes here and install separately on home, work and Deckbox. Interactive global role changes can cause drift until the next install. Authentication, provider accounts, local tools/connections, QA consent and project discovery exclusions remain machine-local.
+
+Native project settings and explicit session overrides can supersede the global baseline. Existing owners retain their saved models when available; installing a new default does not migrate or replace them. Future task launches reload settings, so verify the actual helper model when counting an independent review. A model listed by the native catalog confirms configured authentication, not a successful inference or available quota.
+
+The bundled reviewer and security-reviewer use `@review` (Grok 4.6 xhigh). Run Standards and Spec in separate contexts. This shared route differs from the OpenAI and Anthropic authoring roles; if an author switches to xAI, explicitly select an available reviewer from another family and verify its actual model. Selecting an advisor model does not enable the advisor; it remains disabled.
+
 ## Project scope
 
 Open conversations in the actual repository or worktree. A project source contains a short `AGENTS.md`, optional selected `skills/`, and its pipeline when enrolled in ticket execution:

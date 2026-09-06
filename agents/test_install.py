@@ -6,10 +6,59 @@ import tempfile
 import tomllib
 import unittest
 
-from install import fingerprint
+from install import fingerprint, read_settings, yaml_value
 
 
 class SharedInstall(unittest.TestCase):
+    def test_shared_omp_roles_replace_stale_roles_and_preserve_local_setup(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            home = Path(scratch)
+            native = home / '.omp/agent'
+            native.mkdir(parents=True)
+            local = {
+                'auth': {'fixture': 'local-only'},
+                'providers': {'tinyModelDevice': 'cpu'},
+                'browser': {'relay': {'url': 'ws://127.0.0.1:12345'}},
+                'tools': {'approvalMode': 'write'},
+                'ssh': {'hosts': ['local-fixture']},
+                'dev': {'autoqaConsent': False},
+                'setupVersion': 2,
+            }
+            scope = {'path': str(home / 'existing-repo'), 'providers': ['agents-md']}
+            original = dict(local, modelRoles={'default': 'old/model', 'vision': 'old/vision'},
+                            defaultThinkingLevel='low',
+                            theme={'dark': 'old-dark', 'light': 'old-light'},
+                            disabledProviders=['claude', 'local-model-provider', scope])
+            settings = native / 'config.yml'
+            settings.write_text(yaml_value(original))
+            auth = native / 'agent.db'
+            auth.write_bytes(b'fixture native accounts and sessions: preserve verbatim')
+            auth_before = fingerprint(auth)
+            command = [sys.executable, str(Path(__file__).with_name('install.py')), '--home', str(home)]
+            subprocess.run(command + ['--apply'], check=True, capture_output=True)
+
+            current = read_settings(settings)
+            baseline = json.loads(Path(__file__).with_name('omp.json').read_text())
+            self.assertEqual(current['modelRoles'], baseline['modelRoles'])
+            self.assertNotIn('vision', current['modelRoles'])
+            self.assertEqual(current['defaultThinkingLevel'], baseline['defaultThinkingLevel'])
+            self.assertEqual(current['modelRoleStorage'], 'global')
+            self.assertEqual(current['theme'], baseline['theme'])
+            self.assertEqual(current['task']['agentModelOverrides'], {
+                'reviewer': '@review', 'security-reviewer': '@review',
+            })
+            for key, value in local.items():
+                self.assertEqual(current[key], value)
+            self.assertIn('local-model-provider', current['disabledProviders'])
+            self.assertIn(scope, current['disabledProviders'])
+            self.assertEqual(fingerprint(auth), auth_before)
+            self.assertIn('0 changes', subprocess.run(command, check=True, capture_output=True, text=True).stdout)
+
+            backup = next((home / '.local/state/agent-setup/backups').iterdir())
+            subprocess.run(command + ['--restore', str(backup)], check=True, capture_output=True)
+            self.assertEqual(read_settings(settings), original)
+            self.assertEqual(fingerprint(auth), auth_before)
+
     def test_legacy_aliases_restore_and_idempotency(self):
         with tempfile.TemporaryDirectory() as scratch:
             home = Path(scratch)
