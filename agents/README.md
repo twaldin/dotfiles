@@ -23,6 +23,8 @@ Global AGENTS/CLAUDE entry points link to `instructions.md`: concise writing, si
 
 Native project settings and explicit session overrides can supersede the global baseline. Existing owners retain their saved models when available; installing a new default does not migrate or replace them. Future task launches reload settings, so verify the actual helper model when counting an independent review. A model listed by the native catalog confirms configured authentication, not a successful inference or available quota.
 
+The model-cycle shortcut follows default → fable → slow: Astra high, Fable 5.1 xhigh, then Sol xhigh. The native custom fable role gives the shortcut its requested effort while the task role remains Fable 5.1 high. Cycling changes the active session model; it does not rewrite global role assignments.
+
 The bundled reviewer and security-reviewer use `@review` (Grok 4.6 xhigh). Run Standards and Spec in separate contexts. This shared route differs from the OpenAI and Anthropic authoring roles; if an author switches to xAI, explicitly select an available reviewer from another family and verify its actual model. Selecting an advisor model does not enable the advisor; it remains disabled.
 
 ## Project scope

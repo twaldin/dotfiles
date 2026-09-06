@@ -282,7 +282,7 @@ def main():
         settings = {k: v for k, v in old.items() if k in LOCAL_SETTINGS | SHARED_PREFERENCES}
         baseline = json.loads((SOURCE / 'omp.json').read_text())
         if set(baseline) & LOCAL_SETTINGS:
-            raise ValueError('Shared baseline must not overwrite machine-local authentication, tools or connections')
+            raise ValueError('Shared baseline must not overwrite machine-local settings')
         # Retain deliberate model-provider exclusions, not obsolete discovery sources.
         previous_disabled = old.get('disabledProviders', [])
         known_discovery = set(baseline['disabledProviders']) | {'native', 'agents-md', 'builtin-defaults', 'ssh-json'}
@@ -298,7 +298,7 @@ def main():
         baseline['disabledProviders'] += scopes
         settings.update(baseline)
         settings['skills']['customDirectories'] = [str(canonical)]
-        # Preserved and shared keys overlap; keep repeated renders byte-identical.
+        # Keep key order stable after combining local settings and shared preferences.
         plan(native / 'config.yml', 'write', yaml_value(dict(sorted(settings.items()))).encode())
         plan(native / 'AGENTS.md', 'link', SOURCE / 'instructions.md')
         for name in RETIRE_NATIVE:

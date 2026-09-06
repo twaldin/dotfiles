@@ -7,8 +7,10 @@
     "advisor": "xai-oauth/grok-4.6:xhigh",
     "smol": "anthropic/claude-opus-5:medium",
     "plan": "openai-codex/gpt-6-astra:high",
-    "review": "xai-oauth/grok-4.6:xhigh"
+    "review": "xai-oauth/grok-4.6:xhigh",
+    "fable": "anthropic/claude-fable-5-1:xhigh"
   },
+  "cycleOrder": ["default", "fable", "slow"],
   "task": {
     "agentModelOverrides": {
       "reviewer": "@review",

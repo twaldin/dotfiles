@@ -26,6 +26,7 @@ class SharedInstall(unittest.TestCase):
             }
             scope = {'path': str(home / 'existing-repo'), 'providers': ['agents-md']}
             original = dict(local, modelRoles={'default': 'old/model', 'vision': 'old/vision'},
+                            cycleOrder=['smol', 'slow'],
                             defaultThinkingLevel='low',
                             theme={'dark': 'old-dark', 'light': 'old-light'},
                             disabledProviders=['claude', 'local-model-provider', scope])
@@ -43,6 +44,9 @@ class SharedInstall(unittest.TestCase):
             self.assertNotIn('vision', current['modelRoles'])
             self.assertEqual(current['defaultThinkingLevel'], baseline['defaultThinkingLevel'])
             self.assertEqual(current['modelRoleStorage'], 'global')
+            self.assertEqual(current['cycleOrder'], ['default', 'fable', 'slow'])
+            self.assertEqual(current['modelRoles']['fable'], 'anthropic/claude-fable-5-1:xhigh')
+            self.assertEqual(current['modelRoles']['task'], 'anthropic/claude-fable-5-1:high')
             self.assertEqual(current['theme'], baseline['theme'])
             self.assertEqual(current['task']['agentModelOverrides'], {
                 'reviewer': '@review', 'security-reviewer': '@review',
