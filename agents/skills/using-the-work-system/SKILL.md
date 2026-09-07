@@ -7,6 +7,8 @@ Resolve the target from the repository, ticket URL or user's request. Read the e
 
 Load the configured workspace authoring reference and repository profile/pipeline before changing a ticket. Linear's visible teams, labels, projects and states are workspace conventions. The private registry and ticket record hold resolved routing, canonical scope and execution state.
 
+In OMP, run authenticated CLI commands and ticket-control commands through the native Bash tool. Python eval filters the launch-selected `GH_TOKEN` and `OMP_TICKET_*` variables; its subprocesses can select a different GitHub account or lose the owner turn identity. Verify the selected account in the environment that will perform the operation. Keep the Python filter intact rather than copying credentials into eval.
+
 Choose the relevant reference:
 
 - Creating/refining tickets, answering questions or pausing work: [authoring.md](authoring.md).
