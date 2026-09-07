@@ -59,9 +59,11 @@ with tempfile.TemporaryDirectory(prefix='omp-verify-') as scratch:
         'model_turns': state.get('messageCount'),
     }
     if args.project:
-        expected_context = {str(Path.home() / '.omp/agent/AGENTS.md'), str(project / '.omp/AGENTS.md')}
-        summary['unexpected_context_files'] = sorted(set(context) - expected_context)
-        summary['missing_context_files'] = sorted(expected_context - set(context))
+        expected_context = {str(path.resolve()) for path in
+                            [Path.home() / '.omp/agent/AGENTS.md', project / '.omp/AGENTS.md']}
+        actual_context = {str(Path(path).resolve()) for path in context}
+        summary['unexpected_context_files'] = sorted(actual_context - expected_context)
+        summary['missing_context_files'] = sorted(expected_context - actual_context)
     print(json.dumps(summary, indent=2))
     if (summary['missing_expected_skills'] or summary['unexpected_skills']
             or summary.get('unexpected_context_files') or summary.get('missing_context_files')
