@@ -402,6 +402,57 @@ class PublicationInput(unittest.TestCase):
             popen.assert_not_called()
         self.assertEqual(self.store.all(),{})
 
+    def test_conversation_route_changed_during_claim_is_preserved(self):
+        for registered_before in (False, True):
+            with self.subTest(registered_before=registered_before), tempfile.TemporaryDirectory() as tmp:
+                cfg=config(Path(tmp)); store=runner.Store(Path(tmp)/'state'); item=issue()
+                api=FakeLinear(item)
+                if registered_before:
+                    store.save(runner.unowned_record(item,'hone'))
+                def register_during_refresh(key):
+                    runner.control_command(SimpleNamespace(action='register',issue=ID,repo='web'),
+                                           cfg,store,FakeLinear(item))
+                    return copy.deepcopy(item)
+                with patch.object(api,'issue',side_effect=register_during_refresh), patch.object(runner.subprocess,'Popen') as popen:
+                    runner.tick(cfg,store,api)
+                    popen.assert_not_called()
+                current=store.get(ID)
+                self.assertEqual(current['repo'],'web')
+                self.assertFalse(runner.has_owner(current))
+
+    def test_claim_rechecks_route_hold_and_owner_at_the_write_boundary(self):
+        for change in ('route', 'hold', 'owner', 'brief'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                store=runner.Store(tmp); item=issue()
+                store.register(item,'hone')
+                proposed=dict(store.get(ID),branch='ticket/twa-7',phase='claimed')
+                if change=='route': store.register(item,'web')
+                elif change=='hold': store.control(ID,{'hold':{'reason':'Discuss first'}},wake=True)
+                elif change=='owner': store.save(dict(proposed,session='original.jsonl'))
+                else: store.control(ID,{'brief':'Latest agreed scope'},wake=True)
+                result=store.claim(proposed)
+                current=store.get(ID)
+                if change=='brief':
+                    self.assertEqual(result['control']['brief'],'Latest agreed scope')
+                    self.assertEqual(result['control']['input_seq'],1)
+                else:
+                    self.assertIsNone(result)
+                    if change=='route': self.assertEqual(current['repo'],'web')
+                    elif change=='hold': self.assertTrue(current['control']['hold'])
+                    else: self.assertEqual(current['session'],'original.jsonl')
+
+    def test_register_refresh_cannot_reroute_a_newly_claimed_owner(self):
+        store=runner.Store(self.root/'register-state'); item=issue()
+        store.register(item,'hone'); api=FakeLinear(item)
+        def claim_during_refresh(key):
+            store.claim(dict(store.get(ID),branch='ticket/twa-7',phase='claimed'))
+            return copy.deepcopy(item)
+        with patch.object(api,'issue',side_effect=claim_during_refresh):
+            with self.assertRaisesRegex(ValueError,'already has a repository'):
+                runner.control_command(SimpleNamespace(action='register',issue=ID,repo='web'),self.cfg,store,api)
+        self.assertEqual(store.get(ID)['repo'],'hone')
+        self.assertTrue(runner.has_owner(store.get(ID)))
+
 
 class Enrollment(unittest.TestCase):
     def test_verified_enrollment_is_repeatable_and_preserves_other_routes(self):

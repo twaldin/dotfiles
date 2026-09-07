@@ -119,6 +119,38 @@ class Store:
             c.execute('INSERT INTO tickets VALUES (?,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record',
                       (record['id'], json.dumps(merged)))
 
+    def register(self, issue, repo):
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row = c.execute('SELECT record FROM tickets WHERE id=?', (issue['id'],)).fetchone()
+            record = json.loads(row[0]) if row else unowned_record(issue, repo)
+            if has_owner(record):
+                if record['repo'] != repo:
+                    raise ValueError('This ticket already has a repository; preserve its work and use a linked ticket for another repo')
+                return record
+            record['repo'] = repo
+            if row:
+                record['control'] = merge_control(record['control'], {'attention': None}, wake=True)
+            c.execute('INSERT INTO tickets VALUES (?,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record',
+                      (issue['id'], json.dumps(record)))
+            return record
+
+    def claim(self, record):
+        """Commit routing and first ownership together, preserving conversation input."""
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row = c.execute('SELECT record FROM tickets WHERE id=?', (record['id'],)).fetchone()
+            prior = json.loads(row[0]) if row else {}
+            if (has_owner(prior) or prior.get('control', {}).get('hold')
+                    or prior.get('repo') not in (None, record['repo'])):
+                return None
+            merged = prior | record
+            control = prior.get('control', record['control'])
+            merged['control'] = merge_control(control, {'lifecycle': 'active', 'stage': 'active', 'attention': None})
+            c.execute('INSERT INTO tickets VALUES (?,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record',
+                      (record['id'], json.dumps(merged)))
+            return merged
+
     def control(self, key, changes, *, wake=False, turn=None):
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
@@ -788,14 +820,15 @@ def tick(config, store, linear, *, launch=True):
                     latest = linear.issue(issue['id'])
                     if not latest:
                         continue
-                    requested, latest_repo = intake(latest, config, records.get(issue['id']))
+                    requested, latest_repo = intake(latest, config, store.get(issue['id']))
                     if not requested or latest_repo != record['repo']:
                         continue
                     directory = store.directory(record)
                     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
                     record.setdefault('control', initial_control(record, latest, config))
-                    store.save(record)
-                    record = store.control(record['id'], {'lifecycle': 'active', 'stage': 'active'})
+                    record = store.claim(record)
+                    if record is None:
+                        continue
                     record = publish(config, store, linear, record, latest)
                 record.update(reason=reason, phase='starting', requested_at=time.time())
                 store.save(record)
@@ -885,15 +918,7 @@ def control_command(args, config, store, linear):
         repo = resolve_repo(issue, config, args.repo)
         if not repo:
             raise ValueError('Select a registered repository for this ticket')
-        if record and record.get('branch') and record['repo'] != repo:
-            raise ValueError('This ticket already has a repository; preserve its work and use a linked ticket for another repo')
-        if not record:
-            record = unowned_record(issue, repo)
-            store.save(record)
-        elif not record.get('branch'):
-            record['repo'] = repo
-            store.save(record)
-            record = store.control(record['id'], {'attention': None}, wake=True)
+        record = store.register(issue, repo)
         print(json.dumps(record, indent=2))
         return
     if not record:

@@ -8,6 +8,10 @@ Create one executable ticket per repository, linking tickets for a cross-reposit
 
 Record a known route with `omp-tickets register <issue> --repo <key>`. A conversation in a registered repository can supply that route directly. This does not dispatch work. Keep ideas deferred; the configured intake state requests an owner. Initially this is Todo in both deployments. Thin tickets may get brief owner investigation, then a question and a wait; authorship by a teammate or agent is not an authorization class.
 
+For a conversation-created scoped ticket, prepare its public scope and private brief before requesting intake. Create it in the workspace's deferred state, register the known repository, save the brief with `refine`, then move it to the configured start state when ready. A human-created ticket can instead arrive through configured label/team/default routing; the owner investigates its supplied context.
+
+After requesting intake, inspect `omp-tickets show <issue>` and live progress. Report started only when a native owner/session exists; Todo, registration or a PR label alone is not proof. If no owner starts, check assignment, configured start state, repository route, explicit hold/dependencies, pilot admission, capacity and preparation errors. Preserve the existing record when correcting these inputs. An active pilot allowlist needs deliberate admission under the rollout policy; do not silently broaden it or create a second owner to bypass it.
+
 For an existing ticket:
 
 - Read `omp-tickets show <issue>`, current Linear discussion and deliverables.
