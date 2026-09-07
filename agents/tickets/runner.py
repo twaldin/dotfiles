@@ -19,6 +19,7 @@ import time
 import uuid
 from urllib.parse import quote, urlparse
 import policy
+import runtime
 from policy import route as resolve_repo
 
 class Withdrawn(Exception):
@@ -228,12 +229,16 @@ class Linear:
 
     def issues(self):
         result, cursor = [], None
+        seen = set()
         while True:
             data = self.gql('query($after:String,$assignee:ID!){ issues(first:50,after:$after,filter:{assignee:{id:{eq:$assignee}},state:{type:{nin:["completed","canceled","duplicate"]}}}){nodes {' + FIELDS + '} pageInfo{hasNextPage endCursor}}}', {'after': cursor, 'assignee': self.config['assignee_id']})['issues']
             result.extend(self.complete_issue(i) for i in data['nodes'])
             if not data['pageInfo']['hasNextPage']:
                 return result
             cursor = data['pageInfo']['endCursor']
+            if not cursor or cursor in seen:
+                raise RuntimeError('Linear ticket pagination did not advance')
+            seen.add(cursor)
 
     def issue(self, key):
         return self.complete_issue(self.gql('query($id:String!){issue(id:$id){' + FIELDS + '}}', {'id': key})['issue'])
@@ -539,6 +544,7 @@ def session_path(record, directory, *, live=False):
 
 
 def prepare_workspace(config, record):
+    runtime.home(config)
     repo = config['repos'][record['repo']]
     source, path = expand(repo['path']), Path(record['worktree'])
     if record.get('session') and not path.exists():
@@ -568,17 +574,18 @@ def prepare_workspace(config, record):
                 exclude.write_text(content.rstrip('\n') + '\n/.omp\n')
     if repo.get('profile'):
         install_profile(config, repo, path, expand(config['state_dir']) / record['id'] / 'preparation.json')
-    return path, env
+    return path, runtime.environment(config, env)
 
 
 def install_profile(config, repo, path, receipt):
+    worker_home = runtime.home(config)
     profile = expand(repo['profile'])
     source = Path(__file__).resolve().parents[1]
     if not (profile / 'AGENTS.md').is_file() or not expand(repo['pipeline']).is_file():
         raise ValueError('Registered profile needs AGENTS.md and a readable pipeline')
     files = [(str(p.relative_to(profile)), hashlib.sha256(p.read_bytes()).hexdigest())
              for p in sorted(profile.rglob('*')) if p.is_file() and '.git' not in p.parts]
-    expected = digest({'profile': str(profile), 'files': files,
+    expected = digest({'profile': str(profile), 'worker_home': str(worker_home), 'files': files,
                        'installer': hashlib.sha256((source / 'install.py').read_bytes()).hexdigest(),
                        'skills': hashlib.sha256((source / 'skills.json').read_bytes()).hexdigest()})
     try:
@@ -592,9 +599,11 @@ def install_profile(config, repo, path, receipt):
         return
     # Installer writes shared discovery exclusions, so serialize only installation.
     with lock(expand(config['state_dir']) / 'preparation.lock', blocking=True):
-        command([sys.executable, str(source / 'install.py'), '--project-only', '--project', str(path),
+        command([sys.executable, str(source / 'install.py'), '--home', str(worker_home), '--project-only', '--project', str(path),
                  '--project-source', str(profile), '--apply'], timeout=180)
-    omp = json.loads(command([sys.executable, str(source / 'verify.py'), str(path), '--project', str(path)], timeout=90))
+    omp = json.loads(command([sys.executable, str(source / 'verify.py'), str(path), '--project', str(path),
+                             '--agent-dir', str(worker_home / '.omp/agent'),
+                             '--omp-command-json', json.dumps(runtime.command(config))], timeout=90))
     codex = 'CLI unavailable on this host'
     if shutil.which('codex'):
         codex = command([sys.executable, str(source / 'verify_codex.py'), str(path)], timeout=120)
@@ -656,11 +665,12 @@ Current PR/check/review snapshot:
             prompt_file.write_text(prompt)
             sessions = directory / 'sessions'
             sessions.mkdir(exist_ok=True)
-            args = [config.get('omp', 'omp'), '-p', '--mode=json', '--no-title', '--cwd', str(path), '--session-dir', str(sessions)]
+            args = runtime.command(config) + ['-p', '--mode=json', '--no-title', '--cwd', str(path), '--session-dir', str(sessions)]
             if previous:
                 args += ['--resume', previous]
-            if repo.get('model'):
-                args += ['--model', repo['model']]
+            # Resume the saved conversation, but resolve today's configured role
+            # instead of silently retaining that session's previous model.
+            args += ['--model', repo.get('model') or 'default']
             args += ['@' + str(prompt_file)]
             record.update(phase='running', event=digest(event), human_event=human_event(event),
                           pr_event=digest(current_pr), delivered_input_seq=control.get('input_seq', 0),

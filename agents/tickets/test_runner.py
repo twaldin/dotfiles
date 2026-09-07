@@ -139,6 +139,16 @@ class LinearWrites(unittest.TestCase):
             gql.assert_not_called()
 
 class LinearPagination(unittest.TestCase):
+    def test_ticket_list_rejects_missing_or_repeated_cursor(self):
+        for cursor in (None, 'same-page'):
+            with self.subTest(cursor=cursor):
+                api=runner.Linear(config(Path('/tmp/test')))
+                page={'issues':{'nodes':[],'pageInfo':{'hasNextPage':True,'endCursor':cursor}}}
+                with patch.object(api,'gql',side_effect=[page,page,AssertionError('Pagination spun without progress')]) as gql:
+                    with self.assertRaisesRegex(RuntimeError,'pagination did not advance'):
+                        api.issues()
+                    self.assertLessEqual(gql.call_count,2)
+
     def test_all_ticket_connections_are_fully_loaded(self):
         api=runner.Linear(config(Path('/tmp/test')));item=issue()
         for name in runner.CONNECTIONS:
@@ -203,6 +213,24 @@ class Lifecycle(unittest.TestCase):
                      'pr_event':runner.digest([]),'failures':0}
         self.store.save(self.record)
     def tearDown(self):self.tmp.cleanup()
+    def test_worker_selects_configured_model_for_new_and_resumed_sessions(self):
+        pipeline=self.root/'WORKFLOW.md';pipeline.write_text('Test pipeline')
+        self.cfg['repos']['hone']['pipeline']=str(pipeline)
+        for previous in (None, str(self.root/'saved-session.jsonl')):
+            for override in (None, 'xai-oauth/grok-4.6:xhigh'):
+                with self.subTest(previous=previous,override=override):
+                    self.store.save(self.record)
+                    self.cfg['repos']['hone']['model']=override
+                    with patch.object(runner,'prepare_workspace',return_value=(self.root,{})), \
+                         patch.object(runner,'session_path',return_value=previous), \
+                         patch.object(runner,'pr_snapshot',return_value=[]), \
+                         patch.object(runner.subprocess,'Popen',side_effect=RuntimeError('Launch captured')) as launch:
+                        runner.run_worker(self.cfg,self.store,self.linear,ID)
+                    args=launch.call_args.args[0]
+                    self.assertIn('--model',args)
+                    self.assertEqual(args[args.index('--model')+1],override or 'default')
+                    self.assertEqual('--resume' in args,previous is not None)
+                    if previous:self.assertEqual(args[args.index('--resume')+1],previous)
     def test_unchanged_parked_is_quiet(self):
         self.assertIsNone(runner.wake_reason(self.linear.item,self.record,runner.issue_event(self.linear.item),[],time.time()))
     def test_all_comments_wake_regardless_of_prefix(self):
@@ -467,29 +495,30 @@ class Lifecycle(unittest.TestCase):
 
 
 class ConcurrentDispatch(unittest.TestCase):
-    def test_three_slots_and_pending_claims_prevent_duplicate_launches(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);cfg=config(root);cfg.update(concurrency=3,pilot_issues=[f'TWA-{n}' for n in range(1,6)])
-            store=runner.Store(root/'state')
-            class ManyLinear(FakeLinear):
-                def __init__(self):
-                    self.items={};self.notes=[]
-                    for n in range(1,6):
-                        x=issue();x.update(id=f'{n:08d}-1111-1111-1111-111111111111',identifier=f'TWA-{n}')
-                        self.items[x['id']]=x
-                def issues(self):return copy.deepcopy(list(self.items.values()))
-                def issue(self,key):return copy.deepcopy(self.items[key])
-                def update(self,item,**kwargs):
-                    self.item=self.items[item['id']];super().update(item,**kwargs)
-            api=ManyLinear()
-            with patch.object(runner.subprocess,'Popen') as popen:
-                runner.tick(cfg,store,api)
-                runner.tick(cfg,store,api)
-                self.assertEqual(popen.call_count,3)
-            records=list(store.all().values())
-            self.assertEqual(len(records),3)
-            self.assertEqual(len({x['worktree'] for x in records}),3)
-            self.assertEqual(sum(x['state']['name']=='In Progress' for x in api.items.values()),3)
+    def test_configured_slots_and_pending_claims_prevent_duplicate_launches(self):
+        for slots in (1,3,5):
+            with self.subTest(slots=slots), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);cfg=config(root);cfg.update(concurrency=slots,pilot_issues=[f'TWA-{n}' for n in range(1,8)])
+                store=runner.Store(root/'state')
+                class ManyLinear(FakeLinear):
+                    def __init__(self):
+                        self.items={};self.notes=[]
+                        for n in range(1,8):
+                            x=issue();x.update(id=f'{n:08d}-1111-1111-1111-111111111111',identifier=f'TWA-{n}')
+                            self.items[x['id']]=x
+                    def issues(self):return copy.deepcopy(list(self.items.values()))
+                    def issue(self,key):return copy.deepcopy(self.items[key])
+                    def update(self,item,**kwargs):
+                        self.item=self.items[item['id']];super().update(item,**kwargs)
+                api=ManyLinear()
+                with patch.object(runner.subprocess,'Popen') as popen:
+                    runner.tick(cfg,store,api)
+                    runner.tick(cfg,store,api)
+                    self.assertEqual(popen.call_count,slots)
+                records=list(store.all().values())
+                self.assertEqual(len(records),slots)
+                self.assertEqual(len({x['worktree'] for x in records}),slots)
+                self.assertEqual(sum(x['state']['name']=='In Progress' for x in api.items.values()),slots)
 
 class GitWorkspaceContract(unittest.TestCase):
     def test_parallel_preparation_and_arbitrary_stack_branch_resume(self):
@@ -504,6 +533,8 @@ class GitWorkspaceContract(unittest.TestCase):
             git('remote','add','origin',str(origin));git('push','-u','origin','main')
             (source/'.omp').mkdir();(source/'.omp/AGENTS.md').write_text('Project guidance.')
             cfg=config(root);cfg['repos']['hone'].update(path=str(source),base='main')
+            from test_runtime import managed_fixture
+            cfg.update(managed_fixture(root))
             records=[{'id':str(n),'repo':'hone','branch':f'ticket/twa-{n}','worktree':str(root/f'worktree-{n}')} for n in (1,2)]
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results=list(pool.map(lambda record:runner.prepare_workspace(cfg,record),records))
