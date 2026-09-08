@@ -10,6 +10,14 @@ Merge authority is Tim's current ticket instruction, then repository policy, the
 
 Immediately before marking ready, enabling an authorized merge path, merging, deploying or declaring completion, refresh ticket discussion and current PR head/draft/checks/reviews. Investigate an unexpected draft change. Record the revision actually reviewed and verify actual reviewer models/families. If Linear is unreadable, continue authorized coding but wait before merge/deploy until new input can be checked. Failed status/label publication alone does not stop work.
 
+## Own probe resources and delegated scope
+
+Pass each helper its permitted actions and resource boundaries. A source-only assignment stays source-only; a helper reports a needed execution step to its owner before expanding that assignment. The owner checks helper actions and evidence before accepting the result.
+
+Before starting a probe, give it a finite lifetime and record its child handles or dedicated process group. Cleanup targets only those recorded resources after verifying they still belong to this probe; a matching executable name, command substring or reused PID is not ownership proof. Never use host-wide name/pattern cleanup such as `pkill -f` or `killall` for a probe. If ownership is uncertain, stop cleanup and report the known targets and uncertainty; do not restart unknown processes. Wait for owned children to exit and record any survivors honestly.
+
+Run synthetic probes with explicit disposable configuration and synthetic inputs. Keep real host settings and raw probe artifacts private; fixtures and published evidence contain only inspected, safe synthetic data.
+
 ## Record the turn outcome
 
 Linear status is a reflection; it does not tell the runner whether this owner is waiting or complete. Write an outcome JSON file in the supplied private task directory, then call the runner supplied by the current turn:
