@@ -242,6 +242,32 @@ class OwnerOutcomes(unittest.TestCase):
         self.assertEqual(self.store.get(ID)['session_id'],'stable-owner')
         self.assertIn('"resumed": true',self.native.read_text())
 
+    def test_transient_dependency_withdrawal_resumes_without_another_edit(self):
+        dependency={'type':'blocks','issue':{'identifier':'TWA-6','state':{'type':'completed'}}}
+        self.api.item['inverseRelations']['nodes']=[dependency]
+        self.cfg['owner_input_poll_seconds']=.01
+        (self.root/'mode').write_text('hold')
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            task=pool.submit(self.run_owner)
+            deadline=time.monotonic()+5
+            while not (self.root/'helper-alive').exists() and time.monotonic()<deadline:time.sleep(.01)
+            self.assertTrue((self.root/'helper-alive').exists())
+            dependency['issue']['state']['type']='started'
+            task.result(timeout=5)
+        stopped=self.store.get(ID)
+        self.assertEqual(stopped['phase'],'parked')
+        self.assertFalse(self.store.busy(stopped))
+        self.assertEqual(runner.tick(self.cfg,self.store,self.api,launch=False),[])
+        # The dependency returns to exactly the turn-start state between polls.
+        dependency['issue']['state']['type']='completed'
+        self.assertEqual(len(runner.tick(self.cfg,self.store,self.api,launch=False)),1)
+        (self.root/'mode').write_text('normal')
+        self.run_owner()
+        self.assertEqual(self.store.get(ID)['session'],stopped['session'])
+        self.assertEqual(self.store.get(ID)['session_id'],'stable-owner')
+        self.assertIn('"resumed": true',self.native.read_text())
+        self.assertEqual(runner.tick(self.cfg,self.store,self.api,launch=False),[])
+
 
 class PolicyAndStorage(unittest.TestCase):
     def test_team_skill_inventory_changes_invalidate_preparation_receipt(self):

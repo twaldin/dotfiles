@@ -501,7 +501,10 @@ def wake_reason(issue, record, event, pr, now):
         return 'Resume the interrupted attempt in its existing session.'
     if record.get('delivered_input_seq', 0) != control.get('input_seq', 0):
         return 'A conversation changed the brief, released a hold, or requested continuation.'
-    changed = record['event_fields'] != event_fields(event) if 'event_fields' in record else record.get('event') != digest(event)
+    # Withdrawal invalidates the event even if a brief dependency/status change
+    # has returned to the delivered field hashes before the next dispatcher poll.
+    changed = ('event' in record and record['event'] is None) or (record['event_fields'] != event_fields(event)
+               if 'event_fields' in record else record.get('event') != digest(event))
     if changed:
         return 'The Linear ticket or its human discussion changed.'
     if record.get('pr_event') != digest(pr):
