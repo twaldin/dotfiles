@@ -86,6 +86,28 @@ class OwnerOutcomes(unittest.TestCase):
         self.assertEqual(last['session_id'],'stable-owner')
         self.assertEqual(self.api.item['state']['name'],'In Progress')
         self.assertIn('"resumed": true',self.native.read_text())
+    def test_attention_status_answer_resumes_same_owner_and_restores_review(self):
+        self.cfg['teams']['team']['states']['Blocked']='Blocked'
+        self.cfg['workflow']['states']['attention']='Blocked'
+        self.outcome({'lifecycle':'waiting','stage':'review','attention':{'reason':'Which behavior?'}})
+        self.run_owner();first=self.store.get(ID)
+        runner.publish(self.cfg,self.store,self.api,first,self.api.item)
+        first=self.store.get(ID)
+        self.assertEqual(self.api.item['state']['name'],'Blocked')
+        self.assertEqual(first['control']['stage'],'review')
+        self.assertEqual(first['phase'],'parked')
+        self.assertFalse(self.store.busy(first))
+        self.assertEqual(runner.tick(self.cfg,self.store,self.api,launch=False),[])
+        self.api.item['comments']['nodes'].append({'id':'reply','body':'Use the documented behavior.'})
+        self.assertEqual(len(runner.tick(self.cfg,self.store,self.api,launch=False)),1)
+        self.outcome({'lifecycle':'waiting','stage':'review','attention':None})
+        self.run_owner();last=self.store.get(ID)
+        runner.publish(self.cfg,self.store,self.api,last,self.api.item)
+        self.assertEqual(last['session'],first['session'])
+        self.assertEqual(last['session_id'],first['session_id'])
+        self.assertEqual(self.api.item['state']['name'],'In Review')
+        self.assertEqual(self.api.item['labels']['nodes'],[])
+        self.assertEqual(runner.tick(self.cfg,self.store,self.api,launch=False),[])
     def test_scheduled_landing_failure_and_recovery_keep_owner(self):
         self.outcome({'lifecycle':'waiting','stage':'landed','next_check_at':time.time()+60})
         self.run_owner();first=self.store.get(ID)
@@ -222,6 +244,43 @@ class OwnerOutcomes(unittest.TestCase):
 
 
 class PolicyAndStorage(unittest.TestCase):
+    def test_team_skill_inventory_changes_invalidate_preparation_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg=config(root);project=root/'repo';project.mkdir()
+            subprocess.run(['git','init','-q',str(project)],check=True)
+            team=project/'.agents/skills/one';team.mkdir(parents=True)
+            (team/'SKILL.md').write_text('---\nname: one\n---\nTeam skill')
+            subprocess.run(['git','add','.agents'],cwd=project,check=True)
+            profile=root/'profile';profile.mkdir();(profile/'AGENTS.md').write_text('Profile')
+            (profile/'WORKFLOW.md').write_text('Pipeline')
+            (project/'.omp/skills').mkdir(parents=True)
+            for name in ['AGENTS.override.md','.omp/AGENTS.md','.omp/WORKFLOW.md']:
+                (project/name).write_text('Prepared fixture')
+            repo={'profile':str(profile),'pipeline':str(profile/'WORKFLOW.md')};receipt=root/'receipt.json';installs=[]
+            def command(argv,**kwargs):
+                if argv[0]=='git':
+                    return subprocess.check_output(argv,cwd=kwargs['cwd'],text=True)
+                if Path(argv[1]).name=='install.py':installs.append(argv);return ''
+                return '{}'
+            with patch.object(runner.runtime,'home',return_value=root/'managed'),patch.object(runner,'command',side_effect=command),patch.object(runner.shutil,'which',return_value=None):
+                runner.install_profile(cfg,repo,project,receipt)
+                runner.install_profile(cfg,repo,project,receipt)
+                self.assertEqual(len(installs),1)
+                extra=project/'.agents/skills/two';extra.mkdir();(extra/'SKILL.md').write_text('---\nname: two\n---\nNew skill')
+                runner.install_profile(cfg,repo,project,receipt)
+                self.assertEqual(len(installs),2)
+                (extra/'SKILL.md').unlink();extra.rmdir()
+                runner.install_profile(cfg,repo,project,receipt)
+                self.assertEqual(len(installs),3)
+    def test_legacy_import_does_not_treat_attention_overlay_as_pipeline_stage(self):
+        cfg=config(Path('/tmp/unused'))
+        cfg['teams']['team']['states']['Blocked']='Blocked'
+        cfg['workflow']['states']['attention']='Blocked'
+        record={'repo':'hone','phase':'parked'}
+        imported=runner.initial_control(record,issue('Blocked'),cfg)
+        self.assertIsNone(imported['stage'])
+        self.assertEqual(imported['lifecycle'],'waiting')
+        self.assertEqual(runner.initial_control(record,issue('In Review'),cfg)['stage'],'review')
     def test_registered_start_state_does_not_release_a_new_explicit_hold(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);cfg=config(root);store=runner.Store(root/'state');item=issue()
@@ -277,6 +336,16 @@ class PolicyAndStorage(unittest.TestCase):
             record=store.control(ID,{'attention':None})
             runner.publish(cfg,store,api,record,api.item)
             self.assertEqual({v['name'] for v in api.item['labels']['nodes']},{'on-call','team-required'})
+    def test_unmapped_attention_keeps_stage_and_team_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg=config(root);store=runner.Store(root/'state')
+            item=issue('In Progress',labels=['on-call']);api=FakeLinear(item)
+            record={'id':ID,'identifier':'TWA-7','repo':'hone',
+                    'control':{'stage':'review','attention':{'reason':'Need a decision'}}}
+            store.save(record)
+            runner.publish(cfg,store,api,record,item)
+            self.assertEqual(api.item['state']['name'],'In Review')
+            self.assertEqual(api.item['labels']['nodes'],[{'id':'on-call','name':'on-call'}])
     def test_publication_cannot_overwrite_an_owner_finishing_concurrently(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);cfg=config(root);store=runner.Store(root/'state');api=FakeLinear(issue())

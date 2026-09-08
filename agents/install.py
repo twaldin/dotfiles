@@ -348,13 +348,34 @@ def main():
             for name, relative in json.loads((SOURCE / 'skills.json').read_text())['project'].items():
                 (catalog / name).symlink_to(runtime / relative)
                 codex_allowed.add(str(runtime / relative / 'SKILL.md'))
+            shared = project / '.agents/skills'
+            tracked = subprocess.run(['git', 'ls-files', '--', '.agents/skills'], cwd=project, capture_output=True, text=True, check=True).stdout
+            managed_skills = list(catalog.iterdir())
+            if tracked.strip():
+                for path in shared.iterdir():
+                    if not (path / 'SKILL.md').is_file():
+                        continue
+                    target = catalog / path.name
+                    if target.exists() or target.is_symlink():
+                        if target.resolve() != path.resolve():
+                            raise ValueError(f'Team and managed skill paths conflict: {path}')
+                    else:
+                        target.symlink_to(path)
+                    codex_allowed.add(str((path / 'SKILL.md').resolve()))
+                # Codex discovers native .agents and .codex skills, not .omp.
+                # Keep the team tree intact and expose only the managed additions.
+                for path in managed_skills:
+                    target = project / '.codex/skills' / path.name
+                    owned = subprocess.run(['git', 'ls-files', '--', str(target.relative_to(project))], cwd=project, capture_output=True, text=True, check=True).stdout
+                    if owned.strip() or ((target.exists() or target.is_symlink()) and target.resolve() != path.resolve()):
+                        raise ValueError(f'Existing Codex skill conflicts with managed projection: {target}')
+                    plan(target, 'link', path.resolve())
             # Native project sources remain intact; this is the selected local view.
-            selected_project = home / '.local/share/agent-setup/projects' / hashlib.sha256(str(project_source).encode()).hexdigest()[:16]
+            selected_project = home / '.local/share/agent-setup/projects' / hashlib.sha256(str(project).encode()).hexdigest()[:16]
             plan(selected_project, 'directory', catalog)
             plan(project / '.omp/skills', 'link', selected_project)
-            shared = project / '.agents/skills'
-            tracked = subprocess.run(['git', 'ls-files', '--', '.agents/skills', 'AGENTS.override.md'], cwd=project, capture_output=True, text=True, check=True).stdout
-            if tracked.strip():
+            tracked_entrypoints = subprocess.run(['git', 'ls-files', '--', 'AGENTS.override.md', '.omp/skills', '.omp/AGENTS.md', '.omp/WORKFLOW.md', '.omp/config.yml'], cwd=project, capture_output=True, text=True, check=True).stdout
+            if tracked_entrypoints.strip():
                 raise ValueError(f'Selected project entry points are tracked; review before replacing: {project}')
             # Keep team skill files intact, excluding their original paths with
             # native Codex overrides. Selected project copies remain discoverable.
@@ -363,7 +384,8 @@ def main():
                     match = re.search(r'^name:\s*[\"\']?([^\s\"\']+)', skill.read_text(), re.M)
                     if match:
                         codex_disabled.add(match.group(1))
-            plan(shared, 'link', selected_project)
+            if not tracked.strip():
+                plan(shared, 'link', selected_project)
             plan(project / 'AGENTS.override.md', 'link', project_source / 'AGENTS.md')
             workflow = project_source / 'WORKFLOW.md'
             if workflow.is_file():
@@ -374,7 +396,8 @@ def main():
             exclude = Path(subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-path', 'info/exclude'], cwd=project, capture_output=True, text=True, check=True).stdout.strip())
             prior = next((c['content'].decode() for c in changes if c['path'] == exclude and c['kind'] == 'write'), exclude.read_text() if exclude.exists() else '')
             lines = prior.rstrip('\n').splitlines()
-            for pattern in ['/.omp', '/.agents', '/AGENTS.override.md'] + (['/WORKFLOW.md'] if workflow.is_file() and not tracked_workflow.strip() else []):
+            skill_excludes = ['/.agents'] if not tracked.strip() else [f'/.codex/skills/{path.name}' for path in managed_skills]
+            for pattern in ['/.omp', '/AGENTS.override.md'] + skill_excludes + (['/WORKFLOW.md'] if workflow.is_file() and not tracked_workflow.strip() else []):
                 if pattern not in lines:
                     lines.append(pattern)
             plan(exclude, 'write', ('\n'.join(lines) + '\n').encode())

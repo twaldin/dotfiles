@@ -23,7 +23,7 @@ Workspace `workflow` supports:
 - `start_states`: existing state UUIDs/names that request an owner. Configure `["Todo"]` for the selected initial personal/work defaults; an absent mapping requests no owners.
 - `defer_states` / `cancel_states` and `defer_types` / `cancel_types`: explicit withdrawal mappings. Defaults defer Backlog/Triage types and stop canceled/duplicate work.
 - `excluded_labels`: optional intake exclusions chosen by this workspace.
-- `states`: publication keys such as active/review/ready/landed/complete mapped to existing state names or UUIDs. An absent or empty map publishes no statuses. Unknown/unmapped stages leave the current field alone.
+- `states`: publication keys such as active/review/ready/landed/complete mapped to existing state names or UUIDs. Optional `attention` overrides the visible status while private human attention is present; clearing attention restores the owner's current stage. This does not replace that stage or defer the owner. An absent attention mapping preserves ordinary stage publication. An absent or empty map publishes no statuses. Unknown/unmapped stages leave the current field alone.
 - `attention_labels`: optional existing label UUIDs/names used for human attention. Updates touch only these labels and preserve unrelated ones.
 
 Team and repository workflow overrides refine the workspace mapping. `teams.<uuid>.states` records existing name-to-ID mappings. The shared engine requires no custom team, state or label. Personal repository labels and Lindy's existing authoring conventions belong in their maintained policy.

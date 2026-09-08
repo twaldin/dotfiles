@@ -424,7 +424,8 @@ def human_event(event):
 def initial_control(record, issue, config):
     """One-time import; subsequent lifecycle decisions come from the owner."""
     stage = next((name for name in policy.workflow(config, record.get('repo'), issue['team']['id'])['states']
-                  if policy.state_id(config, issue['team']['id'], name, record.get('repo')) == issue['state']['id']), None)
+                  if name != 'attention'
+                  and policy.state_id(config, issue['team']['id'], name, record.get('repo')) == issue['state']['id']), None)
     lifecycle = 'complete' if record.get('phase') == 'done' else 'waiting' if record.get('phase') == 'parked' else 'active'
     return {'brief': issue.get('description') or issue['title'], 'lifecycle': lifecycle,
             'stage': stage, 'attention': None, 'hold': None, 'next_check_at': None,
@@ -467,7 +468,9 @@ def publish(config, store, linear, record, issue):
     control = record.get('control', {})
     if control.get('hold') or control.get('deferred') or not assigned_to_owner(issue, config):
         return record
-    target = policy.state_id(config, issue['team']['id'], control.get('stage'), record.get('repo'))
+    target = (policy.state_id(config, issue['team']['id'], 'attention', record.get('repo'))
+              if control.get('attention') else None)
+    target = target or policy.state_id(config, issue['team']['id'], control.get('stage'), record.get('repo'))
     convention = policy.workflow(config, record.get('repo'), issue['team']['id'])
     managed = {config.get('labels', {}).get(value, value) for value in convention['attention_labels']}
     existing = {label['id'] for label in issue['labels']['nodes']}
@@ -585,7 +588,11 @@ def install_profile(config, repo, path, receipt):
         raise ValueError('Registered profile needs AGENTS.md and a readable pipeline')
     files = [(str(p.relative_to(profile)), hashlib.sha256(p.read_bytes()).hexdigest())
              for p in sorted(profile.rglob('*')) if p.is_file() and '.git' not in p.parts]
+    tracked_skills = command(['git', 'ls-files', '--', '.agents/skills'], cwd=path).strip()
+    team_skills = [(str(p.relative_to(path)), str(p.resolve()), hashlib.sha256(p.read_bytes()).hexdigest())
+                   for p in sorted((path / '.agents/skills').glob('*/SKILL.md'))] if tracked_skills else []
     expected = digest({'profile': str(profile), 'worker_home': str(worker_home), 'files': files,
+                       'team_skills': team_skills,
                        'installer': hashlib.sha256((source / 'install.py').read_bytes()).hexdigest(),
                        'skills': hashlib.sha256((source / 'skills.json').read_bytes()).hexdigest()})
     try:

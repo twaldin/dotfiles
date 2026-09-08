@@ -130,6 +130,44 @@ class SharedInstall(unittest.TestCase):
             result = subprocess.run(command, check=True, capture_output=True, text=True)
             self.assertIn('0 changes', result.stdout)
 
+    def test_tracked_team_skills_are_preserved_in_separate_project_views(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            home=Path(scratch);profile=home/'profile';profile.mkdir()
+            (profile/'AGENTS.md').write_text('Managed guidance.')
+            repos=[home/'one',home/'two'];before={}
+            for repo in repos:
+                repo.mkdir();subprocess.run(['git','init','-q',str(repo)],check=True)
+                team=repo/'.agents/skills/team-skill';team.mkdir(parents=True)
+                (team/'SKILL.md').write_text('---\nname: team-skill\ndescription: Team skill\n---\n'+repo.name)
+                (team/'data.txt').write_text('Local resource '+repo.name)
+                subprocess.run(['git','add','.agents'],cwd=repo,check=True)
+                before[repo]=fingerprint(repo/'.agents/skills')
+            command=[sys.executable,str(Path(__file__).with_name('install.py')),'--home',str(home),'--project-source',str(profile)]
+            for repo in repos:command+=['--project',str(repo)]
+            subprocess.run(command+['--apply'],check=True,capture_output=True)
+            self.assertNotEqual((repos[0]/'.omp/skills').resolve(),(repos[1]/'.omp/skills').resolve())
+            for repo in repos:
+                self.assertEqual(fingerprint(repo/'.agents/skills'),before[repo])
+                self.assertFalse((repo/'.agents/skills').is_symlink())
+                self.assertEqual((repo/'.omp/skills/team-skill').resolve(),(repo/'.agents/skills/team-skill').resolve())
+                self.assertTrue((repo/'.omp/skills/using-the-work-system/SKILL.md').is_file())
+                self.assertEqual((repo/'.omp/skills/team-skill/data.txt').read_text(),'Local resource '+repo.name)
+            self.assertIn('0 changes',subprocess.run(command,check=True,capture_output=True,text=True).stdout)
+    def test_tracked_entrypoints_and_team_skill_collisions_are_not_replaced(self):
+        for relative in ['AGENTS.override.md','.omp/config.yml','.agents/skills/using-the-work-system/SKILL.md']:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as scratch:
+                home=Path(scratch);repo=home/'repo';repo.mkdir();profile=home/'profile';profile.mkdir()
+                (profile/'AGENTS.md').write_text('Managed guidance.')
+                subprocess.run(['git','init','-q',str(repo)],check=True)
+                target=repo/relative;target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_text('---\nname: using-the-work-system\ndescription: Team content\n---\nPreserve me')
+                subprocess.run(['git','add',relative],cwd=repo,check=True)
+                before=fingerprint(target)
+                command=[sys.executable,str(Path(__file__).with_name('install.py')),'--home',str(home),'--project',str(repo),'--project-source',str(profile),'--apply']
+                result=subprocess.run(command,capture_output=True,text=True)
+                self.assertNotEqual(result.returncode,0)
+                self.assertEqual(fingerprint(target),before)
+                self.assertFalse((home/'.omp/agent/config.yml').exists())
     def test_project_only_preserves_global_models_tools_and_workflow(self):
         with tempfile.TemporaryDirectory() as scratch:
             home=Path(scratch)
