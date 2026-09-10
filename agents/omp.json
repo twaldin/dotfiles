@@ -1,14 +1,14 @@
 {
   "modelRoles": {
     "default": "openai-codex/gpt-6-astra:high",
-    "task": "anthropic/claude-fable-5-1:high",
+    "task": "anthropic/claude-opus-5:high",
     "slow": "openai-codex/gpt-5.6-sol:xhigh",
     "tiny": "openai-codex/gpt-5.6-luna",
     "advisor": "xai-oauth/grok-4.6:xhigh",
     "smol": "anthropic/claude-opus-5:medium",
     "plan": "openai-codex/gpt-6-astra:high",
     "review": "xai-oauth/grok-4.6:xhigh",
-    "fable": "anthropic/claude-fable-5-1:xhigh"
+    "fable": "anthropic/claude-opus-5:xhigh"
   },
   "cycleOrder": ["default", "fable", "slow"],
   "task": {
