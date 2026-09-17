@@ -696,7 +696,7 @@ Current PR/check/review snapshot:
             env.update(OMP_TICKET_ID=key, OMP_TICKET_TURN=turn,
                        OMP_TICKETS_CONFIG=config['_path'], OMP_TICKETS_RUNNER=str(Path(__file__).resolve()))
             with open(os.devnull, 'w') as out, (directory / 'stderr.log').open('a') as err:
-                child = subprocess.Popen(args, cwd=path, env=env, stdout=out, stderr=err,
+                child = subprocess.Popen(args, cwd=path, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
                                          start_new_session=True, pass_fds=(acquired.fileno(),))
                 record['child_pid'] = child.pid
                 store.save({'id': key, 'child_pid': child.pid})
