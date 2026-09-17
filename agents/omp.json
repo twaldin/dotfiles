@@ -1,16 +1,21 @@
 {
   "modelRoles": {
-    "default": "openai-codex/gpt-6-astra:high",
-    "task": "anthropic/claude-opus-5:high",
-    "slow": "openai-codex/gpt-5.6-sol:xhigh",
-    "tiny": "openai-codex/gpt-5.6-luna",
+    "default": "anthropic/claude-fable-5-1:high",
+    "task": "anthropic/claude-fable-5-1:high",
+    "slow": "anthropic/claude-fable-5-1:xhigh",
+    "tiny": "zai/glm-5.3-flash:low",
     "advisor": "xai-oauth/grok-4.6:xhigh",
-    "smol": "anthropic/claude-opus-5:medium",
-    "plan": "openai-codex/gpt-6-astra:high",
+    "smol": "zai/glm-5.3-flash:high",
+    "plan": "anthropic/claude-fable-5-1:high",
     "review": "xai-oauth/grok-4.6:xhigh",
-    "fable": "anthropic/claude-opus-5:xhigh"
+    "fable": "anthropic/claude-fable-5-1:xhigh",
+    "glm": "zai/glm-5.3-flash:high"
   },
-  "cycleOrder": ["default", "fable", "slow"],
+  "cycleOrder": [
+    "default",
+    "fable",
+    "glm"
+  ],
   "task": {
     "agentModelOverrides": {
       "reviewer": "@review",
@@ -19,12 +24,28 @@
   },
   "modelRoleStorage": "global",
   "defaultThinkingLevel": "auto",
-  "theme": { "dark": "dark-tokyo-night", "light": "light" },
+  "theme": {
+    "dark": "dark-tokyo-night",
+    "light": "light"
+  },
   "symbolPreset": "nerd",
   "disabledProviders": [
-    "claude", "claude-md", "claude-plugins", "codex", "gemini", "opencode",
-    "cursor", "windsurf", "cline", "github", "vscode", "agent-plugins",
-    "omp-plugins", "mcp-json", "omp-managed", "agents"
+    "claude",
+    "claude-md",
+    "claude-plugins",
+    "codex",
+    "gemini",
+    "opencode",
+    "cursor",
+    "windsurf",
+    "cline",
+    "github",
+    "vscode",
+    "agent-plugins",
+    "omp-plugins",
+    "mcp-json",
+    "omp-managed",
+    "agents"
   ],
   "skills": {
     "enabled": true,
@@ -42,8 +63,17 @@
     "enableOpencodeUser": false,
     "enableOpencodeProject": false
   },
-  "mcp": { "enableProjectConfig": false },
-  "autolearn": { "enabled": false, "autoContinue": false },
-  "advisor": { "enabled": false },
-  "ask": { "timeout": 0 }
+  "mcp": {
+    "enableProjectConfig": false
+  },
+  "autolearn": {
+    "enabled": false,
+    "autoContinue": false
+  },
+  "advisor": {
+    "enabled": false
+  },
+  "ask": {
+    "timeout": 0
+  }
 }
