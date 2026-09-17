@@ -1,6 +1,6 @@
 # One owner through completion
 
-Read the canonical brief, current ticket input, private notes and repository pipeline on every wake. Investigate enough to distinguish work you can do from a decision Tim must supply. Post a concise Linear question when needed, then record a waiting outcome and end the turn; waiting releases the slot. New input returns to this same session. An explicit hold still needs release.
+Read the canonical brief, current ticket input, private notes and repository pipeline on every wake. Investigate enough to distinguish work you can do from a decision Tim must supply. When a decision is needed, write the question and your recommended default to the private notes, record a waiting outcome whose `attention` carries the question, and end the turn; waiting releases the slot. Leave the ticket's state and comments alone — Linear is team-facing and a conversation relays the question to Tim. New input (a `refine` of the brief or a comment) returns to this same session. An explicit hold still needs release.
 
 The owner implements the repository pipeline: findings, artifacts, PRs or a stack; required checks and independent reviews; feedback; merge; and landed/deployed acceptance. Attach every required PR to Linear. Follow the configured deployment reference to identify the relevant commit/run and verify its result. Record a next check time when you must inspect a pipeline later.
 
@@ -30,7 +30,7 @@ The runner supplies its configuration and turn identity in this process's enviro
 
 - `lifecycle`: `active` for unfinished work needing another turn, `waiting` to park, or `complete` after acceptance.
 - `stage`: an optional publication key from the workspace policy, such as `review`, `ready` or `landed`. Completion selects `complete`.
-- `attention`: null or an object with a concrete `reason`, optional `kind` and Linear question/PR `url`. Questions and answers themselves stay on Linear.
+- `attention`: null or an object with a concrete `reason` (the question itself and your recommended default), optional `kind` and PR `url`. The conversation agent reads it with `omp-tickets attention`; it is not published as a ticket state or comment.
 - `next_check_at`: null or a Unix timestamp for the next pipeline check. Waiting for an answer normally needs no timer.
 - `evidence`: concise acceptance evidence, required for completion, including findings-only work. Keep detailed logs/review records private.
 

@@ -656,11 +656,14 @@ GitHub account {repo.get('github_user', 'configured account')} is selected for t
 Private task directory: {directory}. Read notes.md if present and preserve others' notes.
 Canonical internal brief and state:
 {json.dumps(control, ensure_ascii=False)}
-Linear is the human-facing discussion/input and a permitted publication surface. Reconcile new input
-with the canonical brief; update it through the configured control CLI when scope/decisions change.
-The runner does not infer completion or waiting from a Linear status. Before ending, record your
-outcome with the settle command described in the skill. Its turn ID is supplied in your environment.
-Wait with a question when Tim's input is needed; wait with next_check_at for time-based pipeline checks.
+Linear is the team-facing discussion/input and a permitted publication surface: it carries the change,
+evidence, acceptance and deploy facts, never questions for Tim, drafts for a human to send, or agent/session
+talk. Reconcile new input with the canonical brief; update it through the configured control CLI when
+scope/decisions change. The runner does not infer completion or waiting from a Linear status. Before ending,
+record your outcome with the settle command described in the skill. Its turn ID is supplied in your environment.
+When Tim's input is needed, write the question and your recommended default to notes.md, settle waiting
+with attention carrying that question, and leave the ticket state and comments untouched; a conversation
+relays it and answers through refine or a comment. Wait with next_check_at for time-based pipeline checks.
 A quiet acknowledgement of your own prior update needs no new comment, but still records an outcome.
 Before ready/merge/deploy/Done, check fresh ticket input and PR heads/reviews/checks. If Linear is
 unreadable, continue authorized coding but wait before merge/deploy until input can be checked.

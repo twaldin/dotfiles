@@ -15,6 +15,6 @@ Choose the relevant reference:
 - Adding a persistent repository or preparing its policy: [enrollment.md](enrollment.md).
 - Owning a ticket through work, waiting and completion: [worker.md](worker.md).
 
-Use `omp-tickets show <issue>` and live Linear/PR context before contributing to existing work. Preserve its owner, session and worktree. Questions and answers belong in concise Linear comments; detailed execution evidence stays in the private task directory. Ordinary conversations can contribute without becoming another implementation owner.
+Use `omp-tickets show <issue>` and live Linear/PR context before contributing to existing work. Preserve its owner, session and worktree. Linear is team-facing: it carries the change, evidence and acceptance. An owner's questions live in its private attention/notes (`omp-tickets attention`); a conversation relays them to Tim and answers with `refine` or a comment. Detailed execution evidence stays in the private task directory. Ordinary conversations can contribute without becoming another implementation owner.
 
 Keep credentials and work code on their owning host. Follow the selected workspace's existing conventions and merge authority. Personal repository labels are personal policy; Lindy requires its own existing fields and authoring guidance.

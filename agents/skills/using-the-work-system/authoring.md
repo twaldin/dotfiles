@@ -15,7 +15,7 @@ After requesting intake, inspect `omp-tickets show <issue>` and live progress. R
 For an existing ticket:
 
 - Read `omp-tickets show <issue>`, current Linear discussion and deliverables.
-- Record Tim's answer on Linear, or let his direct comment reach the existing owner. A question can be answered by any conversation; resolve it through the actual discussion, not a comment prefix or shared account identity.
+- Owner questions are listed by `omp-tickets attention`; relay them to Tim in chat. Deliver his answer with `refine` (private brief) or, when it is a team-facing decision, as his Linear comment; either wakes the existing owner. Resolve a question through the actual discussion, not a comment prefix or shared account identity.
 - When scope changes, save the updated internal brief to a local text file and run `omp-tickets refine <issue> --input <file>`. Keep the concise Linear description consistent with the agreement. This wakes the same owner.
 - For an explicit pause, use `omp-tickets hold <issue> --reason '<reason>'` and record the human explanation on Linear. It stops the current turn/helpers and preserves work. `release <issue>` resumes the same owner; a brief edit alone does not release a hold. Configured deferred/start states provide the workspace's Linear control surface too.
 
