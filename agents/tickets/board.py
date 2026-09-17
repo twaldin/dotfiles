@@ -436,7 +436,10 @@ def log_box(dispatcher, n):
 
 def frame(console, dispatcher, gh):
     width, height = console.size
-    records = [r for r in dispatcher.records if r.get('phase') != 'done' or r.get('control', {}).get('lifecycle') != 'complete']
+    terminal = {'Done', 'Canceled', 'Cancelled', 'Duplicate'}
+    records = [r for r in dispatcher.records
+               if (r.get('phase') != 'done' or r.get('control', {}).get('lifecycle') != 'complete')
+               and dispatcher.state_name(r) not in terminal]
     workers = [r for r in dispatcher.records if r.get('phase') in ('running', 'starting') or r['id'] in dispatcher.procs]
     top = [header(dispatcher, gh, workers), workers_box(dispatcher, workers, width), tickets_box(dispatcher, gh, records, width)]
     needs = needs_box(dispatcher, gh, records)
