@@ -2,6 +2,7 @@
 """One Linear workspace, native OMP sessions. No pipeline steps live in this runner."""
 import argparse
 import contextlib
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -66,6 +67,28 @@ def expand(path):
     return Path(path).expanduser().resolve()
 
 
+RETRY_CAP_SECONDS = 6 * 3600
+
+
+def retry_delay(failures):
+    """Exponential backoff that always stays finite: 1 min, 4 min, 16 min, ..., capped at six hours."""
+    return min(RETRY_CAP_SECONDS, 60 * 4 ** (failures - 1))
+
+
+def short_host(name):
+    return name.split('.')[0].lower()
+
+
+def on_owning_host(config):
+    """macOS hostnames flap between the network name, .local and LocalHostName; compare short names."""
+    names = [socket.gethostname()]
+    try:
+        names.append(command(['scutil', '--get', 'LocalHostName'], timeout=5).strip())
+    except Exception:
+        pass
+    return short_host(config['host']) in {short_host(n) for n in names if n}
+
+
 @contextlib.contextmanager
 def lock(path, *, blocking=False):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +99,11 @@ def lock(path, *, blocking=False):
             yield False
         else:
             try:
+                # Leave the holder's identity for operators; flock stays the authority.
+                f.seek(0)
+                f.truncate()
+                f.write(f'{os.getpid()} {int(time.time())}\n')
+                f.flush()
                 yield f
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
@@ -749,11 +777,17 @@ Current PR/check/review snapshot:
             record = store.get(key) or record
             record.update(phase='parked', event=None, error=None, failures=0, retry_at=0, child_pid=None)
             store.save(record)
+        except TimeoutError as exc:
+            # The session is resumable by design: the wall clock cut a turn short, nothing failed.
+            record = store.get(key) or record
+            record.update(phase='error', error=str(exc), retry_at=0, child_pid=None)
+            store.save(record)
+            print(json.dumps({'issue': record['identifier'], 'parked': 'turn timed out; parked for resume'}), flush=True)
         except Exception as exc:
             record = store.get(key) or record
             n = record.get('failures', 0) + 1
             record.update(phase='error', failures=n, error=str(exc), child_pid=None,
-                          retry_at=time.time() + 60 * 4 ** (n - 1) if n < 3 else float('inf'))
+                          retry_at=time.time() + retry_delay(n))
             store.save(record)
             if n >= 3:
                 store.control(key, {'attention': {'kind': 'failure', 'reason': str(exc)}})
@@ -863,6 +897,14 @@ def tick(config, store, linear, *, launch=True):
         except Exception as exc:
             events.append({'issue': issue['identifier'], 'error': str(exc)})
     return events
+
+
+def heartbeat(records, at=None):
+    phases = [record.get('phase') for record in records.values()]
+    at = time.time() if at is None else at
+    return {'poll': datetime.fromtimestamp(at, timezone.utc).isoformat(timespec='seconds'),
+            'tickets': len(phases), 'awake': sum(p in {'starting', 'running'} for p in phases),
+            'error': phases.count('error'), 'parked': phases.count('parked')}
 
 
 def load_config(path):
@@ -1006,7 +1048,7 @@ def main():
     parser.add_argument('--reason')
     args = parser.parse_args()
     config = load_config(args.config)
-    if socket.gethostname() != config['host']:
+    if not on_owning_host(config):
         raise RuntimeError('Use this configuration on its owning host')
     store, linear = Store(config['state_dir']), Linear(config)
     if args.action == 'enroll':
@@ -1044,6 +1086,7 @@ def main():
                 events = tick(config, store, linear, launch=args.action != 'check' and config.get('enabled', False))
                 for event in events:
                     print(json.dumps(event), flush=True)
+                print(json.dumps(heartbeat(store.all())), flush=True)
             except Exception as exc:
                 print(json.dumps({'error': str(exc)}), flush=True)
                 if args.action != 'serve':

@@ -48,7 +48,7 @@ Enrollment input contains `key`, `repository` and optional `routing.label_id`. C
 
 The global using-the-work-system skill directs any ticket conversation to workspace/project guidance. A small optional `~/.config/agent-setup/workspaces.json` index can identify the owning host/configuration when this machine has no deployment. Run operations on the owning host; ordinary coding conversations need no ticket.
 
-An owner ends each turn with `settle`, supplying JSON with `lifecycle` active/waiting/complete, optional publication `stage`, `attention`, `next_check_at` (Unix timestamp), and acceptance `evidence` for completion. Its environment identifies the current ticket/turn/configuration. The skill contains the command and field guidance. An unfinished exit retries the same owner; exhausted retries become private attention.
+An owner ends each turn with `settle`, supplying JSON with `lifecycle` active/waiting/complete, optional publication `stage`, `attention`, `next_check_at` (Unix timestamp), and acceptance `evidence` for completion. Its environment identifies the current ticket/turn/configuration. The skill contains the command and field guidance. An unfinished exit retries the same owner with exponential backoff (1 min, 4 min, ..., capped at six hours, never terminal); three consecutive failures also raise private attention. A turn cut short by `turn_timeout_seconds` is not a failure: the owner resumes its saved session on the next poll. The serve loop prints one heartbeat line per poll (`{"poll", "tickets", "awake", "error", "parked"}`) and `dispatcher.lock` holds `<pid> <unix time>` of the current holder.
 
 ## Durable behavior
 

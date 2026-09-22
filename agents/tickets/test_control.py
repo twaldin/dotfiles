@@ -1,6 +1,8 @@
 """Contracts for private decisions, same-owner processes, and workspace projections."""
+import contextlib
 import copy
 from concurrent.futures import ThreadPoolExecutor
+import io
 import json
 import os
 from pathlib import Path
@@ -219,6 +221,18 @@ class OwnerOutcomes(unittest.TestCase):
         self.assertIn('without recording its outcome',record['error'])
         self.assertEqual(self.api.notes,[])
         self.assertFalse((self.store.directory(record)/'omp.jsonl').exists())
+    def test_wall_clock_timeout_parks_for_resume_without_counting_a_failure(self):
+        (self.root/'delay').write_text('20');self.cfg['turn_timeout_seconds']=.3
+        self.record['failures']=2;self.store.save(self.record)
+        out=io.StringIO()
+        with contextlib.redirect_stdout(out):self.run_owner()
+        record=self.store.get(ID)
+        self.assertEqual(record['failures'],2);self.assertEqual(record['retry_at'],0);self.assertIsNone(record['child_pid'])
+        self.assertIsNone(record['control'].get('attention'))
+        self.assertEqual(json.loads(out.getvalue())['parked'],'turn timed out; parked for resume')
+        self.assertEqual(runner.wake_reason(self.api.item,record,runner.issue_event(self.api.item),self.pr,time.time()),
+                         'Resume the interrupted attempt in its existing session.')
+        self.assertTrue(any('action' in e for e in runner.tick(self.cfg,self.store,self.api,launch=False)))
     def test_hold_stops_owner_and_helper_then_resumes_saved_session(self):
         (self.root/'mode').write_text('hold')
         with ThreadPoolExecutor(max_workers=1) as pool:

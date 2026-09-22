@@ -422,7 +422,46 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.linear.item['state']['name'],'In Review')
         self.assertNotIn('blocked',[x['name'] for x in self.linear.item['labels']['nodes']])
         self.assertEqual(self.linear.notes,[])
-        self.assertEqual(self.store.get(ID)['retry_at'],float('inf'))
+        self.assertLess(self.store.get(ID)['retry_at'],float('inf'))
+    def test_repeated_failures_back_off_finitely_and_stay_resumable(self):
+        cap=runner.RETRY_CAP_SECONDS
+        for n in range(1,6):
+            with self.subTest(failures=n):
+                self.record['failures']=n-1;self.store.save(self.record)
+                with patch.object(runner,'prepare_workspace',side_effect=RuntimeError('fixture failure')):
+                    runner.run_worker(self.cfg,self.store,self.linear,ID)
+                record=self.store.get(ID);delay=record['retry_at']-time.time()
+                self.assertEqual(record['failures'],n)
+                self.assertLess(delay,cap+1)
+                self.assertGreater(delay,min(cap,60*4**(n-1))-5)
+                self.assertEqual(runner.wake_reason(self.linear.item,record,runner.issue_event(self.linear.item),[],record['retry_at']),
+                                 'Resume the interrupted attempt in its existing session.')
+        self.assertEqual([runner.retry_delay(n) for n in (5,6,7)],[15360,cap,cap])
+    def test_lock_holder_leaves_pid_and_heartbeat_counts_phases(self):
+        path=self.root/'dispatcher.lock'
+        with runner.lock(path) as held:
+            self.assertTrue(held)
+            pid,stamp=path.read_text().split()
+            self.assertEqual(int(pid),os.getpid());self.assertAlmostEqual(int(stamp),time.time(),delta=5)
+            with runner.lock(path) as again:self.assertFalse(again)
+        with runner.lock(path) as held:self.assertEqual(path.read_text().count('\n'),1)
+        records={k:{'phase':p} for k,p in [('a','running'),('b','starting'),('c','error'),('d','parked'),('e','done')]}
+        beat=runner.heartbeat(records,at=0)
+        self.assertEqual(beat,{'poll':'1970-01-01T00:00:00+00:00','tickets':5,'awake':2,'error':1,'parked':1})
+    def test_owning_host_matches_short_names_and_local_host_name(self):
+        self.cfg['host']='Timothy-MBP-Lindy.local'
+        with patch.object(runner.socket,'gethostname',return_value='timothy-mbp-lindy'):
+            self.assertTrue(runner.on_owning_host(self.cfg))
+        with patch.object(runner.socket,'gethostname',return_value='twaldin-work.lan'), \
+             patch.object(runner,'command',side_effect=RuntimeError('scutil failed')):
+            self.assertFalse(runner.on_owning_host(self.cfg))
+            self.cfg['host']='twaldin-work'
+            self.assertTrue(runner.on_owning_host(self.cfg))
+        with patch.object(runner.socket,'gethostname',return_value='dhcp-10-0-0-7'), \
+             patch.object(runner,'command',return_value='Timothy-MBP-Lindy\n') as scutil:
+            self.cfg['host']='timothy-mbp-lindy.local'
+            self.assertTrue(runner.on_owning_host(self.cfg))
+            self.assertEqual(scutil.call_args.args[0],['scutil','--get','LocalHostName'])
     def test_transient_worker_error_does_not_add_human_blocker(self):
         with patch.object(runner,'prepare_workspace',side_effect=RuntimeError('temporary fixture failure')):
             runner.run_worker(self.cfg,self.store,self.linear,ID)
