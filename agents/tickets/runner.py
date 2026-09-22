@@ -384,8 +384,10 @@ def github_env(repo):
 
 def pr_snapshot(repo, branch, env, issue=None):
     # REST pagination covers all reviews/comments/check-runs, not only a latest-page sample.
+    # A busy PR's paginated check-run/comment reads routinely pass 90s on a shared token
+    # budget, and a timeout here marks the whole ticket errored, so give gh real headroom.
     def api(path):
-        return json.loads(command(['gh', 'api', '--paginate', '--slurp', path], env=env))
+        return json.loads(command(['gh', 'api', '--paginate', '--slurp', path], env=env, timeout=300))
     base = 'repos/' + repo['github']
     owner = repo['github'].split('/')[0]
     pages = api(f'{base}/pulls?state=all&head={quote(owner + ":" + branch, safe="")}&per_page=100')
@@ -397,7 +399,7 @@ def pr_snapshot(repo, branch, env, issue=None):
         if url.hostname == 'github.com' and match:
             number = int(match[1])
             if number not in pulls:
-                pulls[number] = json.loads(command(['gh', 'api', f'{base}/pulls/{number}'], env=env))
+                pulls[number] = json.loads(command(['gh', 'api', f'{base}/pulls/{number}'], env=env, timeout=300))
     def pick(value, fields):
         selected = {k: value.get(k) for k in fields}
         if value.get('user'):
