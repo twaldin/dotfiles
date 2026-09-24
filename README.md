@@ -51,6 +51,13 @@ ln -sfn "$PWD/yabai/launch-agents/com.koekeishiya.skhd.plist" "$HOME/Library/Lau
 
 tmux plugins need [tpm](https://github.com/tmux-plugins/tpm); nvim pulls its own plugins on first launch.
 
+passwordless sudo for every command (same drop-in on every machine; `$USER` is `twaldin` on the Macs, `tim` on deckbox):
+
+```sh
+printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$USER" > /tmp/sudoers.new && visudo -cf /tmp/sudoers.new &&
+  sudo install -m 0440 -o root -g "$(id -gn root)" /tmp/sudoers.new "/etc/sudoers.d/90-$USER" && rm /tmp/sudoers.new && sudo -n true
+```
+
 The window-manager slice targets Apple-silicon macOS Tahoe. The checked-in launch agents use the macOS short name `twaldin`. For a different account, first replace every wrapper and log path in both plists with that account's absolute paths, then run `plutil -lint` on both files. The activation script rejects paths that do not match the current account or fixed platform prerequisites.
 
 The window-manager lifecycle fails closed. On first Home adoption, stop the old yabai/skhd jobs, back up and remove prior launch-agent symlinks, and back up and remove the prior real `~/.config/{yabai,skhd,aerospace}` directories. Create native Spaces 1 through 9 on primary display 1 (external displays may have additional Spaces), publish only reviewed app bundles, run `/usr/bin/python3 -I yabai/deploy-lifecycle.py prepare --adopt-existing`, attest the exact Accessibility approvals, and then run its `activate` action. Use the same module's `rollback` action for guarded fallback. Never run both window managers together.
