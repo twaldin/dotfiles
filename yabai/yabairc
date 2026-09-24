@@ -29,10 +29,17 @@ YABAI=/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai
   mouse_action2 resize \
   mouse_drop_action swap
 
-# Launchers and system overlays are not useful BSP tiles. Notification
+# Launchers, dictation, and system overlays are not useful BSP tiles.
+# Superwhisper also needs its Dock icon disabled (Superwhisper settings, or
+# `defaults write com.superduper.superwhisper showApplicationInDock -bool false`):
+# yabai's replacement focus picks its sticky recorder window, and a Dock-mode
+# Superwhisper answers that activation by opening its main window. Its process
+# name is `superwhisper` in 2.16 and `Superwhisper` in 2.18, and yabai app
+# regexes are case-sensitive, so the rule matches both. Notification
 # banners must never enter the BSP tree: clicking one can otherwise reinsert
 # its transient node before macOS activates the destination application.
 "$YABAI" -m rule --add label=raycast app='^Raycast$' manage=off
 "$YABAI" -m rule --add label=system-settings app='^System Settings$' manage=off
+"$YABAI" -m rule --add label=superwhisper app='^[Ss]uperwhisper$' manage=off
 "$YABAI" -m rule --add label=notification-center app='^(Notification Center|NotificationCenter|UserNotificationCenter)$' manage=off
 "$YABAI" -m rule --add label=notification-overlay subrole='^AXNotificationCenter$' manage=off
