@@ -35,7 +35,7 @@ GH_TTL = 300
 GH_FIELDS = 'number,url,state,isDraft,reviewDecision,mergeStateStatus,autoMergeRequest,statusCheckRollup'
 PHASE = {'running': ('●', 'green'), 'starting': ('●', 'green'), 'parked': ('○', 'bright_black'),
          'error': ('✗', 'red'), 'done': ('✓', 'green')}
-LOG_STYLE = {'error': 'red', 'action': 'green'}
+LOG_STYLE = {'error': 'red', 'action': 'green', 'resume': 'yellow', 'parked': 'yellow'}
 
 
 def run(argv, env=None, timeout=20):
@@ -427,7 +427,7 @@ def needs_box(dispatcher, gh, records):
 def log_box(dispatcher, n):
     table = grid([('issue', {'width': 11}), ('line', {'ratio': 1})], header=False)
     for event in dispatcher.log_lines(n):
-        key = 'error' if 'error' in event else 'action'
+        key = next((k for k in LOG_STYLE if k in event), 'action')
         table.add_row(Text(str(event.get('issue', '')), style='bold'), Text(clip(str(event.get(key, '')), 400), style=LOG_STYLE[key]))
     if not table.rows:
         table.add_row('', Text('dispatcher.log is empty', style='bright_black'))

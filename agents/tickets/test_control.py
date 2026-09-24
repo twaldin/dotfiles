@@ -36,7 +36,10 @@ if (root/'mode').read_text()=='hold':
 else:
     (root/'ready').write_text('ready')
     time.sleep(float((root/'delay').read_text()) if (root/'delay').exists() else .1)
-    if (root/'mode').read_text()!='unfinished':
+    mode=(root/'mode').read_text()
+    if mode=='refused':
+        with f.open('a') as h:h.write(json.dumps({'type':'message','message':{'role':'assistant','content':[],'stopReason':'error','errorStatus':429,'errorMessage':'429 rate_limit_error retry-after-ms=900000'}})+'\n')
+    elif mode!='unfinished':
         subprocess.run([sys.executable,os.environ['OMP_TICKETS_RUNNER'],'settle',os.environ['OMP_TICKET_ID'],'--input',str(root/'outcome.json')],check=True)
 '''
 
@@ -221,6 +224,40 @@ class OwnerOutcomes(unittest.TestCase):
         self.assertIn('without recording its outcome',record['error'])
         self.assertEqual(self.api.notes,[])
         self.assertFalse((self.store.directory(record)/'omp.jsonl').exists())
+    def test_interrupted_turns_resume_bounded_without_spending_the_failure_budget(self):
+        (self.root/'mode').write_text('unfinished')
+        self.record['failures']=2;self.store.save(self.record)
+        for n in range(1,runner.RESUME_ATTENTION_AFTER+1):
+            with self.subTest(stalls=n):
+                out=io.StringIO()
+                with contextlib.redirect_stdout(out):self.run_owner()
+                record=self.store.get(ID);delay=record['retry_at']-time.time()
+                self.assertEqual(record['stalls'],n);self.assertEqual(record['failures'],2)
+                self.assertGreater(delay,runner.resume_delay(n)-5)
+                self.assertLess(delay,runner.RESUME_CAP_SECONDS+1)
+                self.assertEqual(json.loads(out.getvalue())['resume'],record['error'])
+                self.assertEqual(runner.wake_reason(self.api.item,record,runner.issue_event(self.api.item),self.pr,record['retry_at']),
+                                 'Resume the interrupted attempt in its existing session.')
+                self.assertEqual(bool(record['control'].get('attention')),n>=runner.RESUME_ATTENTION_AFTER)
+        self.assertIn('6 interrupted turns in a row',record['control']['attention']['reason'])
+        (self.root/'mode').write_text('normal');self.run_owner()
+        self.assertEqual(self.store.get(ID)['stalls'],0)
+        self.assertEqual(self.store.get(ID)['phase'],'parked')
+    def test_provider_refusal_waits_for_its_own_retry_hint(self):
+        (self.root/'mode').write_text('refused')
+        self.run_owner();record=self.store.get(ID);delay=record['retry_at']-time.time()
+        self.assertEqual(record['stalls'],1);self.assertEqual(record['failures'],0)
+        self.assertIn('model provider ended the turn',record['error'])
+        self.assertGreater(delay,895);self.assertLess(delay,901)
+        self.assertIsNone(record['control'].get('attention'))
+    def test_active_outcome_resumes_at_the_owners_next_check(self):
+        due=time.time()+3600
+        self.outcome({'lifecycle':'active','next_check_at':due})
+        self.run_owner();record=self.store.get(ID)
+        self.assertEqual(record['phase'],'error');self.assertEqual(record['failures'],0)
+        self.assertEqual(record['stalls'],1);self.assertAlmostEqual(record['retry_at'],due,delta=5)
+        self.assertIn('unfinished work',record['error'])
+        self.assertIsNone(record['control'].get('attention'))
     def test_wall_clock_timeout_parks_for_resume_without_counting_a_failure(self):
         (self.root/'delay').write_text('20');self.cfg['turn_timeout_seconds']=.3
         self.record['failures']=2;self.store.save(self.record)

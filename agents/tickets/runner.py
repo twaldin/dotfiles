@@ -27,6 +27,14 @@ class Withdrawn(Exception):
     pass
 
 
+class Interrupted(Exception):
+    """The owner's saved session survived; only this turn ended early."""
+
+    def __init__(self, message, delay=None):
+        super().__init__(message)
+        self.delay = delay
+
+
 DEFAULT_CONFIG = Path.home() / '.config/omp-linear/config.json'
 CONNECTIONS = {
     'labels': 'id name',
@@ -73,6 +81,32 @@ RETRY_CAP_SECONDS = 6 * 3600
 def retry_delay(failures):
     """Exponential backoff that always stays finite: 1 min, 4 min, 16 min, ..., capped at six hours."""
     return min(RETRY_CAP_SECONDS, 60 * 4 ** (failures - 1))
+
+
+RESUME_CAP_SECONDS = 15 * 60
+RESUME_ATTENTION_AFTER = 6
+
+
+def resume_delay(stalls):
+    """An interrupted turn left the owner intact: 1 min, 2 min, ..., capped at fifteen minutes."""
+    return min(RESUME_CAP_SECONDS, 60 * 2 ** (stalls - 1))
+
+
+def provider_stall(path):
+    """A turn the model provider refused never reached the owner. Report its own retry hint."""
+    last = None
+    with open(path) as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if entry.get('type') == 'message' and (entry.get('message') or {}).get('role') == 'assistant':
+                last = entry['message']
+    if not last or last.get('stopReason') != 'error':
+        return None
+    hint = re.search(r'retry-after-ms=(\d+)', last.get('errorMessage') or '')
+    return min(RETRY_CAP_SECONDS, int(hint.group(1)) / 1000) if hint else 0.0
 
 
 def short_host(name):
@@ -484,9 +518,9 @@ def reconcile_input(config, store, record, issue, *, persist=True):
         else:
             record['control'] = merge_control(control, changes, wake)
     if changes['deferred']:
-        record.update(phase='parked', error=None, failures=0, retry_at=0)
+        record.update(phase='parked', error=None, failures=0, stalls=0, retry_at=0)
     elif wake and record.get('phase') == 'error':
-        record.update(phase='parked', error=None, failures=0, retry_at=0)
+        record.update(phase='parked', error=None, failures=0, stalls=0, retry_at=0)
     record.update(identifier=issue['identifier'], url=issue['url'], title=issue['title'], team=issue['team']['id'])
     if persist:
         store.save(record)
@@ -694,6 +728,9 @@ record your outcome with the settle command described in the skill. Its turn ID 
 When Tim's input is needed, write the question and your recommended default to notes.md, settle waiting
 with attention carrying that question, and leave the ticket state and comments untouched; a conversation
 relays it and answers through refine or a comment. Wait with next_check_at for time-based pipeline checks.
+Never hold this turn open waiting for a pipeline: no blocking hub wait and no backgrounded polling loop for
+CI, review or deploy results. Record what you know, settle with next_check_at, and read the result on the
+next wake; a turn stopped by a hold or the wall clock loses whatever a pending tool call was waiting on.
 A quiet acknowledgement of your own prior update needs no new comment, but still records an outcome.
 Before ready/merge/deploy/Done, check fresh ticket input and PR heads/reviews/checks. If Linear is
 unreadable, continue authorized coding but wait before merge/deploy until input can be checked.
@@ -766,18 +803,26 @@ Current PR/check/review snapshot:
                 raise RuntimeError('OMP did not persist a native session')
             control = store.get(key)['control']
             if control.get('settled_turn') != turn:
-                raise RuntimeError('Worker ended without recording its outcome; resume the same owner')
+                # A provider refusal ends the process before the owner reads anything.
+                # That is the provider's wait to schedule, not this owner's failure.
+                refused = provider_stall(record['session'])
+                if refused is None:
+                    raise Interrupted('Worker ended without recording its outcome; resume the same owner')
+                raise Interrupted('The model provider ended the turn before the owner ran; resume the same owner',
+                                  refused or None)
             if control.get('lifecycle') == 'active':
-                raise RuntimeError('Worker recorded unfinished work; resume the same owner')
+                due = control.get('next_check_at')
+                raise Interrupted('Worker recorded unfinished work; resume the same owner',
+                                  max(0.0, due - time.time()) if due else None)
             record.update(phase='done' if control['lifecycle'] == 'complete' else 'parked',
-                          failures=0, retry_at=0, error=None, child_pid=None)
+                          failures=0, stalls=0, retry_at=0, error=None, child_pid=None)
             # Keep the delivered snapshots from turn start. Every later event,
             # including an owner comment, receives one same-owner acknowledgement.
             store.save({k: record[k] for k in ['id', 'phase', 'session', 'session_id',
-                                              'failures', 'retry_at', 'error', 'child_pid']})
+                                              'failures', 'stalls', 'retry_at', 'error', 'child_pid']})
         except Withdrawn:
             record = store.get(key) or record
-            record.update(phase='parked', event=None, error=None, failures=0, retry_at=0, child_pid=None)
+            record.update(phase='parked', event=None, error=None, failures=0, stalls=0, retry_at=0, child_pid=None)
             store.save(record)
         except TimeoutError as exc:
             # The session is resumable by design: the wall clock cut a turn short, nothing failed.
@@ -785,6 +830,19 @@ Current PR/check/review snapshot:
             record.update(phase='error', error=str(exc), retry_at=0, child_pid=None)
             store.save(record)
             print(json.dumps({'issue': record['identifier'], 'parked': 'turn timed out; parked for resume'}), flush=True)
+        except Interrupted as exc:
+            # The saved session and worktree are intact; only this turn ended early.
+            # Resume the same owner on a bounded ladder and keep the failure budget
+            # for real runner faults, raising attention once the ladder runs out.
+            record = store.get(key) or record
+            n = record.get('stalls', 0) + 1
+            record.update(phase='error', stalls=n, error=str(exc), child_pid=None,
+                          retry_at=time.time() + (exc.delay if exc.delay is not None else resume_delay(n)))
+            store.save(record)
+            if n >= RESUME_ATTENTION_AFTER:
+                store.control(key, {'attention': {'kind': 'failure',
+                                                  'reason': f'{exc} ({n} interrupted turns in a row).'}})
+            print(json.dumps({'issue': record['identifier'], 'resume': str(exc)}), flush=True)
         except Exception as exc:
             record = store.get(key) or record
             n = record.get('failures', 0) + 1
@@ -1034,7 +1092,7 @@ def control_command(args, config, store, linear):
     if args.action in {'release', 'refine'}:
         current = store.get(key)
         if current.get('phase') == 'error' and not store.busy(current):
-            store.save({'id': key, 'phase': 'parked', 'error': None, 'failures': 0, 'retry_at': 0})
+            store.save({'id': key, 'phase': 'parked', 'error': None, 'failures': 0, 'stalls': 0, 'retry_at': 0})
     print(json.dumps({'issue': record['identifier'], 'action': args.action}))
 
 
@@ -1072,7 +1130,7 @@ def main():
         record = next((r for r in store.all().values() if args.issue in {r['id'], r['identifier']}), None)
         if not record or store.busy(record):
             raise RuntimeError('Ticket is unknown or already running')
-        record.update(phase='error', failures=0, retry_at=0)
+        record.update(phase='error', failures=0, stalls=0, retry_at=0)
         store.save(record)
         return
     identity = tuple(config.get(k) for k in ['host', 'workspace_id', 'assignee_id', 'state_dir'])
