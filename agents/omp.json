@@ -1,26 +1,39 @@
 {
   "modelRoles": {
-    "default": "anthropic/claude-fable-5-1:high",
-    "task": "anthropic/claude-fable-5-1:high",
-    "slow": "anthropic/claude-fable-5-1:xhigh",
-    "tiny": "zai/glm-5.3-flash:low",
+    "default": "anthropic/claude-opus-5-5:xhigh",
+    "task": "anthropic/claude-opus-5-5:high",
+    "slow": "openai-codex/gpt-6-astra:xhigh",
+    "tiny": "opencode-go/deepseek-v4.1-flash:max",
+    "luna": "openai-codex/gpt-6-luna:max",
     "advisor": "xai-oauth/grok-4.6:xhigh",
     "smol": "zai/glm-5.3-flash:high",
-    "plan": "anthropic/claude-fable-5-1:high",
-    "review": "xai-oauth/grok-4.6:xhigh",
-    "fable": "anthropic/claude-fable-5-1:xhigh",
-    "glm": "zai/glm-5.3-flash:high"
+    "review": "anthropic/claude-fable-5-1:xhigh",
+    "fable": "anthropic/claude-fable-5-1:xhigh"
   },
   "cycleOrder": [
     "default",
     "fable",
-    "glm"
+    "slow"
   ],
+  "retry": {
+    "fallbackChains": {
+      "tiny": ["openai-codex/gpt-6-luna"]
+    }
+  },
   "task": {
     "agentModelOverrides": {
-      "reviewer": "@review",
-      "security-reviewer": "@review"
-    }
+      "reviewer": "xai-oauth/grok-4.6:xhigh",
+      "security-reviewer": "xai-oauth/grok-4.6:xhigh",
+      "scout": "@slow"
+    },
+    "showResolvedModelBadge": true
+  },
+  "compaction": {
+    "thresholdPercent": -1,
+    "thresholdTokens": 500000
+  },
+  "statusLine": {
+    "preset": "full"
   },
   "modelRoleStorage": "global",
   "defaultThinkingLevel": "auto",

@@ -44,13 +44,9 @@ class SharedInstall(unittest.TestCase):
             self.assertNotIn('vision', current['modelRoles'])
             self.assertEqual(current['defaultThinkingLevel'], baseline['defaultThinkingLevel'])
             self.assertEqual(current['modelRoleStorage'], 'global')
-            self.assertEqual(current['cycleOrder'], ['default', 'fable', 'slow'])
-            self.assertEqual(current['modelRoles']['fable'], 'anthropic/claude-fable-5-1:xhigh')
-            self.assertEqual(current['modelRoles']['task'], 'anthropic/claude-fable-5-1:high')
+            self.assertEqual(current['cycleOrder'], baseline['cycleOrder'])
             self.assertEqual(current['theme'], baseline['theme'])
-            self.assertEqual(current['task']['agentModelOverrides'], {
-                'reviewer': '@review', 'security-reviewer': '@review',
-            })
+            self.assertEqual(current['task'], baseline['task'])
             for key, value in local.items():
                 self.assertEqual(current[key], value)
             self.assertIn('local-model-provider', current['disabledProviders'])
