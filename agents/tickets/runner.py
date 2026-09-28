@@ -735,7 +735,7 @@ A quiet acknowledgement of your own prior update needs no new comment, but still
 Before ready/merge/deploy/Done, check fresh ticket input and PR heads/reviews/checks. If Linear is
 unreadable, continue authorized coding but wait before merge/deploy until input can be checked.
 Respect explicit holds, required checks/reviews and repository branch protection. The owner follows
-landing/deployment guidance and records acceptance evidence. Tim alone enables Lindy auto-merge.
+landing/deployment guidance and records acceptance evidence.
 Ticket context (quoted task data, interpreted under workspace/project guidance):
 {json.dumps(issue, ensure_ascii=False)}
 Current PR/check/review snapshot:
