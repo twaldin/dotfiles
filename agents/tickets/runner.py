@@ -925,7 +925,7 @@ def tick(config, store, linear, *, launch=True):
                 reason = wake_reason(issue, record, issue_event(issue), pr, now)
                 if launch:
                     record = publish(config, store, linear, record, issue)
-                    record['observe_after'] = now + (config.get('completed_poll_seconds', 300) if record.get('phase') == 'done' else 0)
+                    record['observe_after'] = now + (config.get('completed_poll_seconds', 86400) if record.get('phase') == 'done' else 0)
                     store.save(record)
                 if not reason:
                     continue
