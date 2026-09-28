@@ -130,6 +130,18 @@ class ManagedRuntime(unittest.TestCase):
                     runtime.verify_launcher(root, auth, [sys.executable])
             self.assertEqual(receipt.read_bytes(), before)
 
+    def test_guidance_refresh_replaces_stale_skills_and_instructions_but_keeps_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(managed_fixture(Path(tmp))['worker_home'])
+            settings = (root / '.omp/agent/config.yml').read_bytes()
+            (root / '.omp/agent/AGENTS.md').write_text('stale instructions')
+            runtime.refresh_guidance(root)
+            source = Path(runtime.__file__).resolve().parents[1]
+            skill = root / '.local/share/agent-setup/library/catalog/using-the-work-system/worker.md'
+            self.assertEqual(skill.read_text(), (source / 'skills/using-the-work-system/worker.md').read_text())
+            self.assertEqual((root / '.omp/agent/AGENTS.md').read_bytes(), (source / 'instructions.md').read_bytes())
+            self.assertEqual((root / '.omp/agent/config.yml').read_bytes(), settings)
+
     def test_project_preparation_uses_managed_scope_and_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

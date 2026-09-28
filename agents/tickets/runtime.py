@@ -1,8 +1,10 @@
 """Select the deliberately installed worker OMP configuration, never ambient globals."""
+import datetime
 import json
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -127,14 +129,44 @@ def provision(root, auth_database, launcher):
     verify_launcher(root, auth_database, launcher)
 
 
+def refresh_guidance(root):
+    """Re-import skills and instructions into an existing import; its settings stay as configured."""
+    root = root.expanduser().resolve()
+    validate_contents(root)
+    source = Path(__file__).resolve().parents[1]
+    import install
+    library = root / '.local/share/agent-setup/library'
+    instructions = root / '.omp/agent/AGENTS.md'
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    backup = root / '.local/state/agent-setup/backups' / ('guidance-' + stamp)
+    backup.mkdir(parents=True, mode=0o700)
+    with tempfile.TemporaryDirectory(prefix='worker-guidance-') as temp:
+        stage = Path(temp).resolve() / 'runtime'
+        stage.mkdir()
+        install.stage_runtime(stage, library)
+        shutil.move(library, backup / 'library')
+        shutil.copytree(stage, library, symlinks=True)
+    shutil.copy2(instructions, backup / 'AGENTS.md')
+    instructions.write_bytes((source / 'instructions.md').read_bytes())
+    validate_contents(root)
+    print(f'Refreshed skills and AGENTS.md in {root}; previous copies in {backup}')
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('root', type=Path)
-    parser.add_argument('--auth-database', required=True, type=Path)
-    parser.add_argument('--omp-command-json', required=True, help='Owned native launcher argument list as JSON')
+    parser.add_argument('--auth-database', type=Path)
+    parser.add_argument('--omp-command-json', help='Owned native launcher argument list as JSON')
     parser.add_argument('--verify-existing', action='store_true', help='Verify/bind a launcher to an existing managed import')
+    parser.add_argument('--refresh-guidance', action='store_true',
+                        help='Re-import skills and AGENTS.md into an existing managed import, keeping its settings')
     args = parser.parse_args()
     os.umask(0o077)
-    action = verify_launcher if args.verify_existing else provision
-    action(args.root, args.auth_database, json.loads(args.omp_command_json))
+    if args.refresh_guidance:
+        refresh_guidance(args.root)
+    else:
+        if not args.auth_database or not args.omp_command_json:
+            parser.error('--auth-database and --omp-command-json are required to provision or verify')
+        action = verify_launcher if args.verify_existing else provision
+        action(args.root, args.auth_database, json.loads(args.omp_command_json))
