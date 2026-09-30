@@ -310,6 +310,9 @@ def main():
             # Keep key order stable after combining local settings and shared preferences.
             plan(native / 'config.yml', 'write', yaml_value(dict(sorted(settings.items()))).encode())
             plan(native / 'AGENTS.md', 'link', SOURCE / 'instructions.md')
+            # Same-name user agents replace omp's bundled ones; other agent files stay.
+            for agent in sorted((SOURCE / 'omp-agents').glob('*.md')):
+                plan(native / 'agents' / agent.name, 'link', agent)
             for name in RETIRE_NATIVE:
                 if name != 'skills':
                     plan(native / name, 'retire')

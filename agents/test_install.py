@@ -47,6 +47,8 @@ class SharedInstall(unittest.TestCase):
             self.assertEqual(current['cycleOrder'], baseline['cycleOrder'])
             self.assertEqual(current['theme'], baseline['theme'])
             self.assertEqual(current['task'], baseline['task'])
+            scout = native / 'agents/scout.md'
+            self.assertEqual(scout.resolve(), Path(__file__).with_name('omp-agents').resolve() / 'scout.md')
             for key, value in local.items():
                 self.assertEqual(current[key], value)
             self.assertIn('local-model-provider', current['disabledProviders'])
