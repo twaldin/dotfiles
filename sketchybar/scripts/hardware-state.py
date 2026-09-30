@@ -16,9 +16,9 @@ from concurrent.futures import ThreadPoolExecutor
 STATS_APP = pathlib.Path("/Applications/Stats.app")
 STATS_INFO = STATS_APP / "Contents/Info.plist"
 STATS_SMC = STATS_APP / "Contents/Resources/smc"
-STATS_VERSION = ("3.0.10", "832")
+STATS_VERSION = ("3.0.19", "844")
 STATS_TEAM = "RP2S87B72W"
-STATS_SMC_SHA256 = "5a924e98212ff85635a2db5778d417a182fcaca338bc1fe41dcf61571f5e8a0d"
+STATS_SMC_SHA256 = "52a66aa0c5fa363b3d31e08231bb52678e65c395192263e5974a3e0e72d939f3"
 HARDWARE_DIRECTORY = pathlib.Path(os.path.expanduser("~/.local/share/sketchybar-hardware"))
 HARDWARE_BINARY = HARDWARE_DIRECTORY / "hardware-metrics"
 HARDWARE_MARKER = HARDWARE_DIRECTORY / "SOURCE_SHA256"
