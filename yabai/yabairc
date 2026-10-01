@@ -43,6 +43,8 @@ YABAI=/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai
 "$YABAI" -m rule --add label=superwhisper app='^[Ss]uperwhisper$' manage=off
 "$YABAI" -m rule --add label=notification-center app='^(Notification Center|NotificationCenter|UserNotificationCenter)$' manage=off
 "$YABAI" -m rule --add label=notification-overlay subrole='^AXNotificationCenter$' manage=off
+# Screen Sharing keeps a title-less, role-less window that yabai would tile full-size.
+"$YABAI" -m rule --add label=screen-sharing app='^Screen Sharing$' manage=off
 
 # Spaces 6-8 on the built-in display belong to agents' GUI test windows (Tim keeps to 1-4):
 # 6 roblox, 7 canvas, 8 Minecraft labs. Float layout so a window moved there keeps its own
