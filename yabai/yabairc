@@ -43,3 +43,10 @@ YABAI=/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai
 "$YABAI" -m rule --add label=superwhisper app='^[Ss]uperwhisper$' manage=off
 "$YABAI" -m rule --add label=notification-center app='^(Notification Center|NotificationCenter|UserNotificationCenter)$' manage=off
 "$YABAI" -m rule --add label=notification-overlay subrole='^AXNotificationCenter$' manage=off
+
+# Spaces 6-8 on the built-in display belong to agents' GUI test windows (Tim keeps to 1-4):
+# 6 roblox, 7 canvas, 8 Minecraft labs. Float layout so a window moved there keeps its own
+# size (game clients lock theirs) and never re-tiles anything. Windows on a Space nobody is
+# viewing keep rendering and stay capturable (measured 2026-09-30: a Metal render loop held
+# 120 fps and gave fresh `screencapture -l` frames on hidden Space 7).
+for space in 6 7 8; do "$YABAI" -m config --space "$space" layout float; done
