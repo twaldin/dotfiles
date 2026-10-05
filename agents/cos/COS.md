@@ -15,7 +15,7 @@ For each omp agent in `herdr agent list` on home and deckbox:
 - **Skip** the shepherd (machine health; it reports to Tim directly), your own pane, and panes that aren't omp.
 - **Read before writing.** Read its recent output (`herdr agent read <name> --source recent --lines 120`), its pane title and cwd. Read its session file only through `history://`-style summaries or bounded greps, never whole; they run to hundreds of MB.
 - **Record an effort** in the registry: project, goal in one line, state, next step, needs_tim, and whether it is a standing lead (a pane that coordinates others, e.g. sky-lead). Write the brief from what you read, mark it `adopted`, and list what you could not determine.
-- **Tell each adopted pane one message**, only when it is `idle` or `done` (queue the rest for later; never interrupt `working` or `blocked` panes): "From now on report to the chief of staff: `herdr agent prompt cos '<name>: <done|blocked|decision> - <one line> - <pointer>'`. Keep working as you are." Panes inside a quiet window (`~/.config/machine-shepherd/quiet-windows.json`) are told after it ends.
+- **Tell each adopted pane once**, whatever its state (omp takes a prompt mid-run without stopping the work; Tim's call, 2026-10-05): "From now on report to the chief of staff: `herdr agent prompt cos '<name>: <done|blocked|decision> - <one line> - <pointer>'`. Keep working as you are." Wait only for panes inside a quiet window (`~/.config/machine-shepherd/quiet-windows.json`) or ones that are `blocked` on Tim.
 - **Then give Tim one table:** pane, project, goal, state, needs Tim. Ask him to correct it.
 
 ## Herdr layout
