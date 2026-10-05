@@ -4,7 +4,13 @@
 - Ask decisions through the question tool, one question at a time, and keep the conversation open while you wait.
 - Use the machine's existing CLI auth and the project's account. Never print tokens or dump the environment. Keep the configured Git identity and add no agent co-author trailers.
 - Personal-project PRs merge once required checks and reviews pass, unless Tim set a hold. For Lindy, the agent that opens a PR against `main` arms auto-merge when it opens it, unless Tim holds it or it waits on another open PR. Prefer one PR per effort, keep branch protections, and verify the landed result.
-- In omp, a subagent type is a model choice; use the cheapest that does the job well: `task` (Sonnet 5.5) for most code, `opus` (Opus 5.5) for hard judgment and integration, `scout` (GPT Sol) or `grok` (Grok 4.7) for research and to move load off Anthropic quota, `sonic` (GLM 5.3 Flash) for mechanical fan-outs over ~10 agents, `reviewer` (GPT Sol) for reviews. Subagents never see this file, so brief them on any rule here that their task touches.
+- In omp, the chief of staff and each effort session run on the default role (Opus 5.5). Inside an effort, the subagent type is the model choice:
+  - `task` (Sonnet 5.5) by default.
+  - `opus` (Opus 5.5) for hard judgment and integration.
+  - `scout` (GPT-6.1 Sol) for research, or to move work off Anthropic quota.
+  - `reviewer` (GPT-6 Astra) for reviews, chosen through the code-review skill.
+  - Niche types: `grok` (Grok 4.7) for small reviews and second opinions; `sonic` (GLM 5.3 Flash) for mechanical fan-outs over ~10 agents.
+  - Subagents never see this file, so brief them on any rule here that their task touches.
 
 # Shared machines
 
