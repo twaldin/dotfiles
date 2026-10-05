@@ -37,6 +37,12 @@ else
   pane=$("$HERDR" tab create --workspace "$ws" --cwd "$COS_HOME" --label cos --no-focus | jq -r '.result.root_pane.pane_id')
 fi
 
-"$HERDR" agent start cos --kind omp --pane "$pane" -- --model "$MODEL"
+# A new pane's shell needs a moment to reach its prompt; agent start refuses until then.
+tries=0
+until "$HERDR" agent start cos --kind omp --pane "$pane" -- --model "$MODEL" >/dev/null; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 10 ] || { echo "cos did not start in pane $pane" >&2; exit 1; }
+  sleep 2
+done
 "$HERDR" agent prompt cos "Start of session: follow the Start of session steps."
 echo "cos started in pane $pane"
