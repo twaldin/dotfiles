@@ -48,7 +48,7 @@ class OwnerOutcomes(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.cfg=config(self.root);self.cfg['host']=socket.gethostname()
-        self.store=runner.Store(self.root/'state');self.api=FakeLinear(issue('In Progress'))
+        self.store=runner.Store(self.root/'state');self.api=FakeLinear(issue('In Progress',ready=False))
         self.work=self.root/'worktree';self.work.mkdir()
         pipeline=self.root/'WORKFLOW.md';pipeline.write_text('Follow acceptance.')
         fake=self.root/'fake-owner';fake.write_text(FAKE_OWNER);fake.chmod(0o755)
@@ -405,7 +405,7 @@ class PolicyAndStorage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);cfg=config(root);store=runner.Store(root/'state')
             cfg['workflow']={'states':{},'attention_labels':['blocked']}
-            item=issue('In Review',labels=['on-call','team-required']);api=FakeLinear(item)
+            item=issue('In Review',labels=['on-call','team-required'],ready=False);api=FakeLinear(item)
             record={'id':ID,'identifier':'TWA-7','repo':'hone','control':{'attention':{'reason':'Need a decision'}}}
             store.save(record)
             runner.publish(cfg,store,api,record,item)
@@ -416,7 +416,7 @@ class PolicyAndStorage(unittest.TestCase):
     def test_unmapped_attention_keeps_stage_and_team_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);cfg=config(root);store=runner.Store(root/'state')
-            item=issue('In Progress',labels=['on-call']);api=FakeLinear(item)
+            item=issue('In Progress',labels=['on-call'],ready=False);api=FakeLinear(item)
             record={'id':ID,'identifier':'TWA-7','repo':'hone',
                     'control':{'stage':'review','attention':{'reason':'Need a decision'}}}
             store.save(record)

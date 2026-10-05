@@ -17,7 +17,7 @@ def config(root):
     return {'workspace': 'twaldin', 'workspace_id': 'personal', 'host': 'test-host', 'assignee_id': 'tim',
             'state_dir': str(root/'state'), 'worktrees': str(root/'worktrees'),
             'teams': {'team': {'states': {'Todo':'todo','In Progress':'doing','In Review':'review','Done':'done'}}},
-            'labels': {'blocked':'blocked','waiting-for-tim':'waiting'},
+            'labels': {'blocked':'blocked','waiting-for-tim':'waiting','ready':'agent-ready'},
             'routes': {'label_prefix':'repo:'},
             'workflow': {'start_states':['Todo'], 'states':{'active':'In Progress','review':'In Review','ready':'Ready to Merge','landed':'Merged','complete':'Done'}},
             'projects': {'hone-a':'hone','hone-b':'hone','web-a':'web'},
@@ -25,7 +25,8 @@ def config(root):
             'pilot_issues': ['TWA-7'], 'concurrency': 1, '_path': str(root/'config.json')}
 
 
-def issue(state='Todo', project='hone-a', labels=()):
+def issue(state='Todo', project='hone-a', labels=(), ready=True):
+    labels=(*labels,'agent-ready') if ready else labels
     return {'id': ID, 'identifier':'TWA-7','title':'A real task','description':'Brief','priority':0,'url':'https://linear.app/twaldin/issue/TWA-7',
             'state': {'id':{'Todo':'todo','In Progress':'doing','In Review':'review','Done':'done'}.get(state,state), 'name':state, 'type':{'Todo':'unstarted','Backlog':'backlog','Done':'completed','Canceled':'canceled','Triage':'triage'}.get(state,'started')},
             'team': {'id':'team','key':'TWA'}, 'assignee':{'id':'tim'}, 'project':{'id':project} if project else None,
@@ -80,6 +81,13 @@ class Routing(unittest.TestCase):
     def test_backlog_does_not_dispatch(self):self.assertFalse(runner.eligible(issue('Backlog'),self.cfg))
     def test_unmapped_todo_does_not_dispatch(self):self.assertFalse(runner.eligible(issue(project=None),self.cfg))
     def test_ready_todo(self):self.assertTrue(runner.eligible(issue(),self.cfg))
+    def test_new_work_needs_curated_ready_label(self):
+        self.assertFalse(runner.eligible(issue(ready=False),self.cfg))
+        renamed=issue(ready=False);renamed['labels']['nodes']=[{'id':'ready-uuid','name':'agent-ready'}]
+        self.assertTrue(runner.eligible(renamed,self.cfg))
+        self.cfg['labels']['ready']='ready-uuid';self.assertTrue(runner.eligible(renamed,self.cfg))
+        del self.cfg['labels']['ready'];self.assertFalse(runner.eligible(issue(),self.cfg))
+        del self.cfg['labels'];self.assertFalse(runner.eligible(issue(),self.cfg))
     def test_unassigned_and_someone_elses_todo_excluded(self):
         for assignee in [None, {'id':'teammate'}]:
             x=issue();x['assignee']=assignee
@@ -347,6 +355,24 @@ class Lifecycle(unittest.TestCase):
         self.store=runner.Store(self.root/'fresh');self.linear=FakeLinear(issue())
         result=runner.tick(self.cfg,self.store,self.linear,launch=False)
         self.assertEqual(len(result),1);self.assertEqual(self.store.all(),{});self.assertEqual(self.linear.item['state']['name'],'Todo')
+    def test_unlabelled_todo_is_not_admitted(self):
+        fresh=runner.Store(self.root/'uncurated');api=FakeLinear(issue(ready=False))
+        with patch.object(runner.subprocess,'Popen') as popen:
+            self.assertEqual(runner.tick(self.cfg,fresh,api),[])
+            popen.assert_not_called()
+        self.assertEqual(fresh.all(),{});self.assertEqual(api.item['state']['name'],'Todo')
+    def test_ready_label_removed_during_claim_cannot_launch_worker(self):
+        fresh=runner.Store(self.root/'unlabelled-claim');api=FakeLinear(issue())
+        with patch.object(api,'issue',return_value=issue(ready=False)),patch.object(runner.subprocess,'Popen') as popen:
+            runner.tick(self.cfg,fresh,api)
+            popen.assert_not_called()
+    def test_owned_ticket_without_ready_label_still_wakes(self):
+        item=issue('In Review',labels=['waiting-for-tim'],ready=False)
+        self.record['event']=runner.digest(runner.issue_event(item));self.store.save(self.record)
+        item['comments']['nodes'].append({'id':'answer','body':'Use option A.'})
+        with patch.object(runner,'pr_snapshot',return_value=[]):
+            events=runner.tick(self.cfg,self.store,FakeLinear(item),launch=False)
+        self.assertTrue(any(e.get('issue')=='TWA-7' and 'action' in e for e in events),events)
     def test_label_order_changes_do_not_wake(self):
         x=issue('In Review',labels=['Improvement','waiting-for-tim'])
         first=runner.digest(runner.issue_event(x))

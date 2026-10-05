@@ -26,7 +26,9 @@ Workspace `workflow` supports:
 - `states`: publication keys such as active/review/ready/landed/complete mapped to existing state names or UUIDs. Optional `attention` overrides the visible status while private human attention is present; clearing attention restores the owner's current stage. This does not replace that stage or defer the owner. An absent attention mapping preserves ordinary stage publication. An absent or empty map publishes no statuses. Unknown/unmapped stages leave the current field alone.
 - `attention_labels`: optional existing label UUIDs/names used for human attention. Updates touch only these labels and preserve unrelated ones.
 
-Team and repository workflow overrides refine the workspace mapping. `teams.<uuid>.states` records existing name-to-ID mappings. The shared engine requires no custom team, state or label. Personal repository labels and Lindy's existing authoring conventions belong in their maintained policy.
+Team and repository workflow overrides refine the workspace mapping. `teams.<uuid>.states` records existing name-to-ID mappings. Apart from the opt-in label below, the shared engine requires no custom team, state or label. Personal repository labels and Lindy's existing authoring conventions belong in their maintained policy.
+
+New owners are curated. `labels.ready` in the deployment config names the opt-in label (personal: `agent-ready`) by UUID or name; a ticket is admitted only while it carries that label, is assigned to the configured user, sits in a start state and has a route. Without `labels.ready` nothing new is admitted. Tickets that already have an owner record keep resuming, retrying, reviewing and merging whether or not the label is still present.
 
 `pilot_issues` is an optional UUID/readable-identifier allowlist. Empty admits no new work; removing it admits eligible registered work. It does not remove an existing owner's identity. Concurrency counts running turns; waiting owners release their slots.
 

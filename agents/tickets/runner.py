@@ -359,10 +359,18 @@ def external_withdrawal(issue, config, repo=None):
             or dependencies_blocked(issue))
 
 
+def curated(issue, config):
+    # New work needs Tim's explicit opt-in label; an unconfigured key admits nothing.
+    ready = config.get('labels', {}).get('ready')
+    return bool(ready) and any(ready in (label['id'], label['name']) for label in issue['labels']['nodes'])
+
+
 def intake(issue, config, record=None):
     if not assigned_to_owner(issue, config) or issue['team']['id'] not in config['teams']:
         return False, None
     if 'pilot_issues' in config and not {issue['id'], issue['identifier']} & set(config['pilot_issues']):
+        return False, None
+    if not curated(issue, config):
         return False, None
     repo = resolve_repo(issue, config, (record or {}).get('repo'))
     if not policy.starts(issue, config, repo) or external_withdrawal(issue, config, repo):
