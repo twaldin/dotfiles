@@ -1,0 +1,37 @@
+#!/usr/bin/python3
+"""cs-measure [secs] (twaldin-home, 2026-09-30): ColorSync display-info requests over the last N s (default 60): rate, K, and the
+service time of each request (received XPC_DISPLAY_INFO_REQUEST -> sending display_profile_info), which
+WindowServer waits on synchronously. Plus CPU of the ColorSync daemons and WindowServer over 5 s."""
+import re, statistics, subprocess, sys
+secs = int(sys.argv[1]) if len(sys.argv) > 1 else 60
+out = subprocess.run(["sudo", "-n", "log", "show", "--style", "compact", "--last", f"{secs}s", "--predicate",
+                      'process == "colorsync.displayservices" AND (eventMessage BEGINSWITH "ColorSyncDisplayServicesAgent: received XPC_DISPLAY_INFO_REQUEST" OR eventMessage BEGINSWITH "ColorSyncDisplayServicesAgent: sending display_profile_info")'],
+                     capture_output=True, text=True).stdout
+t0, durs, n, count = None, [], 0, None
+for line in out.splitlines():
+    m = re.match(r"\S+ (\d+):(\d+):([\d.]+) ", line)
+    if not m:
+        continue
+    t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    if "received XPC_DISPLAY_INFO_REQUEST" in line:
+        t0, n = t, n + 1
+    elif t0 is not None:
+        durs.append((t - t0) * 1000)
+        t0 = None
+        c = re.search(r"count = (\d+)", line)
+        count = c.group(1) if c else count
+top = subprocess.run(["sudo", "-n", "top", "-l", "2", "-s", "5", "-stats", "pid,cpu,command"], capture_output=True, text=True).stdout.split("Processes:")[-1]
+cpu = {}
+for line in top.splitlines():
+    p = line.split(None, 2)
+    if len(p) == 3 and p[0].isdigit() and re.match(r"(WindowServer|colorsync)", p[2]):
+        name = p[2].strip()
+        cpu[name] = cpu.get(name, 0.0) + float(p[1])
+if durs:
+    q = sorted(durs)
+    print(f"requests={n} in {secs}s ({n/secs:.2f}/s, K={n/secs*5.03:.1f}); displays/request={count}; "
+          f"service ms median={statistics.median(q):.0f} p90={q[int(len(q)*0.9)]:.0f} max={q[-1]:.0f}; "
+          f"busy={sum(durs)/secs/10:.1f}% of displayservices")
+else:
+    print(f"requests={n} in {secs}s")
+print("cpu% " + "  ".join(f"{k}={v:.1f}" for k, v in sorted(cpu.items())))

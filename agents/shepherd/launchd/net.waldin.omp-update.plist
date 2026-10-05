@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>net.waldin.omp-update</string>
+<key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>/Users/twaldin/.local/bin/omp-update</string><string>run</string></array>
+<key>StartCalendarInterval</key><dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>10</integer></dict>
+<key>ProcessType</key><string>Standard</string>
+<key>Nice</key><integer>10</integer>
+<key>EnvironmentVariables</key><dict>
+<key>PATH</key><string>/Users/twaldin/.bun/bin:/Users/twaldin/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+<key>HOME</key><string>/Users/twaldin</string>
+</dict>
+<key>StandardOutPath</key><string>/Users/twaldin/.local/state/omp-update/launchd.log</string>
+<key>StandardErrorPath</key><string>/Users/twaldin/.local/state/omp-update/launchd.err</string>
+</dict></plist>

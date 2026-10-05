@@ -1,0 +1,1144 @@
+#!/usr/bin/env python3
+"""omp-update: keep omp on one vetted release on home, work and deckbox, and restart
+idle herdr panes onto it. Runs daily on twaldin-home from launchd net.waldin.omp-update;
+work and deckbox get this same file over ssh (`python3 - host ...`), so there is one copy.
+
+Policy (Tim, 2026-10-05, via the meta pane):
+- Target = the newest omp release published on BOTH GitHub releases and npm at least
+  24 h ago. A tag without a published release (e.g. v18.6.2) never counts. Every host
+  goes to the target; a host that is ahead is reported, never downgraded.
+- No install or restart on a host while it is in a quiet window, or when one starts
+  within 30 min (home's book: ~/.config/machine-shepherd/quiet-windows.json). The run
+  waits for the window to end, up to quiet_wait_hours, then skips that host for the day.
+- herdr panes: never touch one that is `working` (or `blocked`). An `idle`/`done` pane is
+  restarted (/exit, then `herdr agent start <name> --kind omp --pane <id> -- --resume=<session>`)
+  when its omp is older than the installed one, its session jsonl is over 100 MB, or its
+  omp is more than 48 h old. Not when it still has child work running (herdr shows
+  background jobs as idle and /exit would kill them), text is waiting in its editor,
+  or the pane runs this job. The restart is verified: same session file, new pid, and
+  the memory before/after is logged.
+- Seats and front doors (config report_only: the chief of staff `cos`, and every omp
+  outside herdr such as the work Lindy seat): the daily run only reports them.
+- The chief of staff (home): `omp-update cos`, run by machine-watch every 5 min,
+  restarts it FRESH through ~/dotfiles/agents/cos/start-cos.sh --replace when its pane
+  is gone or its omp has exited (seen twice, dead_confirm_s apart), or when its session
+  file passes cos.max_session_mb, through the same gates as every restart (COS.md: its
+  state lives in ~/cos, so a fresh session loses nothing).
+- launchd omp services (home: auth broker + gateway) restart through launchctl
+  kickstart when their omp is older than the installed one.
+
+Logs: every action -> ~/.local/state/omp-update/actions.jsonl; the last run ->
+last-run.json; real runs also put one summary line in the shepherd checkpoint.
+
+Usage:
+  omp-update run [--dry-run] [--hosts home,work,deckbox] [--only-pane w2:pXX] [--no-wait]
+  omp-update roll [--hosts home,deckbox] [--include cos] [--hours 24] [--dry-run]
+  omp-update cos [--dry-run]  # restart the chief of staff if dead or its session is too big
+  omp-update ext-ack --since <UTC> --note <why>  # an extension change needs no restart
+  omp-update target          # print the release the policy picks right now
+"""
+import argparse
+import datetime as dt
+import fcntl
+import glob
+import hashlib
+import json
+import os
+import platform
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+REPO = "can1357/oh-my-pi"
+NPM_PKG = "@oh-my-pi/pi-coding-agent"
+HOME = os.path.expanduser("~")
+BUN_BIN = os.path.join(HOME, ".bun", "bin")
+OMP = os.path.join(BUN_BIN, "omp")
+HERDR = os.path.join(HOME, ".local", "bin", "herdr")
+STATE = os.path.join(HOME, ".local", "state", "omp-update")
+CONFIG = os.path.join(HOME, ".config", "omp-update", "config.json")
+CHECKPOINT = os.path.join(HOME, ".local", "state", "machine-shepherd", "checkpoint.md")
+ENV = dict(os.environ, PATH=os.pathsep.join([
+    BUN_BIN, os.path.join(HOME, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin",
+    "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
+MAC = platform.system() == "Darwin"
+
+DEFAULT_CONFIG = {
+    "hosts": {
+        "deckbox": {"ssh": "tim@deckbox", "python": "python3"},
+        # work's herdr is only a client of home's server; its omp sessions (the Lindy seat)
+        # are reported, never restarted.
+        "work": {"ssh": "twaldin-work", "python": "/usr/bin/python3", "manage_panes": False},
+        # Its launchd omp services are restarted when they run an older binary (deckbox omp
+        # gets its credentials from this broker; Tim 10-05: work keeps its own local store).
+        "home": {"ssh": None, "quiet_book": "~/.config/machine-shepherd/quiet-windows.json",
+                 "services": [
+                     {"label": "com.twaldin.omp-auth-broker", "match": "auth-broker serve",
+                      "health": "http://100.85.222.119:8765/v1/healthz"},
+                     {"label": "com.twaldin.omp-auth-gateway", "match": "auth-gateway serve",
+                      "health": "http://100.85.222.119:4000/healthz"}]},
+    },
+    "order": ["deckbox", "work", "home"],
+    "min_age_hours": 24,
+    "max_session_mb": 100,
+    "max_uptime_hours": 48,
+    "quiet_guard_minutes": 30,
+    "quiet_wait_hours": 6,
+    # Seats/front doors: the daily run only reports them (move a name to opt_in to manage
+    # it). `cos` is restarted fresh by `omp-update cos` instead; see "cos".
+    "report_only": {"names": ["cos", "chief-of-staff", "lindy-seat"], "panes": []},
+    "opt_in": [],
+    "skip_panes": [],
+    # Extension changes that need no restart (e.g. a refactor that behaves the same):
+    # {content fingerprint: {"since": epoch of the last change that did need one, "note"}}.
+    # Written by `omp-update ext-ack`; any later, unacknowledged change re-arms the trigger.
+    "extensions_pins": {},
+    # The chief of staff: `omp-update cos` restarts it fresh when its pane is gone or its
+    # omp exited, or when its session passes max_session_mb. Enabled per host (home only)
+    # in config.json, so a host without a cos never starts one.
+    "cos": {"enabled": False, "name": "cos", "start": "~/dotfiles/agents/cos/start-cos.sh",
+            "max_session_mb": 100, "dead_confirm_s": 120},
+}
+
+# Descendants of an agent's omp that a restart may end without losing work: omp's own
+# workers and kernels are looked through (their children are checked); browser and
+# language-server subtrees are ignored whole.
+TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner/")
+SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|pyright|langserver|language-server|languageserver|"
+                        r"tsserver|rust-analyzer|gopls|clangd|sourcekit-lsp|lsp-mux|biome lsp|ruff server")
+
+
+def note(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def sh(cmd, timeout=120, check=False, **kw):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=ENV, **kw)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"{os.path.basename(cmd[0])} failed ({r.returncode}): "
+                           f"{(r.stderr or r.stdout).strip()[:300]}")
+    return r
+
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
+
+
+def utcnow():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def parse_ts(s):
+    return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def stamp(t=None):
+    return (t or utcnow()).strftime("%Y-%m-%dT%H:%MZ")
+
+
+# ---------------------------------------------------------------- host side
+
+def omp_version(path=OMP):
+    try:
+        out = sh([path, "--version"], timeout=60).stdout
+    except Exception:
+        return None
+    m = re.search(r"omp/(\S+)", out)
+    return m.group(1) if m else None
+
+
+def npm_install():
+    return os.path.realpath(OMP).endswith(".js")
+
+
+def install_time():
+    real = os.path.realpath(OMP)
+    if real.endswith(".js"):  # bun global install: the installed package's package.json
+        return os.stat(os.path.join(os.path.dirname(os.path.dirname(real)), "package.json")).st_mtime
+    return os.stat(real).st_mtime
+
+
+def stage_binary(target):
+    """Download the release binary for this platform, check SHA256SUMS.txt and that it
+    runs and reports the target version. Returns the staged path (same dir as omp)."""
+    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+    asset = f"omp-{platform.system().lower()}-{arch}"
+    base = f"https://github.com/{REPO}/releases/download/v{target}/"
+    sums = sh(["curl", "-fsSL", "--retry", "3", base + "SHA256SUMS.txt"], timeout=120, check=True).stdout
+    want = next((ln.split()[0] for ln in sums.splitlines()
+                 if len(ln.split()) == 2 and ln.split()[1].lstrip("*") == asset), None)
+    if not want:
+        raise RuntimeError(f"{asset} missing from SHA256SUMS.txt of v{target}")
+    tmp = os.path.join(BUN_BIN, f".omp-update-{target}-{os.getpid()}")
+    try:
+        sh(["curl", "-fsSL", "--retry", "3", "-o", tmp, base + asset], timeout=1200, check=True)
+        h = hashlib.sha256()
+        with open(tmp, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        if h.hexdigest() != want:
+            raise RuntimeError(f"sha256 mismatch for {asset}: {h.hexdigest()[:12]} != {want[:12]}")
+        os.chmod(tmp, 0o755)
+        got = omp_version(tmp)
+        if got != target:
+            raise RuntimeError(f"staged {asset} reports {got}, expected {target}")
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    return tmp
+
+
+def swap_binary(tmp):
+    """Install like omp's own updater: the old binary becomes omp.<ms>.<pid>.0.bak, which
+    running omp processes keep mapping, so they can still be told apart."""
+    with open(os.path.join(BUN_BIN, "omp.lock"), "a") as lk:
+        deadline = time.time() + 120
+        while True:
+            try:
+                fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() > deadline:
+                    raise RuntimeError("omp.lock held for 2 min (omp self-update running?)")
+                time.sleep(5)
+        bak = os.path.join(BUN_BIN, f"omp.{int(time.time() * 1000)}.{os.getpid()}.0.bak")
+        os.rename(OMP, bak)
+        os.rename(tmp, OMP)
+    return bak
+
+
+def prune_baks(dry):
+    """Keep the newest omp.*.bak for rollback; delete older ones no process maps."""
+    acts = []
+    baks = sorted(glob.glob(os.path.join(BUN_BIN, "omp.*.bak")), key=os.path.getmtime, reverse=True)
+    for b in baks[1:]:
+        if sh(["lsof", "-t", "--", b], timeout=60).stdout.split():
+            continue
+        acts.append({"kind": "prune-bak", "file": os.path.basename(b), "dry_run": dry})
+        if not dry:
+            os.remove(b)
+    return acts
+
+
+def etime_s(s):
+    days, _, rest = s.strip().rpartition("-")
+    parts = [int(x) for x in rest.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return (int(days) if days else 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def ps_table():
+    cmd = ["ps", "-axo", "pid=,ppid=,etime=,command="] if MAC else ["ps", "-eo", "pid=,ppid=,etime=,args="]
+    procs = {}
+    for ln in sh(cmd, timeout=60).stdout.splitlines():
+        p = ln.split(None, 3)
+        if len(p) == 4:
+            procs[int(p[0])] = {"ppid": int(p[1]), "age_s": etime_s(p[2]), "cmd": p[3]}
+    return procs
+
+
+def is_agent_omp(cmd):
+    """An interactive omp session (not a worker/broker) from its command line."""
+    argv = cmd.split()
+    if not argv:
+        return False
+    if os.path.basename(argv[0]) == "omp":
+        rest = argv[1:]
+    elif os.path.basename(argv[0]) in ("bun", "node") and len(argv) > 1 and (
+            argv[1].endswith("/.bun/bin/omp") or argv[1].endswith("pi-coding-agent/dist/cli.js")):
+        rest = argv[2:]
+    else:
+        return False
+    return not (rest and rest[0].startswith("__omp_"))
+
+
+def mem_mb(pid):
+    """phys_footprint on macOS (top MEM), VmRSS on Linux."""
+    try:
+        if MAC:
+            val = sh(["top", "-l", "1", "-pid", str(pid), "-stats", "mem"], timeout=30).stdout.split()[-1]
+            m = re.match(r"([\d.]+)([BKMGT])", val.upper())
+            if not m:
+                return None
+            return round(float(m.group(1)) * {"B": 1 / 1048576, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1048576}[m.group(2)])
+        with open(f"/proc/{pid}/status") as f:
+            kb = next(int(ln.split()[1]) for ln in f if ln.startswith("VmRSS:"))
+        return kb // 1024
+    except Exception:
+        return None
+
+
+def exe_path(pid):
+    if not MAC:
+        return None
+    out = sh(["lsof", "-a", "-p", str(pid), "-d", "txt", "-Fn"], timeout=60).stdout
+    return next((ln[1:] for ln in out.splitlines() if ln.startswith("n") and "/.bun/bin/omp" in ln), None)
+
+
+def running_version(pid, age_s, installed):
+    """(older, version) for a running omp, against the installed one."""
+    path = exe_path(pid)
+    if path and path != OMP:
+        v = omp_version(path)
+        return (v is None or vtuple(v) < vtuple(installed)), v
+    started = time.time() - age_s
+    return started < install_time() - 60, (installed if started >= install_time() - 60 else None)
+
+
+def open_sessions(pid):
+    paths = []
+    if MAC:
+        out = sh(["lsof", "-a", "-p", str(pid), "-Fn"], timeout=60).stdout
+        paths = [ln[1:] for ln in out.splitlines() if ln.startswith("n")]
+    else:
+        fd = f"/proc/{pid}/fd"
+        for x in os.listdir(fd) if os.path.isdir(fd) else []:
+            try:
+                paths.append(os.readlink(os.path.join(fd, x)))
+            except OSError:
+                pass
+    return sorted({p for p in paths if "/.omp/agent/sessions/" in p and p.endswith(".jsonl")})
+
+
+def live_children(pid, procs):
+    kids = {}
+    for p, info in procs.items():
+        kids.setdefault(info["ppid"], []).append(p)
+    found, stack = [], list(kids.get(pid, []))
+    while stack:
+        c = stack.pop()
+        cmd = procs[c]["cmd"]
+        if SUBTREE_OK.search(cmd):
+            continue
+        if not TRANSPARENT.search(cmd):
+            found.append(f"{c} {cmd[:70]}")
+        stack.extend(kids.get(c, []))
+    return found
+
+
+def ancestors(procs):
+    out, p = set(), os.getpid()
+    while p in procs and p > 1:
+        out.add(p)
+        p = procs[p]["ppid"]
+    return out
+
+
+def herdr(*args, timeout=60):
+    r = sh([HERDR, *args], timeout=timeout)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {"error": (r.stderr or r.stdout).strip()[:300]}
+
+
+def pane_omp(pane):
+    """(pid, argv) of the omp in the pane's foreground process group, or (None, None)."""
+    pi = herdr("pane", "process-info", "--pane", pane).get("result", {}).get("process_info", {})
+    pid = pi.get("foreground_process_group_id")
+    for p in pi.get("foreground_processes", []):
+        if p.get("pid") == pid and is_agent_omp(" ".join(p.get("argv") or [])):
+            return pid, p["argv"]
+    return None, None
+
+
+def editor_empty(pane):
+    lines = [ln for ln in sh([HERDR, "pane", "read", pane], timeout=30).stdout.splitlines() if ln.strip()]
+    return bool(lines) and lines[-1].strip() == "╰─"
+
+
+def resume_args(argv):
+    """The pane's original omp flags, minus session selection and positional prompts,
+    plus --resume=<session> added by the caller. Value flags come from `omp --help`."""
+    args = argv[1:]
+    if os.path.basename(argv[0]) in ("bun", "node"):
+        args = argv[2:]
+    helptext = sh([OMP, "--help"], timeout=60).stdout
+    valued = set(re.findall(r"--([\w-]+)=<", helptext)) | set(re.findall(r"\s-(\w), --[\w-]+=<", helptext))
+    drop = {"resume", "r", "continue", "c", "goal", "no-session", "from-claude", "from-codex"}
+    keep, dropped, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-"):
+            name = a.lstrip("-").split("=", 1)[0]
+            takes = name in valued and "=" not in a and i + 1 < len(args) and not args[i + 1].startswith("-")
+            group = [a, args[i + 1]] if takes else [a]
+            (dropped if name in drop else keep).extend(group)
+            i += len(group)
+        else:
+            dropped.append(a)  # a positional prompt would be sent again
+            i += 1
+    return keep, dropped
+
+
+def agent_session(pane):
+    a = herdr("agent", "get", pane).get("result", {}).get("agent", {})
+    return (a.get("agent_session") or {}).get("value"), a.get("agent_status")
+
+
+def restart_pane(row, argv):
+    pane, name, session, old = row["pane"], row["name"], row["session"], row["pid"]
+    keep, dropped = resume_args(argv)
+    row.update(args_kept=keep, args_dropped=dropped, mem_before_mb=mem_mb(old))
+    herdr("agent", "prompt", pane, "/exit")
+    for _ in range(45):
+        try:
+            os.kill(old, 0)
+        except OSError:
+            break
+        time.sleep(1)
+    else:
+        return "failed: omp did not exit after /exit (dialog or running jobs?); left alone"
+    time.sleep(3)
+    resume = f"--resume={session}"
+    mech = None
+    if name:
+        r = sh([HERDR, "agent", "start", name, "--kind", "omp", "--pane", pane, "--timeout", "240000",
+                "--", *keep, resume], timeout=270)
+        if r.returncode == 0:
+            mech = "herdr agent start"
+        else:
+            row["agent_start_error"] = (r.stderr or r.stdout).strip()[:200]
+    if not mech and pane_omp(pane)[0] is None:
+        # Panes without shell integration refuse `agent start`; typing works. Never type
+        # when an omp already came up: the text would land in its editor.
+        cmd = " ".join(shlex.quote(x) for x in ["omp", *keep, resume])
+        if sh([HERDR, "pane", "run", pane, cmd], timeout=60).returncode == 0:
+            mech = "herdr pane run"
+    row["mechanism"] = mech
+    new = None
+    for _ in range(120):
+        new = pane_omp(pane)[0]
+        if new and new != old:
+            break
+        time.sleep(1)
+    if not new or new == old:
+        return f"failed: omp did not come back; in the pane run: omp {' '.join(keep)} {resume}"
+    row["new_pid"] = new
+    for _ in range(150):
+        if editor_empty(pane):
+            break
+        time.sleep(2)
+    time.sleep(20)
+    row["mem_after_mb"] = mem_mb(new)
+    now_session = None
+    for _ in range(60):
+        now_session, _status = agent_session(pane)
+        if now_session:
+            break
+        time.sleep(2)
+    row["session_unchanged"] = now_session == session
+    row["memory_dropped"] = (row["mem_after_mb"] or 0) < (row["mem_before_mb"] or 0)
+    if not row["session_unchanged"]:
+        return f"restarted, but herdr reports session {now_session}"
+    return "restarted"
+
+
+def extensions_fingerprint():
+    """sha256 over the names and (resolved) contents of ~/.omp/agent/extensions/*."""
+    h = hashlib.sha256()
+    d = os.path.join(HOME, ".omp", "agent", "extensions")
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        p = os.path.join(d, name)
+        h.update(name.encode() + b"\0")
+        try:
+            with open(p, "rb") as f:
+                h.update(hashlib.sha256(f.read()).digest())
+        except OSError:
+            h.update(b"<unreadable>")
+    return h.hexdigest()
+
+
+def extensions_mtime():
+    """Newest change under ~/.omp/agent/extensions (link or target); omp loads extensions
+    only at start, so a session older than this runs without the change."""
+    newest = 0
+    d = os.path.join(HOME, ".omp", "agent", "extensions")
+    for name in os.listdir(d) if os.path.isdir(d) else []:
+        p = os.path.join(d, name)
+        newest = max(newest, os.lstat(p).st_mtime)
+        if os.path.exists(p):
+            newest = max(newest, os.stat(p).st_mtime)
+    return newest
+
+
+def restart_services(services, installed, dry, blocked, pending, errors):
+    """omp services under launchd (home: auth broker + gateway; deckbox omp in broker mode
+    depends on them) keep running the binary they started with. Restart each through
+    launchd when its omp is older than the installed one (after this job's upgrade or a
+    manual one), then wait for its health URL (and the broker's reported version)."""
+    acts, procs = [], ps_table()
+    for svc in services:
+        pids = [p for p, i in procs.items() if svc["match"] in i["cmd"] and is_agent_omp(i["cmd"])]
+        older = []
+        for p in pids:
+            o, v = running_version(p, procs[p]["age_s"], installed)
+            if o:
+                older.append(f"{p} v{v or 'older'}")
+        act = {"kind": "service", "label": svc["label"], "pids": pids, "older": older, "dry_run": dry}
+        acts.append(act)
+        if not pids:
+            act["action"] = "not running (not started by this job)"
+            errors.append(f"service {svc['label']}: no running omp matches {svc['match']!r}")
+        elif not older and not (dry and pending):
+            act["action"] = "none: current"
+        elif blocked:
+            act["action"] = f"skip: {blocked}"
+        elif dry:
+            act["action"] = "would restart (launchctl kickstart -k)" + (" after the install" if pending else "")
+        else:
+            r = sh(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{svc['label']}"], timeout=60)
+            status, body = 0, ""
+            for _ in range(30):
+                time.sleep(2)
+                h = sh(["curl", "-s", "-m", "5", "-w", "\n%{http_code}", svc["health"]], timeout=15).stdout
+                body, _, code = h.rpartition("\n")
+                status = int(code) if code.isdigit() else 0
+                if status == 200:
+                    break
+            reported = None
+            try:
+                reported = json.loads(body).get("version")
+            except (ValueError, AttributeError):
+                pass
+            ok = r.returncode == 0 and status == 200 and reported in (None, installed)
+            act.update(action="restarted" if ok else "restart failed", health=status, version=reported,
+                       new_pids=[p for p, i in ps_table().items() if svc["match"] in i["cmd"] and is_agent_omp(i["cmd"])])
+            if not ok:
+                errors.append(f"service {svc['label']}: kickstart rc {r.returncode}, health {status}, version {reported}")
+    return acts
+
+
+def idle_gate(a, pid, procs, mine, blocked, recheck=True):
+    """(skip reason or None, live children) for restarting the omp `pid` in herdr agent `a`.
+    Every restart (daily run, roll, cos) passes the same gates: no quiet window now or
+    within the guard, the pane idle/done, not focused by Tim (he may start typing; /exit
+    would race his draft), not running this job, no live child work (herdr shows
+    background jobs as idle and /exit would kill them), nothing typed in its editor; then
+    the status is read once more right before acting."""
+    pane, status = a["pane_id"], a.get("agent_status")
+    if blocked:
+        return f"skip: {blocked}", None
+    if status not in ("idle", "done"):
+        return f"skip: {status}", None
+    if a.get("focused"):
+        return "skip: focused by Tim", None
+    if pid in mine:
+        return "skip: runs this job", None
+    busy = live_children(pid, procs)
+    if busy:
+        return "skip: live child work", busy[:4]
+    if not editor_empty(pane):
+        return "skip: text waiting in the editor", None
+    if recheck:
+        _s, status_now = agent_session(pane)
+        if status_now not in ("idle", "done"):
+            return f"skip: {status_now}", None
+    return None, None
+
+
+def host_main(params):
+    dry, target, pol = params["dry_run"], params["target"], params["policy"]
+    only, blocked = params.get("only_pane"), params.get("blocked")
+    roll = params.get("roll")  # restart-only pass for panes that predate an extension change
+    res = {"host": params["host"], "actions": [], "panes": [], "unmanaged": [], "errors": []}
+    acts = res["actions"]
+    installed = omp_version()
+    res["installed_before"] = installed
+    if not installed:
+        res["errors"].append(f"{OMP} --version failed")
+        print("RESULT " + json.dumps(res))
+        return
+    kind = "npm" if npm_install() else "binary"
+    pending = not roll and vtuple(installed) < vtuple(target)
+    if pending:
+        act = {"kind": "install", "from": installed, "to": target, "via": kind, "dry_run": dry}
+        try:
+            if blocked:
+                act.update(kind="skip-install", reason=blocked)
+            elif kind == "binary":
+                tmp = stage_binary(target)
+                if dry:
+                    os.remove(tmp)
+                    act["staged"] = "downloaded, sha256 ok, --version ok; discarded (dry run)"
+                else:
+                    act["bak"] = os.path.basename(swap_binary(tmp))
+            elif not dry:
+                sh([os.path.join(BUN_BIN, "bun"), "install", "-g", f"{NPM_PKG}@{target}"], timeout=1200, check=True)
+        except Exception as e:
+            act.update(kind="install-failed", error=str(e)[:300])
+            res["errors"].append(f"install {target}: {str(e)[:200]}")
+        acts.append(act)
+    elif not roll and vtuple(installed) > vtuple(target):
+        acts.append({"kind": "ahead", "installed": installed, "target": target, "note": "not downgraded"})
+    res["installed_after"] = omp_version()
+    if not roll:
+        acts.extend(restart_services(params.get("services") or [], res["installed_after"], dry, blocked, pending,
+                                     res["errors"]))
+    if kind == "binary" and not roll:
+        acts.extend(prune_baks(dry))
+    ext_fp = extensions_fingerprint()
+    pin = (pol.get("extensions_pins") or {}).get(ext_fp)
+    # An acknowledged no-restart change counts from the last change that needed one.
+    ext_mtime = pin["since"] if pin else extensions_mtime()
+    res["extensions"] = {"fingerprint": ext_fp[:12], "since": int(ext_mtime), "pinned": bool(pin)}
+    current = target if (dry and pending) else res["installed_after"]
+
+    procs = ps_table()
+    mine = ancestors(procs)
+    managed = set()
+    agents = []
+    if params.get("manage_panes", True) and os.path.exists(HERDR):
+        agents = herdr("agent", "list").get("result", {}).get("agents", [])
+    for a in agents:
+        if a.get("agent") != "omp":
+            continue
+        pane, name, status = a["pane_id"], a.get("name"), a.get("agent_status")
+        session = (a.get("agent_session") or {}).get("value")
+        pid, argv = pane_omp(pane)
+        row = {"pane": pane, "name": name, "status": status, "session": session, "pid": pid}
+        res["panes"].append(row)
+        if not pid:
+            row["action"] = "none: no omp in the pane's foreground"
+            continue
+        managed.add(pid)
+        age = procs.get(pid, {}).get("age_s", 0)
+        older, ver = running_version(pid, age, res["installed_after"])
+        older = older or (dry and pending)  # after the pending install, every omp is older
+        smb = round(os.path.getsize(session) / 1048576) if session and os.path.exists(session) else None
+        row.update(version=ver, uptime_h=round(age / 3600, 1), session_mb=smb,
+                   mem_mb=None if roll else mem_mb(pid))
+        triggers = []
+        if older:
+            triggers.append(f"binary {ver or 'older'} < {current}")
+        if smb and smb > pol["max_session_mb"]:
+            triggers.append(f"session {smb} MB")
+        if age > pol["max_uptime_hours"] * 3600:
+            triggers.append(f"up {row['uptime_h']} h")
+        if ext_mtime and time.time() - age < ext_mtime - 60:
+            triggers.append("extensions changed")
+        if roll:
+            triggers = [t for t in triggers if t == "extensions changed"]
+        row["triggers"] = triggers
+        seat = (pane in pol["report_only"]["panes"] or name in pol["report_only"]["names"]) \
+            and pane not in pol["opt_in"] and name not in pol["opt_in"]
+        if seat:
+            row["action"] = "report: seat/front door (owner decides)"
+        elif pane in pol["skip_panes"]:
+            row["action"] = "skip: config skip_panes"
+        elif not triggers:
+            row["action"] = "none"
+        elif only and pane != only:
+            row["action"] = "skip: not selected (--only-pane)"
+        else:
+            skip, busy = idle_gate(a, pid, procs, mine, blocked, recheck=not dry)
+            if busy:
+                row["children"] = busy
+            if skip:
+                row["action"] = skip
+            elif dry:
+                row["action"] = "would restart"
+            else:
+                try:
+                    row["action"] = restart_pane(row, argv)
+                except Exception as e:
+                    row["action"] = f"failed: {str(e)[:200]}"
+                if row["action"].startswith("failed"):
+                    res["errors"].append(f"{pane}: {row['action']}")
+        acts.append({"kind": "pane", **{k: v for k, v in row.items() if k != "session"},
+                     "session": os.path.basename(session or "")})
+
+    if roll:  # restart-only pass: omp outside herdr is reported by the daily run
+        print("RESULT " + json.dumps(res))
+        return
+
+    for pid, info in procs.items():
+        if pid in managed or not is_agent_omp(info["cmd"]):
+            continue
+        older, ver = running_version(pid, info["age_s"], res["installed_after"])
+        sess = open_sessions(pid)
+        smb = round(os.path.getsize(sess[0]) / 1048576) if sess else None
+        service = re.search(r"\s(auth-broker|auth-gateway|\S+)\s+serve\b", info["cmd"]) is not None
+        row = {"pid": pid, "cmd": info["cmd"][:90], "version": ver, "older": older or (dry and pending),
+               "uptime_h": round(info["age_s"] / 3600, 1), "session_mb": smb, "mem_mb": mem_mb(pid),
+               "session": os.path.basename(sess[0]) if sess else None, "service": service,
+               "action": "report only (outside herdr)"}
+        res["unmanaged"].append(row)
+        acts.append({"kind": "unmanaged", **row})
+    print("RESULT " + json.dumps(res))
+
+
+# ---------------------------------------------------------------- orchestrator (home)
+
+def curl_json(url):
+    # Many agents share this IP, so unauthenticated GitHub API calls hit the 60/h limit
+    # (403); go through the machine's authenticated gh when it works.
+    if url.startswith("https://api.github.com/"):
+        r = sh(["gh", "api", url[len("https://api.github.com/"):]], timeout=180)
+        if r.returncode == 0:
+            return json.loads(r.stdout)
+    hdr = ["-H", "Accept: application/vnd.github+json"] if "api.github.com" in url else []
+    return json.loads(sh(["curl", "-fsSL", "--retry", "3", *hdr, url], timeout=180, check=True).stdout)
+
+
+def resolve_target(min_age_h):
+    cutoff = utcnow() - dt.timedelta(hours=min_age_h)
+    rels = curl_json(f"https://api.github.com/repos/{REPO}/releases?per_page=30")
+    npm = curl_json(f"https://registry.npmjs.org/{NPM_PKG}")
+    tags = curl_json(f"https://api.github.com/repos/{REPO}/tags?per_page=15")
+    released = {r["tag_name"].lstrip("v"): r for r in rels if not r["draft"] and not r["prerelease"]}
+    need = {"omp-darwin-arm64", "omp-linux-x64", "SHA256SUMS.txt"}
+    cands = [v for v, r in released.items()
+             if parse_ts(r["published_at"]) <= cutoff and v in npm.get("versions", {})
+             and v in npm.get("time", {}) and parse_ts(npm["time"][v]) <= cutoff
+             and need <= {x["name"] for x in r.get("assets", [])}]
+    if not cands:
+        raise RuntimeError("no release is on both GitHub and npm and 24 h old")
+    target = max(cands, key=vtuple)
+    info = {"target": target, "published": released[target]["published_at"],
+            "too_young": sorted((v for v in released if vtuple(v) > vtuple(target)), key=vtuple),
+            "unpublished_tags": [t["name"] for t in tags
+                                 if vtuple(t["name"]) > vtuple(target) and t["name"].lstrip("v") not in released],
+            "npm_latest": npm.get("dist-tags", {}).get("latest")}
+    return info
+
+
+def quiet_block(book, guard_min):
+    path = os.path.expanduser(book)
+    try:
+        with open(path) as f:
+            windows = json.load(f)
+    except (OSError, ValueError):
+        return None
+    now = utcnow()
+    for w in windows:
+        start, end = parse_ts(w["start"]), parse_ts(w["end"])
+        if start - dt.timedelta(minutes=guard_min) <= now < end:
+            return f"quiet window {w['id']} {w['start']}->{w['end']} ({w.get('owner')})"
+    return None
+
+
+def run_host(name, hc, params):
+    if hc.get("ssh"):
+        with open(os.path.abspath(__file__)) as f:
+            script = f.read()
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", hc["ssh"],
+               f"{hc.get('python', 'python3')} - host {shlex.quote(json.dumps(params))}"]
+        r = subprocess.run(cmd, input=script, capture_output=True, text=True, timeout=5400, env=ENV)
+    else:
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "host", json.dumps(params)],
+                           capture_output=True, text=True, timeout=5400, env=ENV)
+    line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("RESULT ")), None)
+    if not line:
+        return {"host": name, "actions": [], "panes": [], "unmanaged": [],
+                "errors": [f"host run failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}"]}
+    return json.loads(line[7:])
+
+
+def short_pane(p):
+    return p.split(":")[-1]
+
+
+def summary_line(when, tinfo, results):
+    hosts = []
+    for r in results:
+        b, a = r.get("installed_before"), r.get("installed_after")
+        hosts.append(f"{r['host']} {b}" + (f"->{a}" if a and a != b else " ="))
+    restarted, left = [], {}
+    for r in results:
+        for p in r["panes"]:
+            act = p.get("action", "")
+            if act.startswith("restarted"):
+                restarted.append(f"{short_pane(p['pane'])} {p.get('mem_before_mb')}->{p.get('mem_after_mb')} MB")
+            elif act.startswith("skip:") and p.get("triggers"):
+                key = "quiet window" if act.startswith("skip: quiet window") else act[6:]
+                left[key] = left.get(key, 0) + 1
+    seats = [f"{r['host']} {u['pid']} {u['version'] or 'older'} up {u['uptime_h']}h"
+             + (f" {u['session_mb']} MB" if u.get("session_mb") else "")
+             for r in results for u in r["unmanaged"] if not u.get("service")]
+    seats += [f"{r['host']} {short_pane(p['pane'])} {p.get('version') or 'older'}"
+              for r in results for p in r["panes"] if p.get("action", "").startswith("report")]
+    errs = [e for r in results for e in r["errors"]]
+    left_s = ", ".join(f"{k} {v}" for k, v in left.items()) or "none"
+    svc = [f"{a['label'].rsplit('.', 1)[-1]} {a['action']}" for r in results for a in r["actions"]
+           if a.get("kind") == "service" and a.get("action", "").startswith(("restarted", "restart failed"))]
+    return (f"- {when} omp-update: target {tinfo['target']}"
+            + (f" (skipped {', '.join(tinfo['unpublished_tags'] + tinfo['too_young'])})"
+               if tinfo["unpublished_tags"] or tinfo["too_young"] else "")
+            + f"; {', '.join(hosts)}; restarted {len(restarted)}"
+            + (f" ({'; '.join(restarted)})" if restarted else "")
+            + f"; due but left: {left_s}; seats/outside herdr: {len(seats)}"
+            + (f" ({'; '.join(seats[:4])})" if seats else "")
+            + (f"; services restarted {', '.join(svc)}" if svc else "")
+            + f"; errors {len(errs)}" + (f" ({'; '.join(e[:80] for e in errs[:2])})" if errs else ""))
+
+
+def checkpoint_line(line, keep=14):
+    head = "## omp update job (daily, net.waldin.omp-update; log ~/.local/state/omp-update/actions.jsonl)"
+    try:
+        with open(CHECKPOINT) as f:
+            text = f.read()
+    except OSError:
+        return
+    lines = text.rstrip("\n").split("\n")
+    if head not in lines:
+        lines += ["", head]
+    i = lines.index(head)
+    j = i + 1
+    while j < len(lines) and not lines[j].startswith("## "):
+        j += 1
+    body = [ln for ln in lines[i + 1:j] if ln.startswith("- ")] + [line]
+    lines[i + 1:j] = body[-keep:]
+    tmp = CHECKPOINT + ".omp-update.tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, CHECKPOINT)
+
+
+def load_config():
+    if not os.path.exists(CONFIG):
+        os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+        with open(CONFIG, "w") as f:
+            json.dump(DEFAULT_CONFIG, f, indent=1)
+    with open(CONFIG) as f:
+        cfg = json.load(f)
+    return {**DEFAULT_CONFIG, **cfg}
+
+
+def print_report(tinfo, results, dry):
+    print(f"target {tinfo['target']} (GitHub {tinfo['published']}, npm latest {tinfo['npm_latest']}; "
+          f"too young {tinfo['too_young'] or '-'}; tags without release {tinfo['unpublished_tags'] or '-'})"
+          + ("  [DRY RUN]" if dry else ""))
+    for r in results:
+        print(f"\n== {r['host']}: installed {r.get('installed_before')} -> {r.get('installed_after')}")
+        for a in r["actions"]:
+            if a["kind"] not in ("pane", "unmanaged"):
+                print(f"   {a['kind']}: " + ", ".join(f"{k}={v}" for k, v in a.items() if k != "kind"))
+        for p in r["panes"]:
+            extra = ""
+            if p.get("new_pid"):
+                extra = (f" | pid {p['pid']}->{p['new_pid']} mem {p.get('mem_before_mb')}->{p.get('mem_after_mb')} MB"
+                         f" session_unchanged={p.get('session_unchanged')} via {p.get('mechanism')}")
+            if p.get("children"):
+                extra += f" | children: {p['children'][:2]}"
+            print(f"   {p['pane']:8} {str(p.get('name') or '-'):13} {str(p.get('status')):8} "
+                  f"v{p.get('version') or '?':8} up {p.get('uptime_h', '?'):>6}h sess {str(p.get('session_mb')):>4} MB "
+                  f"mem {str(p.get('mem_mb')):>5} MB  triggers {p.get('triggers') or '-'} -> {p.get('action')}{extra}")
+        for u in r["unmanaged"]:
+            print(f"   outside herdr: pid {u['pid']} v{u['version'] or 'older'} up {u['uptime_h']}h "
+                  f"sess {u['session_mb']} MB mem {u['mem_mb']} MB -> {u['action']} | {u['cmd'][:60]}")
+        for e in r["errors"]:
+            print(f"   ERROR {e}")
+
+
+def take_lock(wait_s):
+    """run.lock serializes the daily run and roll passes, so two never restart one pane."""
+    os.makedirs(STATE, exist_ok=True)
+    lock = open(os.path.join(STATE, "run.lock"), "a")
+    deadline = time.time() + wait_s
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock
+        except BlockingIOError:
+            if time.time() >= deadline:
+                return None
+            time.sleep(5)
+
+
+def main_roll(args):
+    """Restart every herdr omp pane started before the newest extension change, each at its
+    next idle/done moment (no live child work, empty editor, not focused, no quiet window),
+    one pass per minute until none is left or --hours passes. Session-preserving: same
+    restart as the daily run (/exit, then herdr agent start ... --resume=<session>)."""
+    cfg = load_config()
+    policy = {k: cfg[k] for k in ("max_session_mb", "max_uptime_hours", "report_only", "opt_in", "skip_panes",
+                                  "extensions_pins")}
+    policy["opt_in"] = list(policy["opt_in"]) + (args.include.split(",") if args.include else [])
+    hosts = args.hosts.split(",")
+    deadline, n, left = time.time() + args.hours * 3600, 0, {}
+    log = open(os.path.join(STATE, "roll.log"), "a", buffering=1)
+    log.write(f"{stamp()} roll start: hosts {hosts}, include {args.include or '-'}, until {args.hours} h\n")
+    while time.time() < deadline:
+        lock = take_lock(60)
+        # Re-read each pass: an `ext-ack` made while the roll runs must apply at once.
+        policy["extensions_pins"] = load_config().get("extensions_pins", {})
+        if lock:
+            for name in hosts:
+                if name != "home" and n % 5 and name in left and not left[name]:
+                    continue  # remote with nothing left: re-check every 5th pass only
+                hc = cfg["hosts"][name]
+                blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"]) if hc.get("quiet_book") else None
+                r = run_host(name, hc, {"host": name, "target": "0", "dry_run": args.dry_run, "policy": policy,
+                                        "blocked": blocked, "roll": True,
+                                        "manage_panes": hc.get("manage_panes", True)})
+                left[name] = []
+                for p in r["panes"]:
+                    act = p.get("action", "")
+                    if not p.get("triggers") or act.startswith("report"):
+                        continue
+                    if act.startswith(("restarted", "failed")) or args.dry_run:
+                        entry = {"ts": stamp(), "host": name, "kind": "roll", "dry_run": args.dry_run,
+                                 **{k: v for k, v in p.items() if k != "session"}}
+                        with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
+                            f.write(json.dumps(entry) + "\n")
+                        log.write(f"{stamp()} {name} {p.get('name')} {p['pane']}: {act}"
+                                  + (f" pid {p.get('pid')}->{p.get('new_pid')} mem {p.get('mem_before_mb')}->"
+                                     f"{p.get('mem_after_mb')} MB session_unchanged={p.get('session_unchanged')}"
+                                     if p.get("new_pid") else "") + "\n")
+                    if not act.startswith("restarted"):
+                        left[name].append(f"{p.get('name') or p['pane']} ({act})")
+                for e in r["errors"]:
+                    log.write(f"{stamp()} {name} ERROR {e}\n")
+            lock.close()
+        n += 1
+        remaining = [x for v in left.values() for x in v]
+        if n == 1 or n % 30 == 0:
+            log.write(f"{stamp()} pass {n}: waiting on {remaining or 'nothing'}\n")
+        if args.dry_run or (lock and not remaining):
+            break
+        time.sleep(60)
+    remaining = [x for v in left.values() for x in v]
+    line = (f"- {stamp()} omp-update roll (extensions changed; hosts {','.join(hosts)}): "
+            + (f"done after {n} pass(es)" if not remaining else f"stopped with {len(remaining)} left: {'; '.join(remaining)}"))
+    log.write(line[2:] + "\n")
+    if not args.dry_run:
+        checkpoint_line(line)
+
+
+def main_ext_ack(args):
+    """Pin each host's CURRENT extension contents to --since, so panes started after --since
+    count as up to date (the change since then needs no restart). Logged to actions.jsonl."""
+    cfg = load_config()
+    since = int(parse_ts(args.since).timestamp())
+    script = open(os.path.abspath(__file__)).read()
+    pins = cfg.setdefault("extensions_pins", {})
+    for name in args.hosts.split(","):
+        hc = cfg["hosts"][name]
+        if hc.get("ssh"):
+            r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", hc["ssh"],
+                                f"{hc.get('python', 'python3')} - ext-fp"], input=script,
+                               capture_output=True, text=True, timeout=120, env=ENV)
+        else:
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), "ext-fp"],
+                               capture_output=True, text=True, timeout=120, env=ENV)
+        line = next((ln for ln in r.stdout.splitlines() if ln.startswith("EXTFP ")), None)
+        if not line:
+            sys.exit(f"ext-ack: no fingerprint from {name}: {(r.stderr or r.stdout).strip()[-200:]}")
+        fp = json.loads(line[6:])
+        if fp["mtime"] < since:
+            print(f"{name}: extensions unchanged since {args.since}; nothing to pin")
+            continue
+        pins[fp["fingerprint"]] = {"since": since, "note": args.note, "host": name, "acked": stamp()}
+        print(f"{name}: pinned {fp['fingerprint'][:12]} (changed {stamp(dt.datetime.fromtimestamp(fp['mtime'], dt.timezone.utc))}) "
+              f"-> counts from {args.since}")
+    with open(CONFIG + ".tmp", "w") as f:
+        json.dump(cfg, f, indent=1)
+    os.replace(CONFIG + ".tmp", CONFIG)
+    with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
+        f.write(json.dumps({"ts": stamp(), "kind": "ext-ack", "since": args.since, "note": args.note,
+                            "hosts": args.hosts}) + "\n")
+
+
+def omps_under(shell, procs):
+    """Agent omp pids anywhere below a pane's shell."""
+    kids = {}
+    for p, info in procs.items():
+        kids.setdefault(info["ppid"], []).append(p)
+    found, stack = [], list(kids.get(shell, []))
+    while stack:
+        c = stack.pop()
+        if is_agent_omp(procs[c]["cmd"]):
+            found.append(c)
+        stack.extend(kids.get(c, []))
+    return found
+
+
+def main_cos(args):
+    """`omp-update cos` (machine-watch, every 5 min on home). COS.md: the shepherd restarts
+    the chief of staff fresh with start-cos.sh --replace when its pane dies or its session
+    file passes max_session_mb; its state lives in ~/cos, so nothing is handed off.
+    Dead = no herdr agent of that name, or no omp left under its pane's shell; restarted
+    only when still dead dead_confirm_s after it was first seen (someone else's --replace
+    takes seconds), and not in a quiet window. A big session restarts only through
+    idle_gate. Prints `COS <json>`; restarts and failures go to actions.jsonl."""
+    cfg = load_config()
+    cc = {**DEFAULT_CONFIG["cos"], **(cfg.get("cos") or {})}
+    name, dry = cc["name"], args.dry_run
+    res = {"name": name, "dry_run": dry}
+
+    def done(action, **kw):
+        res.update(action=action, **kw)
+        if dry or action.startswith(("restarted", "restart failed")):
+            with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
+                f.write(json.dumps({"ts": stamp(), "host": "home", "kind": "cos", **res}) + "\n")
+        print("COS " + json.dumps(res))
+
+    if not cc["enabled"]:
+        return done("none: disabled in config")
+    lock = take_lock(10)
+    if not lock:
+        return done("skip: run.lock held (daily run or roll pass)")
+    hc = cfg["hosts"]["home"]
+    blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"]) if hc.get("quiet_book") else None
+    listing = herdr("agent", "list")
+    if "result" not in listing:
+        return done(f"skip: herdr agent list failed ({listing.get('error')})")
+    a = next((x for x in listing["result"].get("agents", []) if x.get("name") == name), None)
+    procs = ps_table()
+    state_path = os.path.join(STATE, "cos.json")
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    reason, skip, session = None, None, None
+    if a is None:
+        reason = "pane gone"
+    else:
+        res.update(pane=a["pane_id"], status=a.get("agent_status"))
+        session = (a.get("agent_session") or {}).get("value")
+        shell = herdr("pane", "process-info", "--pane", a["pane_id"]).get("result", {}) \
+            .get("process_info", {}).get("shell_pid")
+        if not shell:
+            return done("skip: no process info for the pane")
+        omps = omps_under(shell, procs)
+        if not omps:
+            reason = "omp exited"
+        else:
+            pid = pane_omp(a["pane_id"])[0] or omps[0]
+            smb = round(os.path.getsize(session) / 1048576) if session and os.path.exists(session) else None
+            res.update(pid=pid, session_mb=smb)
+            if smb and smb > cc["max_session_mb"]:
+                reason = f"session {smb} MB"
+                skip, busy = idle_gate(a, pid, procs, ancestors(procs), blocked, recheck=not dry)
+                if busy:
+                    res["children"] = busy
+    now = time.time()
+    if reason in ("pane gone", "omp exited"):
+        first = state.setdefault("dead_since", now)
+        if now - first < cc["dead_confirm_s"]:
+            skip = f"wait: {reason}, first seen {int(now - first)} s ago; confirming"
+        elif blocked:
+            skip = f"skip: {blocked}"
+    else:
+        state.pop("dead_since", None)
+    if not dry:
+        with open(state_path + ".tmp", "w") as f:
+            json.dump(state, f)
+        os.replace(state_path + ".tmp", state_path)
+    if not reason:
+        return done("none: alive")
+    res["reason"] = reason
+    if skip:
+        return done(skip)
+    if dry:
+        return done(f"would restart fresh ({reason}): {cc['start']} --replace")
+    r = sh([os.path.expanduser(cc["start"]), "--replace"], timeout=300)
+    new, new_pid = None, None
+    for _ in range(60):
+        g = herdr("agent", "get", name).get("result", {}).get("agent")
+        new_pid = pane_omp(g["pane_id"])[0] if g else None
+        if new_pid and new_pid != res.get("pid"):
+            new = g
+            break
+        time.sleep(2)
+    if r.returncode == 0 and new:
+        state.pop("dead_since", None)
+        with open(state_path, "w") as f:
+            json.dump(state, f)
+        return done("restarted fresh", new_pane=new["pane_id"], new_pid=new_pid,
+                    old_session=os.path.basename(session or ""), start_out=r.stdout.strip()[-120:])
+    return done("restart failed", rc=r.returncode, out=(r.stderr or r.stdout).strip()[-300:])
+
+
+def main_run(args):
+    lock = take_lock(1800)
+    if not lock:
+        sys.exit("omp-update: run.lock held for 30 min")
+    cfg = load_config()
+    started = utcnow()
+    tinfo = resolve_target(cfg["min_age_hours"])
+    policy = {k: cfg[k] for k in ("max_session_mb", "max_uptime_hours", "report_only", "opt_in", "skip_panes",
+                                  "extensions_pins")}
+    hosts = args.hosts.split(",") if args.hosts else cfg["order"]
+    results = []
+    for name in hosts:
+        hc = cfg["hosts"][name]
+        blocked = None
+        if hc.get("quiet_book"):
+            blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"])
+            deadline = time.time() + cfg["quiet_wait_hours"] * 3600
+            while blocked and not args.dry_run and not args.no_wait and time.time() < deadline:
+                note(f"{name}: waiting for {blocked}")
+                time.sleep(300)
+                blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"])
+        params = {"host": name, "target": tinfo["target"], "dry_run": args.dry_run, "policy": policy,
+                  "only_pane": args.only_pane, "blocked": blocked, "manage_panes": hc.get("manage_panes", True),
+                  "services": hc.get("services", [])}
+        note(f"{name}: running")
+        results.append(run_host(name, hc, params))
+    ended = utcnow()
+    with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
+        f.write(json.dumps({"ts": stamp(started), "kind": "run", "dry_run": args.dry_run, **tinfo}) + "\n")
+        for r in results:
+            for a in r["actions"]:
+                f.write(json.dumps({"ts": stamp(ended), "host": r["host"], "dry_run": args.dry_run, **a}) + "\n")
+            for e in r["errors"]:
+                f.write(json.dumps({"ts": stamp(ended), "host": r["host"], "kind": "error", "error": e}) + "\n")
+    with open(os.path.join(STATE, "last-run.json"), "w") as f:
+        json.dump({"started": stamp(started), "ended": stamp(ended), "dry_run": args.dry_run,
+                   "target": tinfo, "results": results}, f, indent=1)
+    print_report(tinfo, results, args.dry_run)
+    line = summary_line(stamp(ended), tinfo, results)
+    print("\n" + line)
+    if not args.dry_run and not args.only_pane:
+        checkpoint_line(line)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="daily omp update + idle pane restarts")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--hosts")
+    r.add_argument("--only-pane")
+    r.add_argument("--no-wait", action="store_true")
+    sub.add_parser("target")
+    sub.add_parser("ext-fp")
+    ea = sub.add_parser("ext-ack", help="mark the current extension contents as needing no restart")
+    ea.add_argument("--since", required=True, help="UTC time of the last change that DID need a restart, e.g. 2026-10-05T21:35:48Z")
+    ea.add_argument("--note", required=True)
+    ea.add_argument("--hosts", default="home,deckbox")
+    cp = sub.add_parser("cos", help="restart the chief of staff fresh if its pane died or its session is too big")
+    cp.add_argument("--dry-run", action="store_true")
+    rp = sub.add_parser("roll")
+    rp.add_argument("--hosts", default="home,deckbox")
+    rp.add_argument("--include", help="report-only names to restart anyway, comma-separated")
+    rp.add_argument("--hours", type=float, default=24)
+    rp.add_argument("--dry-run", action="store_true")
+    h = sub.add_parser("host")
+    h.add_argument("params")
+    a = ap.parse_args()
+    if a.cmd == "host":
+        host_main(json.loads(a.params))
+    elif a.cmd == "cos":
+        main_cos(a)
+    elif a.cmd == "roll":
+        main_roll(a)
+    elif a.cmd == "ext-fp":
+        print("EXTFP " + json.dumps({"fingerprint": extensions_fingerprint(), "mtime": int(extensions_mtime())}))
+    elif a.cmd == "ext-ack":
+        main_ext_ack(a)
+    elif a.cmd == "target":
+        print(json.dumps(resolve_target(load_config()["min_age_hours"]), indent=1))
+    else:
+        main_run(a)
+
+
+if __name__ == "__main__":
+    main()

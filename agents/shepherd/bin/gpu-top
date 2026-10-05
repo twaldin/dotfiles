@@ -1,0 +1,47 @@
+#!/usr/bin/python3
+"""gpu-top [seconds] [rows]: per-process GPU busy time on Apple Silicon, from the GPU driver's
+own per-client counters (AGXDeviceUserClient AppUsage accumulatedGPUTime, in ns), sampled twice.
+powermetrics' "GPU ms/s" column reads 0 for every process on these Macs, so it is no use here.
+Prints whole-GPU utilisation (IOAccelerator PerformanceStatistics) next to the per-process split."""
+import re
+import subprocess
+import sys
+import time
+
+
+def clients():
+    out = subprocess.run(["ioreg", "-l", "-w0", "-r", "-c", "AGXDeviceUserClient"], capture_output=True, text=True).stdout
+    per = {}
+    for block in out.split("+-o ")[1:]:
+        m = re.search(r'"IOUserClientCreator" = "pid (\d+), ([^"]*)"', block)
+        if not m:
+            continue
+        ns = sum(int(x) for x in re.findall(r'"accumulatedGPUTime"=(\d+)', block))
+        key = (int(m.group(1)), m.group(2))
+        per[key] = per.get(key, 0) + ns
+    return per
+
+
+def device():
+    out = subprocess.run(["ioreg", "-r", "-d", "1", "-c", "IOAccelerator", "-w0"], capture_output=True, text=True).stdout
+    m = re.search(r'"Device Utilization %"=(\d+)', out)
+    return int(m.group(1)) if m else None
+
+
+def main():
+    secs = float(sys.argv[1]) if len(sys.argv) > 1 else 5
+    rows = int(sys.argv[2]) if len(sys.argv) > 2 else 12
+    a, u0 = clients(), device()
+    time.sleep(secs)
+    b, u1 = clients(), device()
+    busy = {k: (b[k] - a.get(k, 0)) / 1e6 / secs for k in b}  # GPU ms per wall second
+    total = sum(v for v in busy.values() if v > 0)
+    print(f"GPU device utilisation {u0}% -> {u1}% | per-process busy sum {total:.0f} ms/s over {secs:.0f}s")
+    for (pid, name), ms in sorted(busy.items(), key=lambda kv: -kv[1])[:rows]:
+        if ms <= 0.05:
+            break
+        print(f"{ms:8.1f} ms/s {100 * ms / 1000:5.1f}%  {pid:>6} {name}")
+
+
+if __name__ == "__main__":
+    main()

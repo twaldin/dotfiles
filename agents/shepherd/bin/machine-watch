@@ -1,0 +1,469 @@
+#!/usr/bin/python3
+"""machine-watch: record machine health and wake the shepherd agent on pressure.
+
+Every run (launchd, every 2 minutes) appends one JSON line to
+~/.local/state/machine-watch.jsonl with memory, CPU, per-group footprints,
+per-agent footprints, fseventsd size and the FSEvents rate with its top source.
+When a rule trips it messages the shepherd agent named in
+~/.config/machine-shepherd/pane through `agent-msg` (omp inbox; plain `herdr agent prompt` where agent-msg is not installed), once per rule per
+cooldown. A machine without that file queues alerts in
+~/.local/state/machine-watch.alerts instead; the shepherd's machine lists such
+hosts in ~/.config/machine-shepherd/remotes, pulls their queued alerts over ssh
+each run, and flags a remote whose watcher stops reporting. Hosts listed in
+~/.config/machine-shepherd/broker-clients (one ssh target per line) run omp in broker
+mode against this machine's auth broker: every 5 minutes it checks, FROM each client,
+that the broker URL in the client's config.yml answers /v1/healthz and accepts the
+client's token, and alerts when that has failed for 10 minutes (clients lose
+credentials ~1 h after the broker becomes unreachable). Where omp-update is installed
+(home), every 5 minutes it runs `omp-update cos`, which restarts the chief of staff
+fresh when its pane died or its session passed 100 MB (gates and logic live there),
+and tells the shepherd about each restart or failure. It never kills
+anything: diagnosis and reclaiming stay with the shepherd, and kills that are
+not already automated need Tim's approval.
+
+usage: machine-watch [--dry-run] [--no-alert]
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import time
+
+HOME = os.path.expanduser("~")
+BIN = os.path.join(HOME, ".local/bin")
+STATE_DIR = os.path.join(HOME, ".local/state")
+LOG = os.path.join(STATE_DIR, "machine-watch.jsonl")
+STATE = os.path.join(STATE_DIR, "machine-watch.state.json")
+PANE_FILE = os.path.join(HOME, ".config/machine-shepherd/pane")
+REMOTES = os.path.join(HOME, ".config/machine-shepherd/remotes")
+BROKER_CLIENTS = os.path.join(HOME, ".config/machine-shepherd/broker-clients")
+BROKER_EVERY_S, BROKER_ALERT_S = 300, 600
+OMP_UPDATE = os.path.join(BIN, "omp-update")
+COS_EVERY_S = 300
+ALERTS = os.path.join(STATE_DIR, "machine-watch.alerts")
+LOG_MAX_BYTES = 20 * 1024 * 1024
+COOLDOWN_S = 60 * 60
+
+# Thresholds. "streak" rules must hold for that many consecutive runs.
+RULES = {
+    "memory_free_low": {"msg": "memory free {free_pct}% (<20%)", "streak": 1},
+    "compressed_high": {"msg": "compressor holds {compressed_gb} GB (>30% of RAM), memory free {free_pct}%; largest holder {cmprs_top_name} {cmprs_top_pid} with {cmprs_top_mb} MB compressed", "streak": 2},
+    "swap_growing": {"msg": "swap grew {swap_delta_gb:+.1f} GB in 30 min (now {swap_used_gb} GB); memory free fell to {swap_min_free}% (now {free_pct}%)", "streak": 1},
+    "fseventsd_big": {"msg": "fseventsd footprint {fseventsd_mb:.0f} MB (>1024)", "streak": 1},
+    "fsevents_storm": {"msg": "FSEvents {fsevents_rate:.0f}/s, top source {fsevents_top} ({fsevents_top_share:.0f}%)", "streak": 2},
+    "agent_huge": {"msg": "omp agent {grow_pid} ({grow_pane}, {grow_project}) at {grow_mb} MB ({grow_delta_mb:+.0f} MB in the last hour) with memory free {free_pct}%", "streak": 2},
+    "browser_big": {"msg": "omp headless browser {browser_mb:.0f} MB in {browser_procs} procs, memory free {free_pct}%", "streak": 2},
+    "windowserver_hot": {"msg": "WindowServer {windowserver_cpu:.0f}% CPU (>60%)", "streak": 3},
+    "cpu_saturated": {"msg": "CPU idle {cpu_idle:.0f}% (<15%)", "streak": 3},
+    "colorsync_ratchet": {"msg": "ColorSync rebuilds {cs_profiles:.0f} display profiles/s ({cs_requests:.1f} requests/s) on WindowServer pid {ws_pid}, above its alert level of {cs_ack_level:.1f}/s: virtual-display changes are ratcheting WindowServer again (it crashed at ~46/s on 09-29); sky-lead asked to be told", "streak": 3},
+}
+
+
+def run(cmd, timeout=60):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def fsevents(seconds=5):
+    out = run([os.path.join(BIN, "fsevents-top"), str(seconds), "5", "3"], timeout=seconds + 20)
+    m = re.search(r"(\d+) events \(([\d.]+)/s\), (\d+) unique paths, dropped=(\d+)", out)
+    rows = re.findall(r"^\s+(\d+)\s+([\d.]+)%\s+(\d+)\s+(.+)$", out, re.M)
+    return {
+        "rate": float(m.group(2)) if m else None,
+        "unique": int(m.group(3)) if m else None,
+        "dropped": int(m.group(4)) if m else None,
+        "top": [{"events": int(e), "share": float(s), "uniq": int(u), "prefix": p} for e, s, u, p in rows],
+    }
+
+
+def colorsync_rate(seconds=120):
+    """WindowServer -> colorsync.displayservices display-info requests/s, and device-profile builds/s.
+
+    Recorded, not alerted on (2026-09-29): on twaldin-home the request rate ratcheted from 2.2/s
+    to ~10/s as agents created BetterDisplay virtual screens and never came back down, holding
+    ~0.9 core in ColorSync and 80 WindowServer threads blocked. Each request rebuilds one profile
+    per display. While ColorSync is saturated, profile builds/s stays constant (~46/s on home),
+    and requests/s only reflects how many displays exist: 9/s with 5, 15/s with 3. Below
+    saturation, requests/s is WindowServer's real demand."""
+    out = run(["log", "show", "--style", "compact", "--last", f"{seconds}s", "--predicate",
+               'process == "colorsync.displayservices" AND (eventMessage BEGINSWITH '
+               '"ColorSyncDisplayServicesAgent: received XPC_DISPLAY_INFO_REQUEST" OR eventMessage BEGINSWITH '
+               '"ColorSyncProfileCreateDeviceProfile")'], timeout=60)
+    if not out.strip():
+        return None  # query failed or timed out; a false 0 would poison the ratchet baseline for 6 h
+    lines = out.splitlines()
+    return {"requests_ps": round(sum("XPC_DISPLAY_INFO_REQUEST" in l for l in lines) / seconds, 2),
+            "profiles_ps": round(sum("ColorSyncProfileCreateDeviceProfile" in l for l in lines) / seconds, 2)}
+
+
+def windowserver_pid():
+    """The running WindowServer's pid, or None. `sudo -n` first: agent panes cannot see it unprivileged."""
+    out = run(["sudo", "-n", "pgrep", "-x", "WindowServer"], timeout=10) or run(["pgrep", "-x", "WindowServer"], timeout=10)
+    return int(out.split()[0]) if out.split() else None
+
+
+def load_state():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except Exception:
+        return {"streaks": {}, "last_alert": {}, "swap_hist": []}
+
+
+def save_state(state):
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, STATE)
+
+
+def append_log(rec):
+    if os.path.exists(LOG) and os.path.getsize(LOG) > LOG_MAX_BYTES:
+        os.replace(LOG, LOG + ".1")
+    with open(LOG, "a") as f:
+        f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+
+
+def evaluate(c, fs, state, now, cs=None, ws=None):
+    mem = c["memory"]
+    g = c["groups"]
+    group = lambda name, key: g.get(name, {}).get(key, 0)
+    hist = [h for h in state.get("swap_hist", []) if now - h[0] <= 1900] + [[now, mem["swap_used_gb"], mem["free_pct"]]]
+    # Lowest free% over the same ~30 min window; entries written before 2026-09-29 have no free% field.
+    swap_min_free = min((h[2] for h in hist if len(h) > 2 and h[2] is not None), default=100)
+    state["swap_hist"] = hist
+    old = [h for h in hist if now - h[0] >= 1500]
+    swap_delta = mem["swap_used_gb"] - old[0][1] if old else 0.0
+    agents = c.get("agents") or []
+    big = max(agents, key=lambda a: a["mem_mb"], default=None)
+    # Per-agent size history (~65 min) so agent_huge can tell growth from a stable size.
+    ahist = state.get("agent_hist", {})
+    ahist = {str(a["pid"]): [h for h in ahist.get(str(a["pid"]), []) if now - h[0] <= 3900] + [[now, a["mem_mb"]]] for a in agents}
+    state["agent_hist"] = ahist
+
+    def growth(pid):
+        # vs the newest sample >= 50 min old; a younger agent is measured from when first seen
+        h = ahist.get(str(pid), [])
+        old = [x for x in h if now - x[0] >= 3000] or h[:1]
+        return h[-1][1] - old[-1][1] if h else 0
+    hot = [a for a in agents if a["mem_mb"] > 6144 or (a["mem_mb"] > 3072 and growth(a["pid"]) > 1024)]
+    grow = max(hot, key=lambda a: a["mem_mb"], default=None)
+    # Alert level for ColorSync profile builds/s: 5 on a WindowServer nobody acknowledged, else the
+    # acknowledged level + 3. An acknowledgement from before a WindowServer restart no longer applies.
+    ack = state.get("cs_ack") or {}
+    cs_ack_level = ack["profiles_ps"] + 3 if ws is not None and ack.get("ws") == ws else 5
+    top = fs["top"][0] if fs["top"] else {"prefix": "-", "share": 0}
+    v = {
+        "free_pct": mem["free_pct"],
+        "compressed_gb": mem["compressed_gb"],
+        "swap_used_gb": mem["swap_used_gb"],
+        "swap_delta_gb": swap_delta,
+        "swap_min_free": swap_min_free,
+        "fseventsd_mb": group("fseventsd", "mem_mb"),
+        "fsevents_rate": fs["rate"] or 0,
+        "fsevents_top": top["prefix"],
+        "fsevents_top_share": top["share"],
+        "agent_pid": big["pid"] if big else None,
+        "agent_pane": big["pane"] if big else None,
+        "agent_project": big["project"] if big else None,
+        "agent_mb": big["mem_mb"] if big else 0,
+        "grow_pid": grow["pid"] if grow else None,
+        "grow_pane": grow["pane"] if grow else None,
+        "grow_project": grow["project"] if grow else None,
+        "grow_mb": grow["mem_mb"] if grow else 0,
+        "grow_delta_mb": growth(grow["pid"]) if grow else 0,
+        "browser_mb": group("omp headless browser", "mem_mb"),
+        "browser_procs": group("omp headless browser", "procs"),
+        "windowserver_cpu": group("WindowServer", "cpu"),
+        "cpu_idle": c["cpu_idle"] if c["cpu_idle"] is not None else 100,
+        "cs_profiles": cs["profiles_ps"] if cs else 0,
+        "cs_requests": cs["requests_ps"] if cs else 0,
+        "ws_pid": ws,
+        "cs_ack_level": cs_ack_level,
+        # Census records from before 09-30 have no top_compressed; 0 keeps the rule on the free% branch.
+        "cmprs_top_name": (c.get("top_compressed") or [{}])[0].get("name", "-"),
+        "cmprs_top_pid": (c.get("top_compressed") or [{}])[0].get("pid"),
+        "cmprs_top_mb": (c.get("top_compressed") or [{}])[0].get("cmprs_mb", 0),
+    }
+    tripped = {
+        "memory_free_low": v["free_pct"] is not None and v["free_pct"] < 20,
+        # The compressor rule exists for a single hoarder: fseventsd held 14 GB almost all compressed while
+        # free% read 53%. Many small holders at 50%+ free is normal on a 14-agent box; it fired three times
+        # on 09-29/30 with no holder above 1.7 GB. So: over 30% of RAM AND (memory short, or one process
+        # holding > 3 GB compressed; the Remotion render at 3.9 GB was worth knowing about).
+        "compressed_high": v["compressed_gb"] > 0.30 * mem["total_gb"]
+                           and ((v["free_pct"] is not None and v["free_pct"] < 50) or v["cmprs_top_mb"] > 3072),
+        # Swap growth alone is not pressure: on twaldin-work the used-swap figure moves 2-3 GB while
+        # free memory stays above 50% (19:28 on 09-29: +2.4 GB, lowest free 34%, 36 swap ops/s). Count
+        # it only when memory actually got tight in that window. Replayed over work's history, this
+        # cut 18 alerts to 12 and kept every alert where free memory fell to 26%.
+        "swap_growing": swap_delta > 2.0 and swap_min_free < 30,
+        "fseventsd_big": v["fseventsd_mb"] > 1024,
+        "fsevents_storm": v["fsevents_rate"] > 3000,
+        # A big session is only worth waking the shepherd for once memory is short, and only
+        # while it grows: a long-lived coordinator sits at 2.5-3.6 GB for a day (work's Canvas
+        # seat 96859), and "over 3 GB with free < 50%" re-alerted on it hourly for nothing.
+        # Growth > 1 GB/h catches a leak; > 6 GB catches a burst (subagent fan-outs hit 8.8-11.3).
+        "agent_huge": grow is not None and v["free_pct"] is not None and v["free_pct"] < 50,
+        # Size alone is normal use (p23's live 3D app tabs held 2.2 GB at 74% free), so it
+        # only matters once memory is short; a runaway process count is the leak signature.
+        "browser_big": v["browser_procs"] > 40 or (v["browser_mb"] > 2048 and v["free_pct"] is not None and v["free_pct"] < 50),
+        # A WindowServer that rebuilds display profiles continuously has the restore_color_preferences
+        # ratchet: each virtual-display change adds demand that only a restart clears. A healthy one sits
+        # near 0; it saturated at ~46/s and the 80 blocked threads crashed WindowServer (16:24, 09-29).
+        # `machine-watch --ack-colorsync` records the current WindowServer and level as known, so the rule
+        # fires again only on a further rise (>3/s over that level), not hourly; a new WindowServer starts
+        # from 5/s. A rise-over-recent-low rule false-alarmed at 16:05 on 09-29, when saturated throughput
+        # dipped to 26/s once.
+        "colorsync_ratchet": cs is not None and ws is not None and cs["profiles_ps"] > cs_ack_level,
+    }
+    fire = []
+    for rule, hit in tripped.items():
+        streak = state["streaks"].get(rule, 0) + 1 if hit else 0
+        state["streaks"][rule] = streak
+        last = state["last_alert"].get(rule)
+        if hit and streak >= RULES[rule]["streak"] and (last is None or now - last >= COOLDOWN_S):
+            fire.append(rule)
+    return v, fire
+
+
+def shepherd_pane():
+    try:
+        with open(PANE_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def deliver(text, reasons, urgent, dry):
+    """Prompt the shepherd pane; on a machine without one, queue for the relay."""
+    pane = shepherd_pane()
+    if dry:
+        print("ALERT ->", pane or "(queue)", ":", text)
+        return
+    if not pane:
+        with open(ALERTS, "a") as f:
+            f.write(json.dumps({"ts": int(time.time()), "text": text}) + "\n")
+        return
+    msg = os.path.join(BIN, "agent-msg")
+    cmd = [msg, "--from", "machine-watch", pane, text] if os.path.exists(msg) \
+        else [os.path.join(BIN, "herdr"), "agent", "prompt", pane, text]
+    # agent-msg never types into the pane; it refuses (75) a blocked/focused pane that has no inbox yet.
+    delivered = subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0
+    if not delivered or urgent:
+        subprocess.run(["osascript", "-e", f"display notification {json.dumps(reasons)} with title \"machine-watch\""],
+                       capture_output=True, timeout=10)
+
+
+def notify(c, fs, v, fire, dry):
+    groups = sorted(c["groups"].items(), key=lambda kv: -kv[1]["mem_mb"])[:4]
+    top = ", ".join(f"{k} {d['mem_mb'] / 1024:.1f}GB/{d['cpu']:.0f}%" for k, d in groups)
+    reasons = "; ".join(RULES[r]["msg"].format(**v) for r in fire)
+    text = (f"[machine-watch {c['host']}] {reasons}. Top groups: {top}. "
+            f"Diagnose with machine-census and fsevents-top; ask Tim before killing anything not already automated.")
+    deliver(text, reasons, "memory_free_low" in fire, dry)
+
+
+def relay(state, now, dry):
+    """Forward queued alerts from remote machines and flag a remote whose watcher went quiet."""
+    try:
+        with open(REMOTES) as f:
+            hosts = [h.strip() for h in f if h.strip() and not h.startswith("#")]
+    except OSError:
+        return
+    seen = state.setdefault("remote_seen", {})
+    # Newest watcher record successfully read per host. Staleness is judged against it,
+    # so one failed ssh attempt (a network blip) is not reported as an outage; a remote
+    # that stays unreachable still alerts once its last good record is 10 minutes old.
+    records = state.setdefault("remote_last_record", {})
+    for host in hosts:
+        out = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host,
+                   "cat ~/.local/state/machine-watch.alerts 2>/dev/null; echo ---LAST---; "
+                   "tail -1 ~/.local/state/machine-watch.jsonl 2>/dev/null"], timeout=40)
+        queued, _, last = out.partition("---LAST---")
+        for line in queued.splitlines():
+            try:
+                alert = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if alert["ts"] > seen.get(host, now - 3600):
+                deliver(alert["text"], alert["text"][:120], False, dry)
+                seen[host] = max(seen.get(host, 0), alert["ts"])
+        seen.setdefault(host, now)
+        try:
+            records[host] = json.loads(last.strip())["ts"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+        last_ts = records.get(host, 0)
+        key = "remote_stale:" + host
+        if now - last_ts > 600 and now - state["last_alert"].get(key, 0) >= COOLDOWN_S:
+            why = "unreachable over ssh" if not out else f"last record {(now - last_ts) // 60} min old" if last_ts else "no records"
+            deliver(f"[machine-watch relay] {host} watcher is not reporting ({why}); its pressure alerts are not reaching you.",
+                    f"{host} watcher silent", False, dry)
+            if not dry:
+                state["last_alert"][key] = now
+
+
+# Runs on the client (python3 stdin). Prints no secret: the token only goes into a header.
+# /v1/healthz is public; on the authenticated route a rejected token gets 401, an accepted
+# one reaches routing (404: the route needs parameters), so anything but 401/0 = accepted.
+BROKER_PROBE = r'''
+import json, os, re, urllib.request, urllib.error
+url, inside = None, False
+for line in open(os.path.expanduser("~/.omp/agent/config.yml")):
+    if re.match(r'\s*"?broker"?\s*:\s*$', line):
+        inside = True
+    elif inside:
+        m = re.match(r'\s*"?url"?\s*:\s*"?([^"\s]+)"?\s*$', line)
+        if m:
+            url = m.group(1)
+            break
+def get(path, token=None):
+    req = urllib.request.Request(url.rstrip("/") + path, headers={"Authorization": "Bearer " + token} if token else {})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.status, r.read(300).decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+    except Exception as e:
+        return 0, type(e).__name__
+out = {"url": url}
+if url:
+    out["health"], body = get("/v1/healthz")
+    try:
+        out["ok"], out["version"] = json.loads(body).get("ok"), json.loads(body).get("version")
+    except ValueError:
+        out["error"] = body[:60]
+    try:
+        token = open(os.path.expanduser("~/.omp/auth-broker.token")).read().strip()
+    except OSError:
+        token = None
+    out["auth"] = get("/v1/credentials/check", token)[0] if token else "no token"
+print("BROKER " + json.dumps(out))
+'''
+
+
+def broker_clients(state, now, dry, no_alert):
+    """Check each broker-mode client's path to this machine's auth broker (see docstring)."""
+    try:
+        with open(BROKER_CLIENTS) as f:
+            hosts = [h.strip() for h in f if h.strip() and not h.startswith("#")]
+    except OSError:
+        return None
+    bs = state.setdefault("broker_clients", {})
+    results = {}
+    for host in hosts:
+        s = bs.setdefault(host, {"checked": 0, "last_good": now, "alerted": False})
+        if now - s["checked"] < BROKER_EVERY_S:
+            continue
+        try:
+            r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, "python3 -"],
+                               input=BROKER_PROBE, capture_output=True, text=True, timeout=40)
+            line = next((l for l in r.stdout.splitlines() if l.startswith("BROKER ")), None)
+            res = json.loads(line[7:]) if line else {"error": "ssh failed: " + (r.stderr.strip()[-80:] or f"rc {r.returncode}")}
+        except (subprocess.SubprocessError, ValueError) as e:
+            res = {"error": f"probe failed: {type(e).__name__}"}
+        good = res.get("health") == 200 and res.get("ok") is True and res.get("auth") not in (401, 0, "no token")
+        res["good"] = good
+        results[host] = res
+        s["checked"] = now
+        if good:
+            if s.get("alerted") and not no_alert:
+                deliver(f"[machine-watch broker] {host} reaches the auth broker again ({res.get('url')}, v{res.get('version')}).",
+                        f"{host} broker recovered", False, dry)
+            s.update(last_good=now, alerted=False)
+            continue
+        down = now - s["last_good"]
+        if down >= BROKER_ALERT_S and not no_alert and now - state["last_alert"].get("broker:" + host, 0) >= COOLDOWN_S:
+            deliver(f"[machine-watch broker] {host} cannot use the auth broker for {down // 60} min: {json.dumps(res)}. "
+                    f"Its omp loses all credentials ~1 h after the broker became unreachable (snapshot cache TTL). "
+                    f"Check com.twaldin.omp-auth-broker on this machine (bind address, health) and the tailnet path.",
+                    f"{host} auth broker unreachable", down >= 2400, dry)
+            if not dry:
+                state["last_alert"]["broker:" + host] = now
+                s["alerted"] = True
+    return results or None
+
+
+def cos_watch(state, now, dry, no_alert):
+    """`omp-update cos` every 5 min (see the docstring); None where omp-update is absent."""
+    if not os.path.exists(OMP_UPDATE) or now - state.get("cos_checked", 0) < COS_EVERY_S:
+        return None
+    state["cos_checked"] = now
+    try:
+        r = subprocess.run(["/usr/bin/python3", OMP_UPDATE, "cos"] + (["--dry-run"] if dry else []),
+                           capture_output=True, text=True, timeout=400)
+        line = next((l for l in r.stdout.splitlines() if l.startswith("COS ")), None)
+        res = json.loads(line[4:]) if line else {"action": "error", "error": (r.stderr or r.stdout).strip()[-300:]}
+    except subprocess.TimeoutExpired:
+        res = {"action": "error", "error": "omp-update cos timed out after 400 s"}
+    act = res.get("action", "")
+    if no_alert:
+        return res
+    if act == "restarted fresh":
+        deliver(f"[machine-watch cos] restarted the chief of staff fresh ({res.get('reason')}): "
+                f"new pane {res.get('new_pane')}, pid {res.get('new_pid')}. State lives in ~/cos (COS.md).",
+                "cos restarted", False, dry)
+    elif act in ("restart failed", "error") and now - state["last_alert"].get("cos", 0) >= COOLDOWN_S:
+        deliver(f"[machine-watch cos] {act}: {json.dumps(res)[:600]}", f"cos {act}", True, dry)
+        if not dry:
+            state["last_alert"]["cos"] = now
+    return res
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true", help="print alerts instead of sending; do not update alert state")
+    ap.add_argument("--no-alert", action="store_true")
+    ap.add_argument("--ack-colorsync", action="store_true",
+                    help="record the current WindowServer's ColorSync level as known; colorsync_ratchet then fires only on a further rise")
+    a = ap.parse_args()
+    os.makedirs(STATE_DIR, exist_ok=True)
+    ws = windowserver_pid()
+    if a.ack_colorsync:
+        cs = colorsync_rate()
+        if ws is None or cs is None:
+            print("colorsync_ratchet: cannot measure WindowServer or ColorSync now; nothing acknowledged")
+            return 1
+        state = load_state()
+        state.pop("cs_ack_ws", None)
+        state["cs_ack"] = {"ws": ws, "profiles_ps": cs["profiles_ps"]}
+        save_state(state)
+        print(f"colorsync_ratchet: acknowledged {cs['profiles_ps']}/s on WindowServer pid {ws}; alerts again above {cs['profiles_ps'] + 3:.1f}/s")
+        return 0
+
+    now = int(time.time())
+    try:
+        census = json.loads(run([os.path.join(BIN, "machine-census"), "--json", "--sample", "2"], timeout=120))
+    except json.JSONDecodeError:
+        print(time.strftime("%F %T"), "census failed")
+        return 1
+    fs = fsevents()
+    cs = colorsync_rate()
+    state = load_state()
+    v, fire = evaluate(census, fs, state, now, cs, ws)
+    broker = broker_clients(state, now, a.dry_run, a.no_alert)
+    cos = cos_watch(state, now, a.dry_run, a.no_alert)
+    append_log({"ts": now, "values": v, "memory": census["memory"], "groups": census["groups"],
+                "agents": [{k: r[k] for k in ("pid", "pane", "mem_mb", "cpu", "session_mb", "project")} for r in census["agents"]],
+                "fsevents": fs, "colorsync": cs, "fired": fire, **({"broker_clients": broker} if broker else {}),
+                **({"cos": cos} if cos and cos.get("action") != "none: alive" else {})})
+    if fire and not a.no_alert:
+        notify(census, fs, v, fire, a.dry_run)
+        if not a.dry_run:
+            for r in fire:
+                state["last_alert"][r] = now
+    if not a.no_alert:
+        relay(state, now, a.dry_run)
+    if not a.dry_run:
+        save_state(state)
+    print(time.strftime("%F %T"), "ok", "fired=" + (",".join(fire) or "none"),
+          f"free={v['free_pct']}% fseventsd={v['fseventsd_mb']}MB fsev={v['fsevents_rate']:.0f}/s ws={v['windowserver_cpu']}%")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

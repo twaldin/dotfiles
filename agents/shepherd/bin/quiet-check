@@ -1,0 +1,135 @@
+#!/usr/bin/python3
+"""quiet-check [--pane <agent name or pane id>] [--min-cpu 10]: is the machine quiet enough for a latency benchmark?
+
+Lists every process using >= min-cpu % over a 3 s sample (sudo top), with the herdr pane that owns it
+(first omp ancestor; under a shared omp worker broker, the process's own cwd instead, since the broker's
+parent pane does not own its children; failing both, the deepest agent project dir in its or an ancestor's
+command line, which catches GUI apps an agent started with `open -g`, e.g. Roblox Studio under launchd).
+Exits 0 unless a process that an agent outside --pane started is at or above it.
+Agents' own omp runtimes under 50%, macOS daemons and Tim's apps are listed but do not count. The shepherd uses it to check quiet windows it has negotiated (2026-09-30)."""
+import argparse
+import json
+import re
+import subprocess
+import sys
+
+UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--pane", default=None, help="herdr agent name or pane id whose processes are expected (the benchmark's own)")
+ap.add_argument("--min-cpu", type=float, default=10.0)
+a = ap.parse_args()
+
+
+def run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+
+procs = {}
+for line in run(["sudo", "-n", "ps", "-axww", "-o", "pid=,ppid=,user=,command="]).splitlines():
+    parts = line.split(None, 3)
+    if len(parts) == 4:
+        procs[int(parts[0])] = (int(parts[1]), parts[2], parts[3])
+panes = {}
+dirs = {}
+try:
+    for ag in json.loads(run(["herdr", "agent", "list"]))["result"]["agents"]:
+        if a.pane and a.pane == ag.get("name"):
+            a.pane = ag["pane_id"]  # names survive pane moves; ownership below is by pane id
+        m = UUID.search((ag.get("agent_session") or {}).get("value", "").rsplit("/", 1)[-1])
+        if m:
+            panes[m.group(1)] = f"{ag['pane_id']} {ag.get('name') or ''}".strip()
+        cwd = (ag.get("cwd") or "").rstrip("/")
+        if cwd.count("/") >= 4:  # project dirs only, not ~/dev, $HOME or /private/tmp
+            dirs.setdefault(cwd, []).append(ag["pane_id"])
+except (ValueError, KeyError):
+    pass
+
+
+def session_uuid(pid, cmd):
+    m = UUID.search(cmd)
+    if m:
+        return m.group(1)
+    # Bare `omp` (herdr resume): its open session .jsonl names it.
+    for line in run(["sudo", "-n", "lsof", "-a", "-p", str(pid), "-Fn"]).splitlines():
+        if line.startswith("n") and "/.omp/agent/sessions/" in line and line.endswith(".jsonl"):
+            m = UUID.search(line.rsplit("/", 1)[-1])
+            if m:
+                return m.group(1)
+    return None
+
+
+def owner(pid):
+    start = pid
+    for _ in range(30):
+        if pid not in procs or pid <= 1:
+            return None
+        ppid, user, cmd = procs[pid]
+        if "__omp_worker_daemon_broker" in cmd:
+            # The broker is shared by every pane; its parent omp is just whichever pane started it.
+            return owner_by_cwd(start) or "omp shared service (owner unknown)"
+        if re.match(r"(\S*/)?omp(\s|$)", cmd) and "__omp_worker" not in cmd:
+            u = session_uuid(pid, cmd)
+            return panes.get(u, f"omp {pid}") if u else f"omp {pid}"
+        pid = ppid
+    return None
+
+
+def owner_by_cwd(pid):
+    out = run(["sudo", "-n", "lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
+    cwd = next((line[1:] for line in out.splitlines() if line.startswith("n")), "")
+    hits = [d for d in dirs if cwd == d or cwd.startswith(d + "/")]
+    hits += [d for d in dirs if d + "/" in procs[pid][2]]
+    return "|".join(dirs[max(hits, key=len)]) + " (by cwd)" if hits else None
+
+
+def owner_by_path(pid):
+    for _ in range(30):
+        if pid not in procs or pid <= 1:
+            return None
+        ppid, user, cmd = procs[pid]
+        hits = [d for d in dirs if d + "/" in cmd]
+        if hits:
+            return "|".join(dirs[max(hits, key=len)]) + " (by path)"
+        pid = ppid
+    return None
+
+
+last = run(["sudo", "-n", "top", "-l", "2", "-s", "3", "-stats", "pid,cpu"]).split("Processes:")[-1]
+busy, rows = [], False
+for line in last.splitlines():
+    if line.startswith("PID"):
+        rows = True
+        continue
+    parts = line.split()
+    if rows and len(parts) >= 2 and parts[0].isdigit():
+        try:
+            cpu = float(parts[1])
+        except ValueError:
+            continue
+        if cpu >= a.min_cpu and int(parts[0]) in procs:
+            busy.append((cpu, int(parts[0])))
+intruders = 0
+for cpu, pid in sorted(busy, reverse=True):
+    ppid, user, cmd = procs[pid]
+    who = owner(pid)
+    exe = cmd.split()[0].split("/")[-1][:28]
+    system = who is None and (user in ("root", "_windowserver") or cmd.startswith(("/System/", "/usr/libexec/", "/usr/sbin/")))
+    if who is None and not system:
+        who = owner_by_path(pid)
+    label = who or ("macOS" if system else "app")
+    mine = a.pane is not None and who is not None and a.pane in who.split()[0].split("|")
+    # An agent's own omp runtime (thinking, streaming, tool dispatch) is allowed during a hold; what a hold
+    # stops is the work agents start (builds, servers, renders). Tim's apps are listed but never held.
+    runtime = who is not None and re.match(r"(\S*/)?omp(\s|$)", cmd) is not None and cpu < 50
+    if runtime:
+        label += " (agent runtime)"
+    elif who is None and not system:
+        label = "app (Tim's; not held)"
+    flag = "" if mine or system or runtime or who is None else "  <-- not quiet"
+    intruders += bool(flag)
+    print(f"{cpu:6.1f}%  {pid:>6}  {exe:<28} {label}{flag}")
+scope = a.pane or "the benchmark"
+summary = "QUIET" if not intruders else f"{intruders} process(es) outside {scope} at >= {a.min_cpu:.0f}% CPU"
+print(f"quiet-check: {summary}")
+sys.exit(0 if not intruders else 1)

@@ -1,0 +1,79 @@
+#!/bin/bash
+# Recycle omp's headless browser daemons when their disk cache grows unbounded.
+#
+# WHY THIS EXISTS
+# omp runs shared puppeteer Chrome daemons under ~/.omp/run/daemons/<id>/. Nothing
+# reaps them: observed 59 processes / 4.94 GB RSS with 5.6 GB of Chromium disk cache,
+# one daemon up 34 hours. Chromium rewrites its cache continuously, and every write is
+# an FSEvent, so fseventsd's in-memory backlog grows with it -- it reached 14 GB
+# (phys_footprint, nearly all compressed) and cost 21 GB of compressed memory system
+# wide. Cycling the browsers removes the event source; the daemons respawn on demand
+# the next time any agent uses the browser tool.
+#
+# WHAT IT NEVER TOUCHES
+#   - omp itself, herdr, or any agent pane. Agents live there; restarting omp would
+#     kill live sessions. Only processes whose BINARY PATH is under ~/.omp/puppeteer.
+#   - Tim's own browser at /Applications/Google Chrome.app. Matching on the string
+#     "Google Chrome" alone would catch it; that is why this matches the binary path.
+#
+# USAGE
+#   omp-browser-cycle            # cycle only if cache exceeds threshold
+#   omp-browser-cycle --force    # cycle regardless
+#   omp-browser-cycle --dry-run  # report what it would do
+#   THRESHOLD_MB=2048 omp-browser-cycle
+set -uo pipefail
+
+THRESHOLD_MB="${THRESHOLD_MB:-1024}"
+DAEMONS="$HOME/.omp/run/daemons"
+PUPPETEER_PATH="$HOME/.omp/puppeteer"
+FORCE=0; DRY=0
+for a in "$@"; do
+    case "$a" in
+        --force) FORCE=1 ;;
+        --dry-run) DRY=1 ;;
+        *) echo "unknown option: $a" >&2; exit 2 ;;
+    esac
+done
+
+[ -d "$DAEMONS" ] || { echo "no daemon dir at $DAEMONS; nothing to do"; exit 0; }
+
+cache_mb=$(du -sm "$DAEMONS" 2>/dev/null | cut -f1)
+cache_mb=${cache_mb:-0}
+# Match on binary path, never on the app name.
+pids=$(pgrep -f "^${PUPPETEER_PATH}/" 2>/dev/null || true)
+nproc=$(printf '%s\n' "$pids" | grep -c . || true)
+
+echo "browser daemons: ${nproc} procs, ${cache_mb} MB cache (threshold ${THRESHOLD_MB} MB)"
+
+if [ "$FORCE" -eq 0 ] && [ "$cache_mb" -lt "$THRESHOLD_MB" ]; then
+    echo "under threshold; leaving alone"
+    exit 0
+fi
+if [ "$DRY" -eq 1 ]; then
+    echo "[dry-run] would terminate ${nproc} puppeteer procs and clear cache dirs"
+    exit 0
+fi
+
+# An agent may be mid-browser-task. This is recoverable -- the tool reopens the tab --
+# but say so, because a silently vanishing tab looks like a bug from inside a pane.
+if [ -n "$pids" ]; then
+    printf '%s\n' "$pids" | xargs -r kill -TERM 2>/dev/null
+    sleep 5
+    still=$(pgrep -f "^${PUPPETEER_PATH}/" 2>/dev/null || true)
+    [ -n "$still" ] && { printf '%s\n' "$still" | xargs -r kill -9 2>/dev/null; sleep 2; }
+fi
+
+remaining=$(pgrep -cf "^${PUPPETEER_PATH}/" 2>/dev/null || echo 0)
+if [ "$remaining" -gt 0 ]; then
+    echo "WARNING: ${remaining} puppeteer procs survived; not clearing cache (a live"
+    echo "         Chromium profile must not be deleted underneath a running browser)"
+    exit 1
+fi
+
+# Safe only now that every browser is dead.
+find "$DAEMONS" -type d \( -name 'Cache_Data' -o -name 'Code Cache' \) -path '*omp.browser*' \
+     -print0 2>/dev/null | xargs -0 -r rm -rf
+
+after_mb=$(du -sm "$DAEMONS" 2>/dev/null | cut -f1)
+echo "cycled: ${nproc} procs stopped, cache ${cache_mb} MB -> ${after_mb:-0} MB"
+echo "omp respawns a browser daemon on the next browser-tool use; nothing to restart."

@@ -56,6 +56,17 @@ Project profiles, the sources of each repository's `AGENTS.override.md`, live in
 
 Everything custom around the harnesses (omp extensions, herdr hooks, launchd jobs, shepherd and CoS scripts) lives in git with a smoke test. A new piece must replace or delete something; adding a daemon or scheduled job needs Tim's go. Prefer an upstream feature once one exists.
 
-[inbox/](inbox/) is the one omp extension: `write agent://<name>[@host]` reaches any herdr agent through a file inbox, never by typing into its terminal (`agent-msg` is the same path for shell scripts). It is owned and frozen: fix bugs, add nothing. Delete it if omp ships cross-session messaging (can1357/oh-my-pi#7537, #14071), but don't plan on that. `python3 -m unittest discover -s agents/inbox` checks the delivery rules.
+[inbox/](inbox/) is the one omp extension: `write agent://<name>[@host]` reaches any herdr agent through a file inbox, never by typing into its terminal (`agent-msg` is the same path for shell scripts). It is owned and frozen: fix bugs, add nothing. Tim decided on 2026-10-05 that home agents become easl tiles and peer messaging moves into easl's omp integration. Delete this once no agent runs in herdr; deckbox waits for easld. omp stays the harness, and custom code stays on its public extension API. Fork only if that integration has to patch omp internals or omp releases break it twice in a month. `python3 -m unittest discover -s agents/inbox` checks the delivery rules.
+
+[shepherd/](shepherd/) is the machine shepherd's health glue for twaldin-home and twaldin-work:
+- `machine-ok`: the headroom gate agents run before heavy work.
+- `machine-watch` (launchd, every 2 min): logs machine health and alerts the shepherd. It also checks deckbox's path to home's auth broker, and runs `omp-update cos`, which restarts the chief of staff fresh when its pane died or its session passed 100 MB.
+- `machine-census` and `fsevents-top`: attribute memory, CPU and file-system churn.
+- `omp-update` (launchd, daily): moves every host to the vetted omp release and restarts idle panes onto it.
+- `quiet-window` and `quiet-check`: book and enforce quiet windows for measured runs.
+- `omp-browser-cycle` (launchd, hourly): recycles omp's headless browsers.
+- ColorSync and GPU diagnostics: `gpu-top`, `colorsync-k`, `cs-measure`, `logout-colorsync-test`.
+
+`shepherd/install.sh` links the scripts into `~/.local/bin`, builds `fsevents-top`, and installs the launchd jobs each host runs; `--check` reports drift. `python3 -m unittest discover -s agents/shepherd/tests` runs one smoke test per script.
 
 Upstream: Matt Pocock skills v1.3.1 at `b40b9b199752462750c56d9a26655981e48a4344`; Vercel references at `063bee94c3f4df8453406c830b0a7df0f2860278`. Source metadata and licenses are retained. Do not run their bulk installers over this selected library.

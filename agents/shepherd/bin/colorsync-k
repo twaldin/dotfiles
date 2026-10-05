@@ -1,0 +1,12 @@
+#!/bin/bash
+# colorsync-k [periods]: how many 5.03 s WindowServer restore_color_preferences chains (K) are running.
+# Counts colorsync.displayservices display-info requests over the last N periods (default 12, ~60 s).
+# K = requests / periods. Each chain costs one synchronous ColorSync request, and one ~57 ms frame hitch,
+# every ~5.03 s (twaldin-home, 2026-09-29). Read-only. Log timestamps lag live by a second or two.
+set -u
+periods=${1:-12}
+secs=$(awk -v p="$periods" 'BEGIN { printf "%d", p * 5.03 + 0.5 }')
+n=$(sudo -n log show --style compact --last "${secs}s" --predicate 'process == "colorsync.displayservices" AND eventMessage BEGINSWITH "ColorSyncDisplayServicesAgent: received XPC_DISPLAY_INFO_REQUEST"' 2>/dev/null | awk 'NR > 1' | wc -l | tr -d ' ')
+displays=$(sudo -n log show --style compact --last 15s --predicate 'process == "colorsync.displayservices" AND eventMessage BEGINSWITH "ColorSyncDisplayServicesAgent: sending display_profile_info"' 2>/dev/null | grep -o 'count = [0-9]*' | tail -1 | awk '{print $3}')
+awk -v n="$n" -v p="$periods" -v s="$secs" -v d="${displays:-?}" \
+    'BEGIN { printf "K=%.1f  (%d requests in %d s = %.2f/s; %s displays per request)\n", n / p, n, s, n / s, d }'

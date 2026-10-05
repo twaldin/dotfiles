@@ -1,0 +1,209 @@
+#!/usr/bin/python3
+"""quiet-window: book and enforce quiet windows for measured runs on twaldin-home.
+
+  quiet-window add START END OWNER LABEL   START/END in UTC, e.g. 2026-10-01T08:30Z; OWNER = herdr agent
+                                           name (preferred: survives pane moves) or pane id
+  quiet-window list | remove ID            remove ends a running window now (it still gets its summary)
+  quiet-window mute ID                     end summary to the shepherd only (owner busy with Tim)
+  quiet-window tick                        run every minute by launchd (net.waldin.quiet-window)
+
+tick: 10 minutes before a window, every other herdr pane gets the hold notice. During the window,
+quiet-check --pane OWNER names processes of other agents at 10%+ CPU; each such pane gets a "stop
+now" prompt (at most every 4 minutes). At the end, the owner and the shepherd get a summary.
+Why (2026-10-01): sky-lead's quiet notices reached only its own panes, so canvas's encode and
+build cancelled bench-judge's measured sitting 24 of 48 legs in."""
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+
+BOOK = os.path.expanduser("~/.config/machine-shepherd/quiet-windows.json")
+STATE = os.path.expanduser("~/.local/state/machine-shepherd/quiet-window-state.json")
+LOG = os.path.expanduser("~/.local/state/machine-shepherd/quiet-window.log")
+# Agent name or pane id; names survive herdr pane moves (pane ids change on every move).
+SHEPHERD = open(os.path.expanduser("~/.config/machine-shepherd/pane")).read().strip() \
+    if os.path.exists(os.path.expanduser("~/.config/machine-shepherd/pane")) else "shepherd"
+HERDR = os.path.expanduser("~/.local/bin/herdr")
+NOTICE_MIN, REPEAT_MIN = 10, 4
+HOLD = ("no builds, renders, encodes, benchmarks, game clients or screen captures; "
+        "editing, reading, git and idle agents are fine")
+
+
+def load(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(data, f, indent=1)
+    os.replace(path + ".tmp", path)
+
+
+def utc(text):
+    return dt.datetime.strptime(text.rstrip("Z"), "%Y-%m-%dT%H:%M").replace(tzinfo=dt.timezone.utc)
+
+
+def local(text):
+    return utc(text).astimezone().strftime("%H:%M")
+
+
+def log(msg):
+    with open(LOG, "a") as f:
+        f.write(f"{dt.datetime.now().strftime('%F %T')} {msg}\n")
+
+
+AGENT_MSG = os.path.expanduser("~/.local/bin/agent-msg")
+
+
+def prompt(pane, text):
+    """Deliver through the agent's omp inbox (agent-msg: an aside at its next step, never
+    typed into the terminal). agent-msg refuses (75) a pane without an inbox that is
+    blocked or focused; the caller retries next tick. True when delivered."""
+    cmd = [AGENT_MSG, "--from", "shepherd", pane, text] if os.path.exists(AGENT_MSG) \
+        else [HERDR, "agent", "prompt", pane, text]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    log(f"msg {pane} rc={r.returncode}: {text[:120]}")
+    return r.returncode == 0
+
+
+def agents():
+    """{pane id: agent name or None} for every herdr agent pane."""
+    try:
+        out = subprocess.run([HERDR, "agent", "list"], capture_output=True, text=True, timeout=20).stdout
+        return {a["pane_id"]: a.get("name") for a in json.loads(out)["result"]["agents"]}
+    except (ValueError, KeyError, subprocess.SubprocessError):
+        return {}
+
+
+def find(book, wid):
+    """A window by id, or by an id it had before its owner's pane moved (former_ids)."""
+    return next((w for w in book if w["id"] == wid or wid in w.get("former_ids", [])), None)
+
+
+def tick():
+    book, state = load(BOOK, []), load(STATE, {})
+    now = dt.datetime.now(dt.timezone.utc)
+    ags = None
+
+    def pane_of(x):
+        """Current pane id of an agent name or pane id; None when no such agent runs."""
+        nonlocal ags
+        if ags is None:
+            ags = agents()
+        return x if x in ags else next((p for p, n in ags.items() if n == x), None)
+
+    for w in book:
+        s = state.setdefault(w["id"], {"noticed": False, "started": False, "ended": False, "last": {}, "hits": {}})
+        start, end = utc(w["start"]), utc(w["end"])
+        span = f"{w['start'][11:16]}-{w['end'][11:16]}Z ({local(w['start'])}-{local(w['end'])} local)"
+        if s["ended"] or not (start - dt.timedelta(minutes=NOTICE_MIN) <= now < end or (now >= end and s["started"])):
+            continue
+        owner, me = pane_of(w["owner"]), pane_of(SHEPHERD)
+        if owner is None and not s.get("owner_missing"):
+            log(f"owner {w['owner']} of {w['id']} not found in herdr")
+            prompt(SHEPHERD, f"shepherd: quiet window {w['id']} names owner {w['owner']}, which no herdr agent "
+                             f"matches (moved pane? use agent names); its own processes will count as offenders.")
+            s["owner_missing"] = True
+        if start - dt.timedelta(minutes=NOTICE_MIN) <= now < end and (not s["noticed"] or s.get("notice_pending")):
+            targets = s["notice_pending"] if s["noticed"] else [p for p in ags if p not in (owner, me)]
+            s["notice_pending"] = [
+                p for p in targets if p in ags and not prompt(
+                    p, f"shepherd: QUIET WINDOW {span} for {w['label']} ({w['owner']}). "
+                       f"Hold during it: {HOLD}. Finish or park heavy work before {local(w['start'])}.")]
+            s["noticed"] = True
+        if start <= now < end:
+            s["started"] = True
+            out = subprocess.run([os.path.expanduser("~/.local/bin/quiet-check"), "--pane", owner or w["owner"]],
+                                 capture_output=True, text=True, timeout=60).stdout
+            offenders = {}
+            for line in out.splitlines():
+                if "<-- not quiet" not in line:
+                    continue
+                # Panes that share a project folder are listed as w2:pA|w2:pB; each of them is asked.
+                m = re.match(r"\s*([\d.]+)%\s+(\d+)\s+(\S+)\s+(w\d+:p\w+(?:\|w\d+:p\w+)*)", line)
+                if m:
+                    for pane in m.group(4).split("|"):
+                        if pane != owner:
+                            offenders.setdefault(pane, []).append(f"{m.group(3)} pid {m.group(2)} {m.group(1)}%")
+                elif "owner unknown" in line:
+                    # A shared omp service child whose cwd matches no pane: the shepherd finds the owner.
+                    u = re.match(r"\s*([\d.]+)%\s+(\d+)\s+(\S+)", line)
+                    if u:
+                        offenders.setdefault(me or SHEPHERD, []).append(
+                            f"UNATTRIBUTED {u.group(3)} pid {u.group(2)} {u.group(1)}% (route to its owner)")
+            if offenders:
+                log(f"offenders in {w['id']}: {offenders}")
+            for pane, procs in offenders.items():
+                s["hits"][pane] = s["hits"].get(pane, 0) + 1
+                last = s["last"].get(pane)
+                if last is None or now - dt.datetime.fromisoformat(last) >= dt.timedelta(minutes=REPEAT_MIN):
+                    if prompt(pane, f"shepherd: STOP NOW. Quiet window {span} for {w['label']} is running, and "
+                                    f"your processes are loading the machine: {', '.join(procs)}. Stop or pause "
+                                    f"them until {local(w['end'])} local; {HOLD}."):
+                        s["last"][pane] = now.isoformat()
+        if now >= end and s["started"] and not s["ended"]:
+            hits = ", ".join(f"{p} x{n}" for p, n in s["hits"].items()) or "none"
+            # A muted owner is busy with Tim (e.g. a live capture in its pane); the shepherd forwards later.
+            targets = s["summary_pending"] if "summary_pending" in s else \
+                [SHEPHERD] if w.get("mute_owner") else [w["owner"], SHEPHERD]
+            s["summary_pending"] = [p for p in targets if not prompt(
+                p, f"shepherd: quiet window {span} for {w['label']} ended. "
+                   f"Panes caught loading the machine (minute samples): {hits}.")]
+            # Retried each tick while a recipient refuses (blocked/focused, no inbox yet), for up to 30 min.
+            s["ended"] = not s["summary_pending"] or now - end > dt.timedelta(minutes=30)
+    keep = [w for w in book if utc(w["end"]) > now - dt.timedelta(hours=12)]
+    save(STATE, {w["id"]: state[w["id"]] for w in keep if w["id"] in state})
+    if len(keep) != len(book):
+        save(BOOK, keep)
+
+
+def main():
+    cmd = sys.argv[1:] or ["list"]
+    book = load(BOOK, [])
+    if cmd[0] == "add" and len(cmd) == 5:
+        start, end = utc(cmd[1]), utc(cmd[2])
+        if end <= start:
+            sys.exit("end must be after start")
+        wid = f"{cmd[1]}-{cmd[3]}"
+        book = [w for w in book if w["id"] != wid] + [
+            {"id": wid, "start": cmd[1], "end": cmd[2], "owner": cmd[3], "label": cmd[4]}]
+        save(BOOK, sorted(book, key=lambda w: w["start"]))
+        print(f"booked {wid}")
+    elif cmd[0] == "remove" and len(cmd) == 2:
+        now = dt.datetime.now(dt.timezone.utc)
+        w = find(book, cmd[1])
+        if w is None:
+            sys.exit(f"no window {cmd[1]}; booked: {', '.join(x['id'] for x in book) or 'none'}")
+        if w and utc(w["start"]) <= now < utc(w["end"]):
+            # Deleting a running window would drop its catch history before the end summary.
+            w["end"] = now.strftime("%Y-%m-%dT%H:%MZ")
+            save(BOOK, book)
+            print(f"ended {cmd[1]} at {w['end']}; the summary follows within a minute")
+        else:
+            save(BOOK, [x for x in book if x is not w])
+            print(f"removed {w['id']}")
+    elif cmd[0] == "mute" and len(cmd) == 2:
+        w = find(book, cmd[1])
+        if w is None:
+            sys.exit(f"no window {cmd[1]}; booked: {', '.join(x['id'] for x in book) or 'none'}")
+        w["mute_owner"] = True
+        save(BOOK, book)
+        print(f"end summary of {w['id']} goes to the shepherd only")
+    elif cmd[0] == "list":
+        for w in book:
+            print(f"{w['id']}  {w['start']} -> {w['end']}  ({local(w['start'])}-{local(w['end'])} local)  "
+                  f"{w['owner']}  {w['label']}")
+    elif cmd[0] == "tick":
+        tick()
+    else:
+        sys.exit(__doc__)
+
+
+main()

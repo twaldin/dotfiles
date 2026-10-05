@@ -1,0 +1,101 @@
+#!/bin/bash
+# logout-colorsync-test STEP: the pre/post-logout ColorSync chain tests agreed with sky-lead (2026-09-29).
+# Run a/b/c ONLY on Tim's "ready", right before his logout, with all agents paused by sky-lead.
+#   baseline      read-only: K now, displays, Agent-p2N identity
+#   a             quit BetterDisplay (graceful), measure K twice over the next ~2 min, leave it quit
+#   b             relaunch BetterDisplay, wait for its screens, measure K       (only if (a) left K unchanged)
+#   c [SCREEN]    disconnect SCREEN (default CanvasTest) 60 s, reconnect, measure K each way (only if (a) left K unchanged)
+#   post          after login, before any agent touches a screen: K + restored screens + Agent-p2N identity,
+#                 written to ~/.local/state/machine-shepherd/k-readout.txt and sent to sky-lead and bench-judge
+# K = ColorSync display-info requests per 5.03 s period = WindowServer restore_color_preferences chains.
+# bench-judge's prelaunch bar passes at K <= 2.
+set -u
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+BD=${BETTERDISPLAYCLI:-/opt/homebrew/bin/betterdisplaycli}
+YABAI=${YABAI_BIN:-/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai}
+LOG=$HOME/.local/state/machine-shepherd/logout-test.log
+READOUT=$HOME/.local/state/machine-shepherd/k-readout.txt
+LEASE=$HOME/.config/machine-shepherd/screens/Agent-p2N
+
+say() { printf '%s %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"; }
+k() { colorsync-k "${1:-12}"; }                       # "K=6.8  (82 requests in 60 s = 1.37/s; 6 displays per request)"
+kval() { k "${1:-12}" | sed -E 's/^K=([0-9.]+).*/\1/'; }
+screens() {                                           # "name=displayID ..." for every display
+    local ids id name out=""
+    ids=$("$YABAI" -m query --displays 2>/dev/null | /usr/bin/python3 -c 'import sys,json; print(" ".join(str(d["id"]) for d in json.load(sys.stdin)))' 2>/dev/null)
+    for id in $ids; do
+        # --displayID can print several JSON objects back to back (the virtual screen and its display)
+        name=$("$BD" get --displayID="$id" --identifiers 2>/dev/null | /usr/bin/python3 -c 'import sys,json; print(json.JSONDecoder().raw_decode(sys.stdin.read().strip())[0].get("name",""))' 2>/dev/null)
+        out="$out ${name:-built-in}=$id"
+    done
+    echo "${out# }"
+}
+p2n() {
+    local j
+    j=$("$BD" get --name=Agent-p2N --identifiers 2>/dev/null) || { echo "Agent-p2N: not present"; return; }
+    printf '%s' "$j" | /usr/bin/python3 -c 'import sys,json; d=json.load(sys.stdin); print("Agent-p2N: displayID %s UUID %s" % (d.get("displayID"), d.get("UUID")))'
+    [ -f "$LEASE" ] && echo "lease: $(cat "$LEASE")" || echo "lease: missing"
+}
+settle() { say "waiting $1 s for a clean log window"; sleep "$1"; }
+
+case "${1:-}" in
+baseline)
+    say "baseline: $(k 12)"
+    say "screens: $(screens)"
+    say "$(p2n | tr '\n' ' ')"
+    ;;
+a)
+    before=$(kval 12); say "(a) before quit: $(k 12)"
+    say "(a) quitting BetterDisplay"
+    osascript -e 'quit app "BetterDisplay"' >/dev/null 2>&1
+    for _ in $(seq 1 30); do pgrep -x BetterDisplay >/dev/null || break; sleep 1; done
+    if pgrep -x BetterDisplay >/dev/null; then say "(a) BetterDisplay did not quit within 30 s; stopping (nothing killed)"; exit 1; fi
+    say "(a) BetterDisplay quit; screens now: $(screens)"
+    settle 70; k1=$(k 12); say "(a) +70 s: $k1"
+    settle 60; k2=$(k 12); say "(a) +130 s: $k2"
+    after=$(printf '%s' "$k2" | sed -E 's/^K=([0-9.]+).*/\1/')
+    verdict=$(awk -v b="$before" -v a="$after" 'BEGIN {
+        if (a <= 0.5) print "K fell to ~0: BetterDisplay drives the chains. Skip (b)/(c); next: disable its software/combined brightness on the built-in display, or keep it quit.";
+        else if (a >= b - 0.5) print "K unchanged: the chains live in WindowServer. Run (b), then (c).";
+        else print "K fell partly (" b " -> " a "): mixed; run (b) to see what relaunch adds." }')
+    say "(a) verdict: $verdict"
+    ;;
+b)
+    before=$(kval 12); say "(b) before relaunch: $(k 12)"
+    open -g -a BetterDisplay
+    for _ in $(seq 1 90); do "$BD" get --name=CanvasTest --identifiers >/dev/null 2>&1 && break; sleep 1; done
+    sleep 5; say "(b) BetterDisplay relaunched; screens: $(screens)"
+    settle 70; kb=$(k 12); say "(b) +75 s: $kb"
+    after=$(printf '%s' "$kb" | sed -E 's/^K=([0-9.]+).*/\1/')
+    say "(b) relaunch added $(awk -v b="$before" -v a="$after" 'BEGIN { printf "%.1f", a - b }') chains"
+    ;;
+c)
+    s=${2:-CanvasTest}
+    "$BD" get --name="$s" --identifiers >/dev/null 2>&1 || { say "(c) screen $s not present; stopping"; exit 1; }
+    before=$(kval 12); say "(c) before: $(k 12)"
+    "$BD" set --name="$s" --connected=off && say "(c) $s disconnected; screens: $(screens)"
+    settle 65; koff=$(k 12); say "(c) disconnected +65 s: $koff"
+    "$BD" set --name="$s" --connected=on && say "(c) $s reconnected; screens: $(screens)"
+    settle 65; kon=$(k 12); say "(c) reconnected +65 s: $kon"
+    say "(c) net change after disconnect+reconnect: $(awk -v b="$before" -v a="$(printf '%s' "$kon" | sed -E 's/^K=([0-9.]+).*/\1/')" 'BEGIN { printf "%+.1f", a - b }') chains"
+    ;;
+post)
+    ws=$(sudo -n pgrep -x WindowServer | head -1)
+    up=$(( $(date +%s) - $(date -j -f '%a %b %d %T %Y' "$(sudo -n ps -o lstart= -p "$ws" | sed 's/  */ /g; s/^ //; s/ $//')" +%s) ))
+    [ "$up" -lt 65 ] && { say "post: WindowServer $ws is ${up}s old; waiting for a full 60 s window"; sleep $(( 65 - up )); }
+    kp=$(k 12)
+    {
+        echo "shepherd K readout ($(date '+%F %T'), after logout; no agent has touched a screen)"
+        echo "WindowServer pid $ws, up $(( up > 65 ? up : 65 ))+ s"
+        echo "$kp" | awk '{ v = substr($1, 3); printf "K ~ %d chains | %s\n", v + 0.5, $0 }'
+        echo "screens: $(screens)"
+        p2n
+        awk -v k="$(printf '%s' "$kp" | sed -E 's/^K=([0-9.]+).*/\1/')" 'BEGIN { if (k <= 2.4) print "bench-judge bar (K <= 2): PASS"; else print "bench-judge bar (K <= 2): FAIL; which screens to keep is Tim/sky-lead'"'"'s call" }'
+    } | tee "$READOUT" | tee -a "$LOG"
+    if [ "${2:-}" != "--no-send" ]; then
+        for t in sky-lead bench-judge; do "$HOME/.local/bin/agent-msg" --from shepherd "$t" "$(cat "$READOUT")" >/dev/null 2>&1 && echo "sent to $t" || echo "could not reach $t; readout is in $READOUT"; done
+    fi
+    ;;
+*)
+    sed -n '2,13p' "$0"; exit 2 ;;
+esac

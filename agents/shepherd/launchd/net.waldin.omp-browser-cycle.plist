@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.waldin.omp-browser-cycle</string>
+
+    <!-- Recycles omp's headless browser daemons when their Chromium disk cache
+         exceeds the threshold. Never touches omp, herdr, agent panes, or Tim's
+         own browser: the script matches on binary path under ~/.omp/puppeteer.
+         Under threshold it exits without killing anything, so most runs are a
+         no-op `du`. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/twaldin/.local/bin/omp-browser-cycle</string>
+    </array>
+
+    <!-- Hourly. The cache took ~34 h to reach 5.6 GB, so hourly checks catch
+         growth long before fseventsd's backlog becomes expensive. -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>THRESHOLD_MB</key>
+        <string>1024</string>
+        <key>PATH</key>
+        <string>/Users/twaldin/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/twaldin/.local/state/omp-browser-cycle.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/twaldin/.local/state/omp-browser-cycle.log</string>
+
+    <!-- Background priority: this is maintenance and must never compete with a
+         native measurement run for CPU or I/O. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

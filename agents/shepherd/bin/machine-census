@@ -1,0 +1,347 @@
+#!/usr/bin/python3
+"""machine-census: who is using this Mac's memory and CPU, grouped by owner.
+
+Memory is phys_footprint (top's MEM column), the metric Activity Monitor shows
+and the one that drives memory pressure. RSS under-reports compressed and
+swapped memory, so it is never used here. Runs `ps`/`top` under `sudo -n` when
+available, because unprivileged `ps` inside a herdr pane hides processes.
+
+usage: machine-census [--json] [--sample SECONDS] [--rows N]
+"""
+import argparse
+import ctypes
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections import defaultdict
+
+HOME = os.path.expanduser("~")
+SESSIONS = os.path.join(HOME, ".omp/agent/sessions")
+
+
+def run(cmd, timeout=30):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def can_sudo():
+    return subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+
+
+def size_mb(tok):
+    m = re.match(r"([\d.]+)([BKMG])", tok)
+    if not m:
+        return 0.0
+    n, unit = float(m.group(1)), m.group(2)
+    return n * {"B": 1 / 1048576, "K": 1 / 1024, "M": 1, "G": 1024}[unit]
+
+
+# launchd starts XPC helpers (com.apple.WebKit.WebContent and friends) on an app's behalf, so
+# their ppid is 1 and their path is /System/...: Search's 13 page processes (3.4 GB) and
+# Canvas's HTML tiles once all read as "macOS other". macOS records the app that asked for each
+# helper as its "responsible" process; this is the call `launchctl procinfo` reports it from.
+# Only .xpc bundles use it: a detached agent job is ppid 1 too, but its responsible process is
+# the terminal it came from, and filing it under "app: Ghostty" would hide whose job it is.
+try:
+    _responsible = ctypes.CDLL(None).responsibility_get_pid_responsible_for_pid
+    _responsible.argtypes, _responsible.restype = [ctypes.c_int], ctypes.c_int
+except (AttributeError, OSError):
+    _responsible = None
+
+
+def responsible_pid(pid):
+    return _responsible(pid) if _responsible else pid
+
+
+def processes(sudo):
+    pre = ["sudo", "-n"] if sudo else []
+    procs = {}
+    for line in run(pre + ["ps", "-axww", "-o", "pid=,ppid=,etime=,command="]).splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        pid, ppid = int(parts[0]), int(parts[1])
+        procs[pid] = {"pid": pid, "ppid": ppid, "etime": parts[2], "cmd": parts[3], "mem": 0.0, "cpu": 0.0, "cmprs": 0.0}
+    return procs
+
+
+def sample_top(procs, sudo, seconds):
+    pre = ["sudo", "-n"] if sudo else []
+    # Generous timeout: at 16:05 on 09-29 (twaldin-home, ~2,000 processes, load average ~60) a run
+    # reported every footprint as 0, which is what an empty top output produces.
+    out = run(pre + ["top", "-l", "2", "-s", str(seconds), "-stats", "pid,cpu,mem,cmprs"], timeout=seconds + 60)
+    blocks = out.split("Processes:")
+    last = blocks[-1] if blocks else ""
+    header = {}
+    m = re.search(r"CPU usage: ([\d.]+)% user, ([\d.]+)% sys, ([\d.]+)% idle", last)
+    if m:
+        header["cpu_idle"] = float(m.group(3))
+    rows = False
+    header["rows"] = 0
+    for line in last.splitlines():
+        if line.startswith("PID"):
+            rows = True
+            continue
+        if not rows:
+            continue
+        parts = line.split()
+        if len(parts) < 3 or not parts[0].isdigit():
+            continue
+        p = procs.get(int(parts[0]))
+        if p is None:
+            continue
+        try:
+            p["cpu"] = float(parts[1])
+        except ValueError:
+            pass
+        p["mem"] = size_mb(parts[2])
+        if len(parts) > 3:
+            p["cmprs"] = size_mb(parts[3])
+        header["rows"] += 1
+    return header
+
+
+def system_memory():
+    vm = run(["vm_stat"])
+    page = int(re.search(r"page size of (\d+)", vm).group(1)) if "page size of" in vm else 16384
+
+    def pages(label):
+        m = re.search(label + r":\s+(\d+)", vm)
+        return int(m.group(1)) * page / 1073741824 if m else 0.0
+
+    total = int(run(["sysctl", "-n", "hw.memsize"]).strip() or 0) / 1073741824
+    swap = run(["sysctl", "-n", "vm.swapusage"])
+    sm = re.search(r"used = ([\d.]+)M", swap)
+    free_pct = re.search(r"free percentage: (\d+)%", run(["memory_pressure", "-Q"]))
+    return {
+        "total_gb": round(total, 1),
+        "compressed_gb": round(pages("Pages occupied by compressor"), 2),
+        "wired_gb": round(pages("Pages wired down"), 2),
+        "swap_used_gb": round(float(sm.group(1)) / 1024, 2) if sm else 0.0,
+        "free_pct": int(free_pct.group(1)) if free_pct else None,
+    }
+
+
+APP_RE = re.compile(r"/([^/]+)\.app/")
+SPOTLIGHT = {"mds", "mds_stores", "mdworker", "mdworker_shared", "corespotlightd", "mdbulkimport", "mdsync", "spotlightknowledged"}
+SYSTEM_NAMED = {"WindowServer", "kernel_task", "fseventsd", "backupd", "coreaudiod", "launchd", "logd", "mediaanalysisd", "photoanalysisd"}
+
+
+def exe_name(cmd):
+    first = cmd.split(" ", 1)[0]
+    return os.path.basename(first)
+
+
+def own_class(p):
+    """Class a process gets from its own command line, or None to inherit."""
+    cmd = p["cmd"]
+    name = exe_name(cmd)
+    if ".omp/puppeteer/" in cmd:
+        return "omp headless browser"
+    if name == "omp" or cmd.startswith("omp "):
+        if "__omp_worker_daemon_broker" in cmd:
+            return "omp daemon brokers"
+        if "__omp_worker_js_eval" in cmd or "__omp_worker_py" in cmd:
+            return "omp eval kernels"
+        if "__omp_worker_lsp" in cmd:
+            return "omp LSP"
+        if "__omp_worker" in cmd:
+            return "omp workers"
+        return "omp agents"
+    if "zmx attach" in cmd and "canvas." in cmd:
+        return "canvas tiles"
+    if name in ("herdr",):
+        return "herdr"
+    if name in ("limactl", "colima") or "com.apple.Virtualization.VirtualMachine" in cmd or name.startswith("qemu-system"):
+        return "colima/docker VM"
+    if name in SPOTLIGHT:
+        return "Spotlight"
+    if name in SYSTEM_NAMED:
+        return name
+    # Match the bundle only in the executable path. npm exec rewrites its title to include
+    # its environment (FPATH=...:/Applications/OrbStack.app/...), which once filed a whole
+    # vitest tree under "app: OrbStack".
+    exe = cmd.split(" -", 1)[0] if cmd.startswith("/") else cmd.split(" ", 1)[0]
+    m = APP_RE.search(exe)
+    if m:
+        app = m.group(1)
+        if app.startswith("Google Chrome for Testing"):
+            return "omp headless browser"
+        return "app: " + app
+    return None
+
+
+# Children inherit the class of the nearest classified ancestor, relabelled so
+# that e.g. a dev server started by an agent is not mistaken for the agent.
+INHERIT = {
+    "omp agents": "agent subprocesses",
+    "omp daemon brokers": "agent daemons (dev servers etc.)",
+    "omp LSP": "omp LSP",
+    "omp eval kernels": "omp eval kernels",
+    "omp workers": "omp workers",
+    "canvas tiles": "agent subprocesses",
+    "herdr": "herdr pane shells",
+}
+
+
+def classify(procs):
+    cache = {}
+
+    def cls(pid, depth=0):
+        if pid in cache:
+            return cache[pid]
+        p = procs.get(pid)
+        if p is None or depth > 64:
+            return None
+        c = own_class(p)
+        if c is None:
+            parent = cls(p["ppid"], depth + 1) if p["ppid"] not in (0, 1) else None
+            if parent is None and p["ppid"] in (0, 1) and ".xpc/" in p["cmd"]:
+                owner = responsible_pid(pid)
+                if owner != pid and owner in procs:
+                    parent = cls(owner, depth + 1)
+            if parent is not None:
+                c = INHERIT.get(parent, parent)
+        if c is None:
+            c = "macOS other" if p["cmd"].startswith(("/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/")) else "other: " + exe_name(p["cmd"])
+        cache[pid] = c
+        return c
+
+    for pid in procs:
+        procs[pid]["class"] = cls(pid)
+
+
+def pane_map():
+    out = run(["herdr", "agent", "list"])
+    try:
+        agents = json.loads(out)["result"]["agents"]
+    except Exception:
+        return {}
+    return {a.get("agent_session", {}).get("value"): a.get("pane_id") for a in agents if a.get("agent_session")}
+
+
+def session_of(pid, cmd, sudo):
+    """Session JSONL for an omp process: sessions/<project>/<file>.jsonl, never an artifact."""
+    m = re.search(r"--resume[= ](\S+)", cmd)
+    if m:
+        ref = m.group(1)
+        if ref.endswith(".jsonl") and os.path.exists(ref):
+            return ref
+        hits = glob.glob(os.path.join(SESSIONS, "*", f"*{os.path.basename(ref)}*.jsonl"))
+        if len(hits) == 1:
+            return hits[0]
+    pre = ["sudo", "-n"] if sudo else []
+    for line in run(pre + ["lsof", "-a", "-p", str(pid), "-Fn"], timeout=10).splitlines():
+        path = line[1:]
+        if line.startswith("n") and path.endswith(".jsonl") and os.path.dirname(os.path.dirname(path)) == SESSIONS:
+            return path
+    return None
+
+
+def descendants(procs, root):
+    kids = defaultdict(list)
+    for p in procs.values():
+        kids[p["ppid"]].append(p["pid"])
+    out, stack = [], list(kids[root])
+    while stack:
+        pid = stack.pop()
+        out.append(pid)
+        stack.extend(kids[pid])
+    return out
+
+
+def agent_rows(procs, sudo):
+    panes = pane_map()
+    rows = []
+    for p in procs.values():
+        if p["class"] != "omp agents":
+            continue
+        sess = session_of(p["pid"], p["cmd"], sudo)
+        sub = [procs[d] for d in descendants(procs, p["pid"]) if procs[d]["class"] == "agent subprocesses"]
+        chain, q = [], p
+        while q and q["ppid"] not in (0, 1):
+            q = procs.get(q["ppid"])
+            if q:
+                chain.append(q)
+        where = panes.get(sess) or ("canvas" if any("canvas." in c["cmd"] for c in chain) else "?")
+        rows.append({
+            "pid": p["pid"],
+            "pane": where,
+            "uptime": p["etime"],
+            "mem_mb": round(p["mem"]),
+            "cpu": p["cpu"],
+            "session_mb": round(os.path.getsize(sess) / 1048576, 1) if sess and os.path.exists(sess) else None,
+            "project": os.path.basename(os.path.dirname(sess)).strip("-") if sess else None,
+            "sub_mem_mb": round(sum(s["mem"] for s in sub)),
+            "sub_top": sorted(((round(s["mem"]), exe_name(s["cmd"])) for s in sub), reverse=True)[:2],
+        })
+    return sorted(rows, key=lambda r: -(r["mem_mb"] + r["sub_mem_mb"]))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--sample", type=int, default=3)
+    ap.add_argument("--rows", type=int, default=18)
+    ap.add_argument("--detail", action="store_true", help="list the heaviest members of each group")
+    a = ap.parse_args()
+
+    sudo = can_sudo()
+    procs = processes(sudo)
+    header = sample_top(procs, sudo, a.sample)
+    # A failed ps or top would report every footprint as 0. Fail instead: machine-watch skips the run,
+    # where zeros would read as a sudden multi-GB growth on the next good sample.
+    if not procs or not header["rows"]:
+        sys.exit(f"machine-census: sample failed ({len(procs)} processes from ps, {header['rows']} rows from top)")
+    classify(procs)
+    groups = defaultdict(lambda: {"mem_mb": 0.0, "cpu": 0.0, "procs": 0})
+    for p in procs.values():
+        g = groups[p["class"]]
+        g["mem_mb"] += p["mem"]
+        g["cpu"] += p["cpu"]
+        g["procs"] += 1
+    mem = system_memory()
+    agents = agent_rows(procs, sudo)
+    report = {
+        "ts": int(time.time()),
+        "host": os.uname().nodename.split(".")[0],
+        "sudo": sudo,
+        "memory": mem,
+        "cpu_idle": header.get("cpu_idle"),
+        "footprint_total_gb": round(sum(p["mem"] for p in procs.values()) / 1024, 1),
+        "groups": {k: {"mem_mb": round(v["mem_mb"]), "cpu": round(v["cpu"], 1), "procs": v["procs"]} for k, v in groups.items()},
+        "agents": agents,
+        # Largest holders of compressed memory: a single hoarder here (fseventsd once held 14 GB) is what
+        # machine-watch's compressed_high rule looks for; many small holders are normal.
+        "top_compressed": [{"pid": p["pid"], "name": exe_name(p["cmd"]), "cmprs_mb": round(p["cmprs"]), "mem_mb": round(p["mem"])}
+                           for p in sorted(procs.values(), key=lambda p: -p["cmprs"])[:3]],
+    }
+    if a.json:
+        print(json.dumps(report))
+        return
+
+    print(f"{report['host']}: RAM {mem['total_gb']:.0f} GB | process footprints {report['footprint_total_gb']} GB | "
+          f"compressed {mem['compressed_gb']} GB | swap {mem['swap_used_gb']} GB | free {mem['free_pct']}% | "
+          f"cpu idle {report['cpu_idle']}%" + ("" if sudo else " | WARNING: no sudo, counts partial"))
+    print(f"  {'MEM GB':>7} {'CPU%':>6} {'PROCS':>5}  GROUP")
+    for k, v in sorted(report["groups"].items(), key=lambda kv: -kv[1]["mem_mb"])[: a.rows]:
+        print(f"  {v['mem_mb'] / 1024:7.2f} {v['cpu']:6.1f} {v['procs']:5d}  {k}")
+        if a.detail:
+            members = sorted((p for p in procs.values() if p["class"] == k), key=lambda p: -(p["mem"] + 20 * p["cpu"]))[:4]
+            print("                        " + ", ".join(f"{exe_name(p['cmd'])}[{p['pid']}] {p['mem']:.0f}MB/{p['cpu']:.0f}%" for p in members))
+    print(f"  agents ({len(agents)} omp sessions):")
+    print(f"  {'PID':>6} {'PANE':<7} {'UPTIME':>12} {'MEM MB':>7} {'CPU%':>5} {'SESS MB':>7} {'SUB MB':>7}  PROJECT / heaviest subprocess")
+    for r in agents:
+        sub = ", ".join(f"{n} {m}MB" for m, n in r["sub_top"])
+        sess = "-" if r["session_mb"] is None else f"{r['session_mb']:.0f}"
+        print(f"  {r['pid']:>6} {r['pane']:<7} {r['uptime']:>12} {r['mem_mb']:>7} {r['cpu']:>5.1f} {sess:>7} {r['sub_mem_mb']:>7}  {r['project']}" + (f" / {sub}" if sub else ""))
+
+
+if __name__ == "__main__":
+    main()
