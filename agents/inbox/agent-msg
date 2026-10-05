@@ -6,9 +6,9 @@
 Agents with the omp-inbox extension use `write agent://<name>[@<host>]`, which runs this.
 Shell scripts, and panes started before the extension, call it directly.
 
-The text goes to the agent's omp inbox and arrives as an agent-attributed aside at its
-next step boundary. It never enters a half-typed draft, never answers an open question,
-and never stops the agent's run. `@<host>` delivers on that host over ssh.
+The text goes to the agent's omp inbox and arrives as an agent-attributed message at its
+next step boundary; a busy agent's long `wait` is interrupted so it sees it. It never enters
+a half-typed draft or answers an open question. `@<host>` delivers on that host over ssh.
 
 A pane started before the extension was installed has no inbox yet. Then this falls back
 to `herdr agent prompt`, which does type into the pane, so it refuses (exit 75) while the

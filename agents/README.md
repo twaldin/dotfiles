@@ -1,8 +1,8 @@
 # Agent setup
 
-One maintained skill library, small project guidance, and native harnesses. OMP runs tickets; Codex can be used entirely on its own.
+One maintained skill library, small project guidance, and native harnesses. OMP runs the sessions; Codex can be used entirely on its own.
 
-`skills.json` selects 21 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. The work-system guide is globally discoverable and loads workspace/repository policy only for relevant ticket operations. Machine-specific procedure (such as `mac-gui` for Spaces, yabai and virtual screens) lives in skills, not in `instructions.md`, because skill descriptions reach omp subagents and AGENTS.md files do not.
+`skills.json` selects 21 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. Machine-specific procedure (such as `mac-gui` for Spaces, yabai and virtual screens) lives in skills, not in `instructions.md`, because skill descriptions reach omp subagents and AGENTS.md files do not.
 
 ## Install and verify
 
@@ -51,5 +51,11 @@ Efforts start from the chief-of-staff session ([cos/](cos/)) or a conversation. 
 Work and personal are separate deployments. Lindy code, accounts, project guidance, and sessions stay on work, where the work seat (`~/work-agent-system/SEAT.md` on twaldin-work) creates lanes. Personal projects merge after their checks and reviews pass, unless Tim holds them. For Lindy, the agent that opens a PR against `main` arms auto-merge when it opens, unless Tim holds it or it waits on an open PR; GitHub's required checks and approvals decide the merge.
 
 Project profiles, the sources of each repository's `AGENTS.override.md`, live in `~/agent-system/policy/repos/` and `~/.config/agent-setup/projects/`.
+
+## Custom glue
+
+Everything custom around the harnesses (omp extensions, herdr hooks, launchd jobs, shepherd and CoS scripts) lives in git with a smoke test. A new piece must replace or delete something; adding a daemon or scheduled job needs Tim's go. Prefer an upstream feature once one exists.
+
+[inbox/](inbox/) is the one omp extension: `write agent://<name>[@host]` reaches any herdr agent through a file inbox, never by typing into its terminal (`agent-msg` is the same path for shell scripts). It is owned and frozen: fix bugs, add nothing. Delete it if omp ships cross-session messaging (can1357/oh-my-pi#7537, #14071), but don't plan on that. `python3 -m unittest discover -s agents/inbox` checks the delivery rules.
 
 Upstream: Matt Pocock skills v1.3.1 at `b40b9b199752462750c56d9a26655981e48a4344`; Vercel references at `063bee94c3f4df8453406c830b0a7df0f2860278`. Source metadata and licenses are retained. Do not run their bulk installers over this selected library.

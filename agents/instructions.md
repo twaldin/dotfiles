@@ -12,6 +12,7 @@
   - Niche types: `grok` (Grok 4.7) for small reviews and second opinions; `sonic` (GLM 5.3 Flash) for mechanical fan-outs over ~10 agents.
   - Subagents never see this file, so brief them on any rule here that their task touches.
 - To message another agent, use `write agent://<name>`. It reaches your subagents and every herdr agent on this machine; add `@<host>` for another machine, e.g. `agent://cos@twaldin-home`. Never use `herdr agent prompt` or `send-keys` on a pane that is running: they type into Tim's terminal, so the text can land in his draft or answer his open question.
+- Keep Tim's agent setup small. Custom glue (omp extensions, herdr hooks, launchd jobs, agent-system scripts) lives in git with a smoke test and must replace or delete something; adding a daemon or scheduled job needs Tim's go.
 
 # Shared machines
 
