@@ -7,7 +7,7 @@ set -eu
 
 COS_HOME="$HOME/cos"
 PROMPT_SRC="$HOME/dotfiles/agents/cos/COS.md"
-MODEL="${COS_MODEL:-anthropic/claude-opus-5-5:high}"
+MODEL="${COS_MODEL:-anthropic/claude-opus-5-5:xhigh}"
 HERDR="${HERDR:-herdr}"
 
 mkdir -p "$COS_HOME/.omp" "$COS_HOME/efforts"
@@ -26,9 +26,16 @@ if "$HERDR" agent get cos >/dev/null 2>&1; then
   "$HERDR" pane close "$old_pane"
 fi
 
-set -- --cwd "$COS_HOME" --label cos --no-focus
-[ -n "${HERDR_WORKSPACE_ID:-}" ] && set -- "$@" --workspace "$HERDR_WORKSPACE_ID"
-pane=$("$HERDR" tab create "$@" | jq -r '.result.root_pane.pane_id // .result.root_pane')
+# The CoS lives in the `ops` workspace; create it if missing.
+ws=$("$HERDR" workspace list | jq -r '.result.workspaces[] | select(.label == "ops") | .workspace_id' | head -n 1)
+if [ -z "$ws" ]; then
+  created=$("$HERDR" workspace create --cwd "$COS_HOME" --label ops --no-focus)
+  ws=$(printf '%s' "$created" | jq -r '.result.workspace.workspace_id')
+  pane=$(printf '%s' "$created" | jq -r '.result.root_pane.pane_id')
+  "$HERDR" tab rename "$(printf '%s' "$created" | jq -r '.result.tab.tab_id')" cos >/dev/null 2>&1 || true
+else
+  pane=$("$HERDR" tab create --workspace "$ws" --cwd "$COS_HOME" --label cos --no-focus | jq -r '.result.root_pane.pane_id')
+fi
 
 "$HERDR" agent start cos --kind omp --pane "$pane" -- --model "$MODEL"
 "$HERDR" agent prompt cos "Start of session: follow the Start of session steps."
