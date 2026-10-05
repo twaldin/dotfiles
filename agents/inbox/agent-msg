@@ -3,9 +3,13 @@
 
     agent-msg <agent> <text...> [--from NAME]
 
-The text goes to the agent's omp inbox (the omp-inbox extension) and arrives as an
-agent-attributed aside at its next step boundary. It never enters a half-typed draft,
-never answers an open question, and never stops the agent's run.
+Agents don't call this directly: in omp, `write agent://<name>` (or `<name>@<host>`)
+reaches other sessions through the omp-inbox extension, which runs this. Shell scripts
+may call it.
+
+The text goes to the agent's omp inbox and arrives as an agent-attributed aside at its
+next step boundary. It never enters a half-typed draft, never answers an open question,
+and never stops the agent's run.
 
 A pane started before the extension was installed has no inbox yet. Then this falls back
 to `herdr agent prompt`, which does type into the pane, so it refuses (exit 75) while the
@@ -15,6 +19,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -34,7 +39,12 @@ def herdr():
 def agent(name):
     r = subprocess.run([herdr(), 'agent', 'get', name], capture_output=True, text=True)
     if r.returncode:
-        sys.exit(f'agent-msg: no herdr agent named {name!r} on this host')
+        listed = subprocess.run([herdr(), 'agent', 'list'], capture_output=True, text=True)
+        try:
+            names = sorted(a['name'] for a in json.loads(listed.stdout)['result']['agents'] if a.get('name'))
+        except (ValueError, KeyError):
+            names = []
+        sys.exit(f'agent-msg: no herdr agent named {name!r} on this host. Live agents: {", ".join(names) or "none"}')
     return json.loads(r.stdout)['result']['agent']
 
 
@@ -53,14 +63,15 @@ def live_inbox(info):
 
 
 def sender():
+    host = socket.gethostname().split('.')[0]
     pane = os.environ.get('HERDR_PANE_ID')
     if pane:
         r = subprocess.run([herdr(), 'agent', 'list'], capture_output=True, text=True)
         if r.returncode == 0:
             for a in json.loads(r.stdout)['result']['agents']:
                 if a.get('pane_id') == pane and a.get('name'):
-                    return a['name']
-    return 'an agent'
+                    return f"{a['name']}@{host}"
+    return f'shell@{host}'
 
 
 def main():
@@ -74,8 +85,9 @@ def main():
         sys.exit('agent-msg: empty message')
     info = agent(args.agent)
     inbox = live_inbox(info)
+    origin = args.sender or sender()
     if inbox:
-        payload = {'from': args.sender or sender(), 'text': text, 'sent_at': time.time()}
+        payload = {'from': origin, 'text': text, 'sent_at': time.time()}
         fd, temporary = tempfile.mkstemp(prefix='.', suffix='.tmp', dir=inbox)
         with os.fdopen(fd, 'w') as out:
             json.dump(payload, out)
@@ -87,7 +99,11 @@ def main():
         print(f'agent-msg: {args.agent} has no inbox yet and is {why}; not typing into it. '
               'Retry later, or restart that pane to load omp-inbox.', file=sys.stderr)
         sys.exit(75)
-    sys.exit(subprocess.run([herdr(), 'agent', 'prompt', args.agent, text], stdout=subprocess.DEVNULL).returncode)
+    typed = f'[message from {origin}; reply with write agent://{origin}] {text}'
+    result = subprocess.run([herdr(), 'agent', 'prompt', args.agent, typed], stdout=subprocess.DEVNULL)
+    if result.returncode == 0:
+        print(f'agent-msg: typed into {args.agent} (no inbox yet)')
+    sys.exit(result.returncode)
 
 
 if __name__ == '__main__':
