@@ -2,7 +2,7 @@
 
 One maintained skill library, small project guidance, and native harnesses. OMP runs tickets; Codex can be used entirely on its own.
 
-`skills.json` selects 26 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. The work-system guide is globally discoverable and loads workspace/repository policy only for relevant ticket operations.
+`skills.json` selects 21 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. The work-system guide is globally discoverable and loads workspace/repository policy only for relevant ticket operations. Machine-specific procedure (such as `mac-gui` for Spaces, yabai and virtual screens) lives in skills, not in `instructions.md`, because skill descriptions reach omp subagents and AGENTS.md files do not.
 
 ## Install and verify
 
@@ -11,15 +11,16 @@ Requires Python 3.11+ and Bun for existing OMP YAML settings. Run separately on 
 ```sh
 python3 agents/install.py                         # preview
 python3 agents/install.py --apply                 # archive and install
+python3 agents/install.py --library-only --apply  # skills, instructions and agents only; no harness settings
 python3 agents/verify.py                          # native OMP, no model turn
 python3 agents/verify_codex.py                    # native Codex, no model turn
 ```
 
-`~/.agents/skills` is the canonical discovery path. Codex, Claude, OMP, Pi, Factory, Cursor, and other detected global skill directories point to it. Generated skill/reference files live in `~/.local/share/agent-setup/library`. Codex's native `.system` skills and installed native plugins remain separate from the selected catalog. Generated vendor plugin manifests are omitted so skill names are consistent across harnesses.
+`~/.agents/skills` is the canonical discovery path. Codex, Claude, OMP, Pi, Factory, Cursor, and other detected global skill directories point to it. Generated skill/reference files live in `~/.local/share/agent-setup/library`. Codex's native `.system` skills, Claude Code's `synced` organization skills, and installed native plugins remain separate from the selected catalog and survive reinstalls. Generated vendor plugin manifests are omitted so skill names are consistent across harnesses.
 
-Global AGENTS/CLAUDE entry points link to `instructions.md`: concise writing, simple solutions, local authentication, and respect for project scope. Native browser/computer tools come first. Herdr is the only retained custom hook. Old custom MCP servers, imported workflow plugins, and legacy instruction/skill copies are archived; native capabilities and model accounts stay local.
+Global AGENTS/CLAUDE entry points link to `instructions.md`; never edit an installed copy, because a regular file there silently forks from the source. Native browser/computer tools come first. Herdr is the only retained custom hook. Extensions installed by other tools (herdr, Canvas) are left alone. Old custom MCP servers, imported workflow plugins, and legacy instruction/skill copies are archived; native capabilities and model accounts stay local.
 
-`omp.json` is the shared OMP baseline. It owns model roles and the explicitly listed shared preferences; installation replaces the entire role map, so removed roles such as vision stay unset. Keep permanent shared changes here and install separately on home, work and Deckbox. Interactive global role changes can cause drift until the next install. Authentication, provider accounts, local tools/connections, QA consent and project discovery exclusions remain machine-local.
+`omp.json` is the shared OMP baseline. It owns model roles and the explicitly listed shared preferences; installation replaces the entire role map, so removed roles such as vision stay unset. Fallback chains merge per role: the baseline's chains win, other roles keep their local chains. Keep permanent shared changes here and install separately on home, work and Deckbox. Interactive global role changes can cause drift until the next install. Authentication, provider accounts, local tools/connections, QA consent, Codex reset redemption, thinking-block display and project discovery exclusions remain machine-local; exclusions for directories that no longer exist are dropped.
 
 Native project settings and explicit session overrides can supersede the global baseline. Existing owners retain their saved models when available; installing a new default does not migrate or replace them. Future task launches reload settings, so verify the actual helper model when counting an independent review. A model listed by the native catalog confirms configured authentication, not a successful inference or available quota.
 

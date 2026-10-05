@@ -22,16 +22,26 @@ class SharedInstall(unittest.TestCase):
                 'tools': {'approvalMode': 'write'},
                 'ssh': {'hosts': ['local-fixture']},
                 'dev': {'autoqaConsent': False},
+                'codexResets': {'autoRedeem': 'yes'},
+                'hideThinkingBlock': False,
                 'setupVersion': 2,
             }
+            (home / 'existing-repo').mkdir()
             scope = {'path': str(home / 'existing-repo'), 'providers': ['agents-md']}
+            gone = {'path': str(home / 'removed-worktree'), 'providers': ['agents-md']}
             original = dict(local, modelRoles={'default': 'old/model', 'vision': 'old/vision'},
                             cycleOrder=['smol', 'slow'],
                             defaultThinkingLevel='low',
                             theme={'dark': 'old-dark', 'light': 'old-light'},
-                            disabledProviders=['claude', 'local-model-provider', scope])
+                            retry={'fallbackChains': {'task': ['local/task-fallback'], 'tiny': ['old/tiny']}},
+                            disabledProviders=['claude', 'local-model-provider', scope, gone])
             settings = native / 'config.yml'
             settings.write_text(yaml_value(original))
+            extensions = native / 'extensions'
+            extensions.mkdir()
+            (extensions / 'herdr-omp-agent-state.ts').write_text('herdr')
+            (extensions / 'canvas.ts').symlink_to(home / 'canvas-source.ts')
+            extensions_before = fingerprint(extensions)
             auth = native / 'agent.db'
             auth.write_bytes(b'fixture native accounts and sessions: preserve verbatim')
             auth_before = fingerprint(auth)
@@ -52,6 +62,10 @@ class SharedInstall(unittest.TestCase):
             for key, value in local.items():
                 self.assertEqual(current[key], value)
             self.assertIn('local-model-provider', current['disabledProviders'])
+            self.assertNotIn(gone, current['disabledProviders'])
+            self.assertEqual(current['retry']['fallbackChains'],
+                             {'task': ['local/task-fallback']} | baseline['retry']['fallbackChains'])
+            self.assertEqual(fingerprint(extensions), extensions_before)
             self.assertIn(scope, current['disabledProviders'])
             self.assertEqual(fingerprint(auth), auth_before)
             self.assertIn('0 changes', subprocess.run(command, check=True, capture_output=True, text=True).stdout)
@@ -69,6 +83,8 @@ class SharedInstall(unittest.TestCase):
             (old / '.system/native/SKILL.md').write_text('native skill')
             (old / 'obsolete').mkdir()
             (old / 'obsolete/SKILL.md').write_text('old skill')
+            (old / 'synced/bucket/docs').mkdir(parents=True)
+            (old / 'synced/bucket/docs/SKILL.md').write_text('Claude synced skill')
             for name in ['.codex', '.claude', '.agents']:
                 (home / name).mkdir()
                 (home / name / 'skills').symlink_to(old)
@@ -87,6 +103,7 @@ class SharedInstall(unittest.TestCase):
             self.assertFalse((target / 'obsolete').exists())
             self.assertTrue((target / 'using-the-work-system/SKILL.md').is_file())
             self.assertTrue((target / '.system/native/SKILL.md').is_file())
+            self.assertTrue((target / 'synced/bucket/docs/SKILL.md').is_file())
             self.assertEqual(fingerprint(auth), before[auth])
             cfg = tomllib.loads((home / '.codex/config.toml').read_text())
             self.assertEqual(set(cfg['mcp_servers']), {'node_repl'})
@@ -98,6 +115,36 @@ class SharedInstall(unittest.TestCase):
             subprocess.run(command + ['--restore', str(backup)], check=True, capture_output=True)
             for path, value in before.items():
                 self.assertEqual(fingerprint(path), value)
+
+    def test_library_only_leaves_harness_settings_alone(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            home = Path(scratch)
+            native = home / '.omp/agent'
+            (native / 'extensions').mkdir(parents=True)
+            (native / 'config.yml').write_text(yaml_value({'retry': {'fallbackChains': {'task': ['local/model']}}}))
+            (native / 'RULES.md').write_text('local rule')
+            (native / 'extensions/canvas.ts').write_text('canvas')
+            (home / '.claude').mkdir()
+            (home / '.claude/settings.json').write_text(json.dumps({'hooks': {'Stop': [{'hooks': [{'command': 'mine'}]}]}}))
+            (home / '.codex').mkdir()
+            (home / '.codex/config.toml').write_text('model = "unchanged"\n[mcp_servers.maya]\ncommand = "kept"\n')
+            kept = [native / 'config.yml', native / 'RULES.md', native / 'extensions',
+                    home / '.claude/settings.json', home / '.codex/config.toml']
+            before = {p: fingerprint(p) for p in kept}
+            command = [sys.executable, str(Path(__file__).with_name('install.py')), '--home', str(home), '--library-only']
+            subprocess.run(command + ['--apply'], check=True, capture_output=True)
+            source = Path(__file__).with_name('instructions.md').resolve()
+            for relative in ['.omp/agent/AGENTS.md', '.claude/CLAUDE.md', '.codex/AGENTS.md']:
+                self.assertEqual((home / relative).resolve(), source)
+            target = (home / '.agents/skills').resolve()
+            self.assertEqual((home / '.omp/agent/skills').resolve(), target)
+            self.assertTrue((target / 'mac-gui/SKILL.md').is_file())
+            self.assertTrue((native / 'agents/scout.md').is_symlink())
+            for path, value in before.items():
+                self.assertEqual(fingerprint(path), value, path)
+            self.assertIn('0 changes', subprocess.run(command, check=True, capture_output=True, text=True).stdout)
+            result = subprocess.run(command + ['--project', str(home), '--project-source', str(home)], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_two_project_views_keep_team_files_and_exclude_local_guidance(self):
         with tempfile.TemporaryDirectory() as scratch:

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Mac GUI"
+  short_description: "Place, capture and show test windows without touching Tim's Spaces"

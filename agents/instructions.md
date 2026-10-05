@@ -1,10 +1,17 @@
-# Working preferences
+# Working with Tim
 
-- Choose the simplest design that fully satisfies the agreed task. Reuse existing code, standard libraries, and platform features before adding abstractions or dependencies.
-- Write PR descriptions, tickets, plans, and updates for Tim to scan easily: lead with the outcome, use concrete language and established project terms, and explain unfamiliar terms. Scale detail to the task; include the evidence needed to understand it.
-- Keep human-facing tickets and PR descriptions concise: intent, scope, acceptance, relevant validation, and material limitations. Execution notes and raw logs stay private; maintained technical knowledge belongs with its project.
-- Use the harness's question tool for decisions. Ask one question at a time by default and keep the conversation open while waiting for the answer.
-- Use machine-local CLI authentication and the project's selected account. Verify identity through authenticated metadata; never print tokens or dump the environment. Preserve the configured Git identity and omit agent co-author trailers.
-- Personal-project PRs may merge after their required checks and reviews pass, unless Tim specifies a ticket or repository hold. For Lindy, the agent that opens a PR against `main` arms auto-merge when it opens, unless Tim holds it or it waits on an open PR; required checks and approvals decide the merge. Prefer one PR per effort over stacked or split PRs. Preserve branch protections and verify the landed result.
-- In omp, a subagent type is a model choice; pick the cheapest that does the job well: `task` (Sonnet 5.5) for most code; `opus` (Opus 5.5) for hard judgment, subtle correctness and integration; `scout` (GPT Sol, full tools) for research, broad reading, and work worth moving off Anthropic quota; `grok` (Grok 4.7) for second opinions and research on xAI quota; `sonic` (GLM 5.3 Flash) for fan-outs over ~10 agents, extraction and other mechanical work; `reviewer` (GPT Sol) for reviewing changes.
-- Follow the current repository's applicable guidance. A normal conversation needs no ticket or orchestration system. Use project-specific work-system guidance only when working with that system.
+- Write PRs, tickets, plans and updates so Tim can scan them: lead with the outcome, use the project's terms and explain unfamiliar ones. PRs and tickets carry intent, scope, acceptance, validation and material limits; raw logs and execution notes stay private.
+- Ask decisions through the question tool, one question at a time, and keep the conversation open while you wait.
+- Use the machine's existing CLI auth and the project's account. Never print tokens or dump the environment. Keep the configured Git identity and add no agent co-author trailers.
+- Personal-project PRs merge once required checks and reviews pass, unless Tim set a hold. For Lindy, the agent that opens a PR against `main` arms auto-merge when it opens it, unless Tim holds it or it waits on another open PR. Prefer one PR per effort, keep branch protections, and verify the landed result.
+- In omp, a subagent type is a model choice; use the cheapest that does the job well: `task` (Sonnet 5.5) for most code, `opus` (Opus 5.5) for hard judgment and integration, `scout` (GPT Sol) or `grok` (Grok 4.7) for research and to move load off Anthropic quota, `sonic` (GLM 5.3 Flash) for mechanical fan-outs over ~10 agents, `reviewer` (GPT Sol) for reviews. Subagents never see this file, so brief them on any rule here that their task touches.
+
+# Shared machines
+
+Many agents share each machine's CPU, RAM and GPU.
+
+- Stop what you start (servers, watchers, browsers, REPLs, Blender, game clients) when the task that needed it ends, and kill your own orphans. Reuse a running dev server instead of starting another. Say so when you keep a long render or bake running.
+- Kill only processes you can prove are yours by port, working directory or target URL; omp's shared broker makes the process tree misleading. Send pressure you can't fix, with numbers, to the machine shepherd: `herdr agent prompt "$(cat ~/.config/machine-shepherd/pane)" '<what you measured>'`. If that file is missing, tell Tim. Never kill system daemons or touch Colima/Docker.
+- Cap each tool's own parallelism (`-j`, `--threads`, `--maxWorkers`, `MAGICK_THREAD_LIMIT`) as well as the number of runs. Test runners are the memory trap: a Lindy vitest worker holds about 2 GB.
+- Gate heavy jobs with `machine-ok --wait` (`--memory` for tests and typechecks; `machine-ok --help` explains the checks), not the load average, and test its exit code directly rather than through a pipe.
+- Before you launch, move, capture or show a GUI window on a Mac, read the `mac-gui` skill. Never put test windows on Tim's Spaces, and never move a window without its id.

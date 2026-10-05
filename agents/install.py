@@ -15,11 +15,10 @@ import tomllib
 from adapt import adapt
 
 SOURCE = Path(__file__).resolve().parent
-HERDR = 'herdr-omp-agent-state.ts'
 LOCAL_SETTINGS = {
     'providers', 'auth', 'enabledModels', 'enabledProviders',
     'modelProviderOrder', 'modelTags', 'setupVersion', 'shellPath',
-    'browser', 'computer', 'tools', 'ssh', 'dev',
+    'browser', 'computer', 'tools', 'ssh', 'dev', 'codexResets', 'hideThinkingBlock',
 }
 SHARED_PREFERENCES = {
     'modelRoles', 'modelRoleStorage', 'defaultThinkingLevel',
@@ -200,10 +199,6 @@ def clean_harnesses(home, plan):
         if tomllib.loads(updated) != expected:
             raise ValueError('Codex config edit changed unexpected settings; original retained')
         plan(path, 'write', updated.encode())
-    for relative in ['.pi/agent/extensions']:
-        for path in (home / relative).glob('*'):
-            if path.name != 'herdr-agent-state.ts':
-                plan(path, 'retire')
     path = home / '.pi/agent/settings.json'
     if path.exists():
         value = json.loads(path.read_text())
@@ -237,9 +232,10 @@ def main():
     parser.add_argument('--project', type=Path, action='append', help='Install project guidance in this repository/worktree (repeatable)')
     parser.add_argument('--project-source', type=Path, help='Local directory containing AGENTS.md and optional skills/')
     parser.add_argument('--project-only', action='store_true', help='Install project guidance without reapplying global setup')
+    parser.add_argument('--library-only', action='store_true', help='Install the skill library, instructions and agents; leave harness settings untouched')
     args = parser.parse_args()
     if args.restore:
-        if args.apply or args.project or args.project_source or args.project_only:
+        if args.apply or args.project or args.project_source or args.project_only or args.library_only:
             parser.error('--restore cannot be combined with installation options')
         restore(args.restore.resolve())
         return
@@ -247,6 +243,8 @@ def main():
         parser.error('--project and --project-source must be supplied together')
     if args.project_only and not args.project:
         parser.error('--project-only requires --project and --project-source')
+    if args.library_only and (args.project or args.project_only):
+        parser.error('--library-only cannot be combined with project options')
     home = args.home.resolve()
     native = home / '.omp/agent'
     runtime = home / '.local/share/agent-setup/library'
@@ -271,11 +269,12 @@ def main():
         stage.mkdir()
         selected = stage_runtime(stage, runtime)
         if not args.project_only:
-            # Codex owns this built-in directory. Preserve each host's native version;
-            # hidden .system skills are not part of the curated cross-harness catalog.
-            system = home / '.codex/skills/.system'
-            if system.is_dir():
-                shutil.copytree(system, stage / 'catalog/.system', symlinks=True)
+            # Harnesses own these catalog directories. Preserve each host's native
+            # version; they are not part of the curated cross-harness catalog.
+            for relative, name in [('.codex/skills/.system', '.system'), ('.claude/skills/synced', 'synced')]:
+                native_skills = home / relative
+                if native_skills.is_dir():
+                    shutil.copytree(native_skills, stage / 'catalog' / name, symlinks=True)
             plan(runtime, 'directory', stage)
             plan(home / '.local/share/agent-setup/omp', 'retire')
             canonical = home / '.agents/skills'
@@ -291,34 +290,40 @@ def main():
             for relative in ['.codex/AGENTS.md', '.claude/CLAUDE.md',
                              '.pi/agent/AGENTS.md', '.factory/AGENTS.md']:
                 plan(home / relative, 'link', SOURCE / 'instructions.md')
-            clean_harnesses(home, plan)
-            settings = {k: v for k, v in old.items() if k in LOCAL_SETTINGS | SHARED_PREFERENCES}
-            baseline = json.loads((SOURCE / 'omp.json').read_text())
-            if set(baseline) & LOCAL_SETTINGS:
-                raise ValueError('Shared baseline must not overwrite machine-local settings')
-            # Retain deliberate model-provider exclusions, not obsolete discovery sources.
-            previous_disabled = old.get('disabledProviders', [])
-            known_discovery = set(baseline['disabledProviders']) | {'native', 'agents-md', 'builtin-defaults', 'ssh-json'}
-            baseline['disabledProviders'] += [v for v in previous_disabled if isinstance(v, str) and v not in known_discovery]
-            # Native project settings are cwd-local, so ancestor-file exclusions must
-            # be scoped in the user settings to remain effective in nested directories.
-            scopes = [v for v in previous_disabled if isinstance(v, dict)
-                      and isinstance(v.get('path'), str) and v.get('providers') == ['agents-md']]
-            baseline['disabledProviders'] += project_scopes(scopes, args.project)
-            settings.update(baseline)
-            settings['skills']['customDirectories'] = [str(canonical)]
-            # Keep key order stable after combining local settings and shared preferences.
-            plan(native / 'config.yml', 'write', yaml_value(dict(sorted(settings.items()))).encode())
+            if not args.library_only:
+                clean_harnesses(home, plan)
+                settings = {k: v for k, v in old.items() if k in LOCAL_SETTINGS | SHARED_PREFERENCES}
+                baseline = json.loads((SOURCE / 'omp.json').read_text())
+                if set(baseline) & LOCAL_SETTINGS:
+                    raise ValueError('Shared baseline must not overwrite machine-local settings')
+                # Retain deliberate model-provider exclusions, not obsolete discovery sources.
+                previous_disabled = old.get('disabledProviders', [])
+                known_discovery = set(baseline['disabledProviders']) | {'native', 'agents-md', 'builtin-defaults', 'ssh-json'}
+                baseline['disabledProviders'] += [v for v in previous_disabled if isinstance(v, str) and v not in known_discovery]
+                # Native project settings are cwd-local, so ancestor-file exclusions must
+                # be scoped in the user settings to remain effective in nested directories.
+                # Scopes for directories that no longer exist are dropped.
+                scopes = [v for v in previous_disabled if isinstance(v, dict)
+                          and isinstance(v.get('path'), str) and v.get('providers') == ['agents-md']
+                          and Path(v['path']).exists()]
+                baseline['disabledProviders'] += project_scopes(scopes, args.project)
+                # Shared fallback chains win per role; chains for other roles stay local.
+                retry, shared_retry = old.get('retry', {}), baseline.get('retry', {})
+                baseline['retry'] = retry | shared_retry | {'fallbackChains':
+                    retry.get('fallbackChains', {}) | shared_retry.get('fallbackChains', {})}
+                settings.update(baseline)
+                settings['skills']['customDirectories'] = [str(canonical)]
+                # Keep key order stable after combining local settings and shared preferences.
+                plan(native / 'config.yml', 'write', yaml_value(dict(sorted(settings.items()))).encode())
             plan(native / 'AGENTS.md', 'link', SOURCE / 'instructions.md')
             # Same-name user agents replace omp's bundled ones; other agent files stay.
             for agent in sorted((SOURCE / 'omp-agents').glob('*.md')):
                 plan(native / 'agents' / agent.name, 'link', agent)
-            for name in RETIRE_NATIVE:
-                if name != 'skills':
-                    plan(native / name, 'retire')
-            for path in (native / 'extensions').glob('*'):
-                if path.name != HERDR:
-                    plan(path, 'retire')
+            if not args.library_only:
+                for name in RETIRE_NATIVE:
+                    if name != 'skills':
+                        plan(native / name, 'retire')
+            # Extensions belong to the tools that install them (herdr, Canvas); leave them all.
 
         else:
             if not (runtime / 'catalog').is_dir():
@@ -328,7 +333,7 @@ def main():
             plan(native / 'config.yml', 'write', yaml_value(settings).encode())
 
         selection = json.loads((SOURCE / 'skills.json').read_text())
-        codex_disabled = set() if args.project_only else {name for name in selection['retire'] if '*' not in name} | set(selection['replaces'])
+        codex_disabled = set() if args.project_only or args.library_only else {name for name in selection['retire'] if '*' not in name} | set(selection['replaces'])
         codex_allowed = {str(runtime / relative / 'SKILL.md') for relative in selection['global'].values()}
         for builtin in ['imagegen', 'openai-docs', 'plugin-creator', 'skill-creator', 'skill-installer']:
             codex_allowed.add(str(runtime / 'catalog/.system' / builtin / 'SKILL.md'))
@@ -410,9 +415,7 @@ def main():
                 for name in RETIRE_NATIVE:
                     if name != 'skills':
                         plan(project / '.omp' / name, 'retire')
-                for path in (project / '.omp/extensions').glob('*'):
-                    if path.name != HERDR:
-                        plan(path, 'retire')
+            # Project extensions belong to the tools that install them; leave them all.
 
         if codex_disabled or args.project:
             path = home / '.codex/config.toml'
