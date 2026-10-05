@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Message a herdr omp agent without typing into its terminal.
+
+    agent-msg <agent> <text...> [--from NAME]
+
+The text goes to the agent's omp inbox (the omp-inbox extension) and arrives as an
+agent-attributed aside at its next step boundary. It never enters a half-typed draft,
+never answers an open question, and never stops the agent's run.
+
+A pane started before the extension was installed has no inbox yet. Then this falls back
+to `herdr agent prompt`, which does type into the pane, so it refuses (exit 75) while the
+pane is blocked on a question or focused by Tim. Retry later, or restart that pane.
+"""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path.home() / '.local/state/omp-inbox'
+
+
+def herdr():
+    found = shutil.which('herdr') or str(Path.home() / '.local/bin/herdr')
+    if not Path(found).is_file():
+        sys.exit('agent-msg: herdr is not installed on this host')
+    return found
+
+
+def agent(name):
+    r = subprocess.run([herdr(), 'agent', 'get', name], capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f'agent-msg: no herdr agent named {name!r} on this host')
+    return json.loads(r.stdout)['result']['agent']
+
+
+def live_inbox(info):
+    session = info.get('agent_session') or {}
+    value = session.get('value')
+    if info.get('agent') != 'omp' or not value:
+        return None
+    key = Path(value).name.removesuffix('.jsonl') if session.get('kind') == 'path' else value
+    inbox = ROOT / key
+    try:
+        os.kill(int((inbox / '.pid').read_text()), 0)
+    except (OSError, ValueError):
+        return None
+    return inbox
+
+
+def sender():
+    pane = os.environ.get('HERDR_PANE_ID')
+    if pane:
+        r = subprocess.run([herdr(), 'agent', 'list'], capture_output=True, text=True)
+        if r.returncode == 0:
+            for a in json.loads(r.stdout)['result']['agents']:
+                if a.get('pane_id') == pane and a.get('name'):
+                    return a['name']
+    return 'an agent'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('agent')
+    parser.add_argument('text', nargs='+')
+    parser.add_argument('--from', dest='sender')
+    args = parser.parse_args()
+    text = ' '.join(args.text).strip()
+    if not text:
+        sys.exit('agent-msg: empty message')
+    info = agent(args.agent)
+    inbox = live_inbox(info)
+    if inbox:
+        payload = {'from': args.sender or sender(), 'text': text, 'sent_at': time.time()}
+        fd, temporary = tempfile.mkstemp(prefix='.', suffix='.tmp', dir=inbox)
+        with os.fdopen(fd, 'w') as out:
+            json.dump(payload, out)
+        os.replace(temporary, inbox / f'{time.time_ns()}-{os.getpid()}.json')
+        print(f'agent-msg: queued for {args.agent}')
+        return
+    if info.get('agent_status') == 'blocked' or info.get('focused'):
+        why = 'blocked on a question' if info.get('agent_status') == 'blocked' else 'focused by Tim'
+        print(f'agent-msg: {args.agent} has no inbox yet and is {why}; not typing into it. '
+              'Retry later, or restart that pane to load omp-inbox.', file=sys.stderr)
+        sys.exit(75)
+    sys.exit(subprocess.run([herdr(), 'agent', 'prompt', args.agent, text], stdout=subprocess.DEVNULL).returncode)
+
+
+if __name__ == '__main__':
+    main()

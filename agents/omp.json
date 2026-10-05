@@ -24,7 +24,8 @@
       "task": ["openai-codex/gpt-6.1-sol"],
       "sol": ["anthropic/claude-sonnet-5-5"],
       "review": ["xai-oauth/grok-4.7"],
-      "tiny": ["openai-codex/gpt-6-luna"]
+      "tiny": ["openai-codex/gpt-6-luna"],
+      "opencode-go/*": ["zai/glm-5.3-flash"]
     }
   },
   "task": {

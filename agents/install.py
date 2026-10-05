@@ -323,7 +323,9 @@ def main():
                 for name in RETIRE_NATIVE:
                     if name != 'skills':
                         plan(native / name, 'retire')
-            # Extensions belong to the tools that install them (herdr, Canvas); leave them all.
+            # Our message inbox and its sender. Other tools' extensions (herdr, Canvas) stay theirs.
+            plan(native / 'extensions' / 'omp-inbox.ts', 'link', SOURCE / 'inbox/omp-inbox.ts')
+            plan(home / '.local/bin/agent-msg', 'link', SOURCE / 'inbox/agent-msg')
 
         else:
             if not (runtime / 'catalog').is_dir():

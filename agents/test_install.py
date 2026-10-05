@@ -41,7 +41,7 @@ class SharedInstall(unittest.TestCase):
             extensions.mkdir()
             (extensions / 'herdr-omp-agent-state.ts').write_text('herdr')
             (extensions / 'canvas.ts').symlink_to(home / 'canvas-source.ts')
-            extensions_before = fingerprint(extensions)
+            others = {p: fingerprint(p) for p in extensions.iterdir()}
             auth = native / 'agent.db'
             auth.write_bytes(b'fixture native accounts and sessions: preserve verbatim')
             auth_before = fingerprint(auth)
@@ -65,7 +65,7 @@ class SharedInstall(unittest.TestCase):
             self.assertNotIn(gone, current['disabledProviders'])
             self.assertEqual(current['retry']['fallbackChains'],
                              {'task': ['local/task-fallback']} | baseline['retry']['fallbackChains'])
-            self.assertEqual(fingerprint(extensions), extensions_before)
+            self.assertEqual({p: fingerprint(p) for p in others}, others)
             self.assertIn(scope, current['disabledProviders'])
             self.assertEqual(fingerprint(auth), auth_before)
             self.assertIn('0 changes', subprocess.run(command, check=True, capture_output=True, text=True).stdout)
@@ -128,7 +128,7 @@ class SharedInstall(unittest.TestCase):
             (home / '.claude/settings.json').write_text(json.dumps({'hooks': {'Stop': [{'hooks': [{'command': 'mine'}]}]}}))
             (home / '.codex').mkdir()
             (home / '.codex/config.toml').write_text('model = "unchanged"\n[mcp_servers.maya]\ncommand = "kept"\n')
-            kept = [native / 'config.yml', native / 'RULES.md', native / 'extensions',
+            kept = [native / 'config.yml', native / 'RULES.md', native / 'extensions/canvas.ts',
                     home / '.claude/settings.json', home / '.codex/config.toml']
             before = {p: fingerprint(p) for p in kept}
             command = [sys.executable, str(Path(__file__).with_name('install.py')), '--home', str(home), '--library-only']
@@ -140,6 +140,8 @@ class SharedInstall(unittest.TestCase):
             self.assertEqual((home / '.omp/agent/skills').resolve(), target)
             self.assertTrue((target / 'mac-gui/SKILL.md').is_file())
             self.assertTrue((native / 'agents/scout.md').is_symlink())
+            self.assertEqual((native / 'extensions/omp-inbox.ts').resolve(),
+                             Path(__file__).with_name('inbox').resolve() / 'omp-inbox.ts')
             for path, value in before.items():
                 self.assertEqual(fingerprint(path), value, path)
             self.assertIn('0 changes', subprocess.run(command, check=True, capture_output=True, text=True).stdout)
