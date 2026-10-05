@@ -85,6 +85,13 @@ export default function (pi) {
 
   let dir: string | undefined;
   let watcher: fs.FSWatcher | undefined;
+  let busy = false;
+  pi.on("agent_start", () => {
+    busy = true;
+  });
+  pi.on("agent_end", () => {
+    busy = false;
+  });
 
   function drain() {
     if (!dir) return;
@@ -121,8 +128,10 @@ export default function (pi) {
       recent.push(now);
       wakes.set(from, recent);
     }
+    // Busy: a steer, which also interrupts a long `wait` (an aside would sit until it returned).
+    // Idle: an aside, which starts a turn and leaves Tim's half-typed draft alone.
     pi.sendUserMessage(parts.join("\n\n"), {
-      deliverAs: overBudget ? "nextTurn" : "aside",
+      deliverAs: overBudget ? "nextTurn" : busy ? "steer" : "aside",
       attribution: "agent",
     });
   }
