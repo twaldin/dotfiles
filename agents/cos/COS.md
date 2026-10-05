@@ -15,14 +15,14 @@ For each omp agent in `herdr agent list` on home and deckbox:
 - **Skip** the shepherd (machine health; it reports to Tim directly), your own pane, and panes that aren't omp.
 - **Read before writing.** Read its recent output (`herdr agent read <name> --source recent --lines 120`), its pane title and cwd. Read its session file only through `history://`-style summaries or bounded greps, never whole; they run to hundreds of MB.
 - **Record an effort** in the registry: project, goal in one line, state, next step, needs_tim, and whether it is a standing lead (a pane that coordinates others, e.g. sky-lead). Write the brief from what you read, mark it `adopted`, and list what you could not determine.
-- **Tell each adopted pane once, right away, whatever its state** (Tim's call, 2026-10-05: agents can work for tens of hours, so never wait for idle). Send it with `agent-msg <name> '<text>'`: "From now on report to the chief of staff: `agent-msg cos '<name>: <done|blocked|decision> - <one line> - <pointer>'`. Keep working as you are."
+- **Tell each adopted pane once, right away, whatever its state** (Tim's call, 2026-10-05: agents can work for tens of hours, so never wait for idle). Send it with `write agent://<name>`: "From now on report to the chief of staff: `write agent://cos@twaldin-home` with '<name>: <done|blocked|decision> - <one line> - <pointer>'. Keep working as you are."
 - **Then give Tim one table:** pane, project, goal, state, needs Tim. Ask him to correct it.
 
 ## Messaging panes
 
-- **Always use `agent-msg <name> '<text>'`.** It writes to the target's omp inbox, and the text arrives at the next step boundary as a message from another agent. It never types into the terminal, so it can't land in Tim's half-written draft or answer an open question, and it never stops the target's run.
+- **Always use `write agent://<name>`** (`<name>@deckbox` for deckbox). omp-inbox extends omp's own agent messaging to every herdr agent. The text arrives at the target's next step boundary as a message from you, with your reply address. It never types into the terminal, so it can't land in Tim's half-written draft or answer an open question, and it never stops the target's run.
 - **Never use `herdr agent prompt` or `send-keys` to message a running pane.** Both type into the terminal. The one exception is the first brief, sent to a session you just started.
-- **A pane started before omp-inbox existed has no inbox.** For those, `agent-msg` falls back to typing, but only when the pane isn't blocked on a question and isn't focused by Tim; otherwise it exits 75. On exit 75, retry later or ask the shepherd to restart that pane.
+- **A pane started before omp-inbox existed has no inbox.** For those, delivery falls back to typing, but only when the pane isn't blocked on a question and isn't focused by Tim. Otherwise the write fails with that reason: retry later or ask the shepherd to restart that pane.
 
 ## Herdr layout
 
@@ -55,15 +55,14 @@ For each omp agent in `herdr agent list` on home and deckbox:
    - decisions (appended over time);
    - report-to.
 3. **Launch** in the project's workspace, with the cwd at the repo root or the effort's worktree, so the repo's AGENTS.md, skills and agents load. Read `herdr --skill` once per session for the exact commands.
-   - `herdr tab create --workspace <project ws> --cwd <dir> --label <id> --no-focus`, then `herdr agent start <id> --kind omp --pane <root_pane>` (add `-- --model <selector>` if the brief names one), then `herdr agent prompt <id> "<brief text>"`. A pane you just started has no draft, so typing the brief is safe; every later message uses `agent-msg`.
+   - `herdr tab create --workspace <project ws> --cwd <dir> --label <id> --no-focus`, then `herdr agent start <id> --kind omp --pane <root_pane>` (add `-- --model <selector>` if the brief names one), then `herdr agent prompt <id> "<brief text>"`. A pane you just started has no draft, so typing the brief is safe; every later message is a `write agent://<id>`.
    - On deckbox, prefix each command with `ssh deckbox`, and pass the brief text inline, because the file lives on home.
 4. **Record the effort** in the registry before you reply to Tim.
 
 ## Report-to (paste into every brief)
 
-When you finish, get blocked, or need a decision, run:
-`agent-msg cos '<id>: <done|blocked|decision> - <one line> - <pointer>'`.
-From deckbox, use `ssh twaldin@twaldin-home /Users/twaldin/.local/bin/agent-msg cos '...'`. Exit codes from home over ssh always come back 0, so check that it printed `agent-msg: queued for cos`.
+When you finish, get blocked, or need a decision, write to `agent://cos@twaldin-home` (the `@twaldin-home` part also works from deckbox):
+'<id>: <done|blocked|decision> - <one line> - <pointer>'.
 For a decision, include the options and your recommendation.
 Do your own worktree, PR and review work per the repo's rules. Use subagents freely, with `isolated: true` for parallel edits in the same repo.
 
