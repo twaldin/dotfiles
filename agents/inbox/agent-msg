@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Message a herdr omp agent without typing into its terminal.
 
-    agent-msg <agent> <text...> [--from NAME]
+    agent-msg <agent>[@<host>] <text...> [--from NAME]
 
-Agents don't call this directly: in omp, `write agent://<name>` (or `<name>@<host>`)
-reaches other sessions through the omp-inbox extension, which runs this. Shell scripts
-may call it.
+Agents with the omp-inbox extension use `write agent://<name>[@<host>]`, which runs this.
+Shell scripts, and panes started before the extension, call it directly.
 
 The text goes to the agent's omp inbox and arrives as an agent-attributed aside at its
 next step boundary. It never enters a half-typed draft, never answers an open question,
-and never stops the agent's run.
+and never stops the agent's run. `@<host>` delivers on that host over ssh.
 
 A pane started before the extension was installed has no inbox yet. Then this falls back
 to `herdr agent prompt`, which does type into the pane, so it refuses (exit 75) while the
@@ -18,6 +17,8 @@ pane is blocked on a question or focused by Tim. Retry later, or restart that pa
 import argparse
 import json
 import os
+import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -64,14 +65,31 @@ def live_inbox(info):
 
 def sender():
     host = socket.gethostname().split('.')[0]
-    pane = os.environ.get('HERDR_PANE_ID')
-    if pane:
-        r = subprocess.run([herdr(), 'agent', 'list'], capture_output=True, text=True)
-        if r.returncode == 0:
-            for a in json.loads(r.stdout)['result']['agents']:
-                if a.get('pane_id') == pane and a.get('name'):
-                    return f"{a['name']}@{host}"
+    # A pane moved with `herdr pane move` keeps its old HERDR_PANE_ID in the environment;
+    # herdr resolves that id to the current pane only for this caller.
+    pane = subprocess.run([herdr(), 'pane', 'get', os.environ.get('HERDR_PANE_ID', '')],
+                          capture_output=True, text=True)
+    agents = subprocess.run([herdr(), 'agent', 'list'], capture_output=True, text=True)
+    try:
+        current = json.loads(pane.stdout)['result']['pane']['pane_id']
+        for a in json.loads(agents.stdout)['result']['agents']:
+            if a.get('pane_id') == current and a.get('name'):
+                return f"{a['name']}@{host}"
+    except (ValueError, KeyError):
+        pass
     return f'shell@{host}'
+
+
+def remote(host, name, text, origin):
+    # Tailscale SSH on the Macs drops the remote exit status, so judge by the output.
+    command = ' '.join(shlex.quote(part) for part in [name, text, '--from', origin])
+    r = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', host,
+                        f'"$HOME"/.local/bin/agent-msg {command}'], capture_output=True, text=True)
+    out = (r.stdout + r.stderr).strip()
+    print(out or f'agent-msg: no response from {host}')
+    if 'not typing into it' in out:
+        sys.exit(75)
+    sys.exit(0 if re.search(r'agent-msg: (queued for|typed into)', out) else 1)
 
 
 def main():
@@ -83,26 +101,30 @@ def main():
     text = ' '.join(args.text).strip()
     if not text:
         sys.exit('agent-msg: empty message')
-    info = agent(args.agent)
-    inbox = live_inbox(info)
+    name, _, host = args.agent.partition('@')
     origin = args.sender or sender()
+    if host and host != socket.gethostname().split('.')[0]:
+        remote(host, name, text, origin)
+    info = agent(name)
+    inbox = live_inbox(info)
     if inbox:
         payload = {'from': origin, 'text': text, 'sent_at': time.time()}
         fd, temporary = tempfile.mkstemp(prefix='.', suffix='.tmp', dir=inbox)
         with os.fdopen(fd, 'w') as out:
             json.dump(payload, out)
         os.replace(temporary, inbox / f'{time.time_ns()}-{os.getpid()}.json')
-        print(f'agent-msg: queued for {args.agent}')
+        print(f'agent-msg: queued for {name}')
         return
     if info.get('agent_status') == 'blocked' or info.get('focused'):
         why = 'blocked on a question' if info.get('agent_status') == 'blocked' else 'focused by Tim'
-        print(f'agent-msg: {args.agent} has no inbox yet and is {why}; not typing into it. '
+        print(f'agent-msg: {name} has no inbox yet and is {why}; not typing into it. '
               'Retry later, or restart that pane to load omp-inbox.', file=sys.stderr)
         sys.exit(75)
-    typed = f'[message from {origin}; reply with write agent://{origin}] {text}'
-    result = subprocess.run([herdr(), 'agent', 'prompt', args.agent, typed], stdout=subprocess.DEVNULL)
+    # This pane has no omp-inbox, so `write agent://` can't reach other sessions from it.
+    typed = f"[message from {origin}; reply by running: agent-msg {origin} '<text>'] {text}"
+    result = subprocess.run([herdr(), 'agent', 'prompt', name, typed], stdout=subprocess.DEVNULL)
     if result.returncode == 0:
-        print(f'agent-msg: typed into {args.agent} (no inbox yet)')
+        print(f'agent-msg: typed into {name} (no inbox yet)')
     sys.exit(result.returncode)
 
 

@@ -30,8 +30,6 @@ function run(command: string, args: string[]): Promise<{ code: number; out: stri
   return promise;
 }
 
-const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
-
 // Same key agent-msg derives from `herdr agent get`: the session file's name, else its id.
 function inboxKey(ctx): string | undefined {
   try {
@@ -68,13 +66,8 @@ export default function (pi) {
     const native = (event.content ?? []).map((part) => part.text ?? "").join("\n");
     if (!native.includes("Unknown agent")) return;
     const [, name, host] = match;
-    const remote = host !== undefined && host !== HOST;
-    const args = [name, text, "--from", await selfAddress(ctx)];
-    const sent = remote
-      ? await run("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host,
-          ['"$HOME"/.local/bin/agent-msg', ...args.map(shellQuote)].join(" ")])
-      : await run(SENDER, args);
-    const target = remote ? `${name}@${host}` : name;
+    const target = host !== undefined && host !== HOST ? `${name}@${host}` : name;
+    const sent = await run(SENDER, [target, text, "--from", await selfAddress(ctx)]);
     if (/agent-msg: (queued for|typed into)/.test(sent.out)) {
       return {
         isError: false,
