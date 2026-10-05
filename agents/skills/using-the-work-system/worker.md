@@ -1,39 +1,38 @@
-# One owner through completion
+# Owning a dispatched ticket
 
-Read the canonical brief, current ticket input, private notes and repository pipeline on every wake. Investigate enough to distinguish work you can do from a decision Tim must supply. When a decision is needed, write the question and your recommended default to the private notes, record a waiting outcome whose `attention` carries the question, and end the turn; waiting releases the slot. Leave the ticket's state and comments alone — Linear is team-facing and a conversation relays the question to Tim. New input (a `refine` of the brief or a comment) returns to this same session. An explicit hold still needs release.
+You own one ticket, its worktree and its native session from first wake to landed acceptance. Every wake: read the brief, new ticket input, private `notes.md` and the repository pipeline.
 
-The owner implements the repository pipeline: findings, artifacts, PRs or a stack; required checks and independent reviews; feedback; merge; and landed/deployed acceptance. Attach every required PR to Linear. Follow the configured deployment reference to identify the relevant commit/run and verify its result. Record a next check time when you must inspect a pipeline later.
+## Delivery
 
-Local edits are unfinished work. When a ticket changes a managed GitHub repository, carry those changes through the required reviews, PR, merge and landed acceptance before completing it. A findings-only completion means the supported finding itself satisfies the brief, with no intended change left unshipped. Inspect the actual worktree, PR and landed revision before choosing that outcome; a summary of edits is not delivery evidence.
+- Follow the pipeline: findings or PR, required checks and independent reviews, feedback, merge, landed or deployed acceptance. Attach every PR to the ticket.
+- Local edits are unfinished work. Complete with findings only when the finding itself satisfies the brief and no intended change is left unshipped; check the actual worktree, PR and landed revision first.
+- One PR per effort. Split only for a different owner, a separate deploy or rollback, or a protected-path split; a dependent PR targets the default branch, says "Depends on #N" and stays unarmed until #N merges.
+- Immediately before marking ready, merging, deploying or completing, re-read ticket discussion and the PR head, draft state, checks and reviews. If Linear is unreadable, keep coding but wait before merge or deploy.
 
-Merge authority is Tim's current ticket instruction, then repository policy, then workspace default. Personal `auto` permits the normal allowed merge path after required checks, reviews and acceptance, respecting branch protections and stack order. Lindy `arm-auto-at-open` means the owner arms auto-merge when it opens a PR against `main` that waits on no open PR, and GitHub's required checks and approvals decide the merge; the repository pipeline names the paths that wait for a human approval. Only `main` carries those rules, so an armed PR on any other base merges unreviewed: it stays disarmed until retargeted to `main`. Tim's hold keeps auto-merge disarmed. Historical personal manual-approval boilerplate is not a current override.
+## Merge authority
 
-Default to one PR per effort. Stacked or split PRs cost more CI runs for the same end state, more rebases and churn, and AI review handles a larger diff well, so combine related changes. Split only for a hard reason: a different owner, a separate deploy or rollback, or a protected-path split. A dependent PR targets the default branch, says "Depends on #N" in its body, and stays disarmed until #N merges.
+Tim's current ticket instruction, then repository policy, then workspace default.
 
-Immediately before marking ready, enabling an authorized merge path, merging, deploying or declaring completion, refresh ticket discussion and current PR head/draft/checks/reviews. Investigate an unexpected draft change. Record the revision actually reviewed and verify actual reviewer models/families. If Linear is unreadable, continue authorized coding but wait before merge/deploy until new input can be checked. Failed status/label publication alone does not stop work.
+- Personal `auto`: merge through the normal allowed path once required checks, reviews and acceptance pass, respecting branch protection and stack order.
+- Lindy `arm-auto-at-open`: arm auto-merge when opening a PR against `main` that waits on no open PR; GitHub's required checks and approvals decide. Any other base stays unarmed until retargeted. A hold keeps it unarmed.
 
-## Own probe resources and delegated scope
+## Questions and probes
 
-Pass each helper its permitted actions and resource boundaries. A source-only assignment stays source-only; a helper reports a needed execution step to its owner before expanding that assignment. The owner checks helper actions and evidence before accepting the result.
+- A decision Tim must make: write the question and your recommended default to `notes.md`, settle `waiting` with that question as `attention`, and leave ticket state and comments alone. The answer wakes this same session.
+- Give each probe or helper a finite lifetime and record its process handles. Clean up only those recorded handles, after confirming they still belong to the probe; name or pattern matches (`pkill -f`, `killall`) are not ownership. If ownership is unclear, report the targets instead of killing.
 
-Before starting a probe, give it a finite lifetime and record its child handles or dedicated process group. Cleanup targets only those recorded resources after verifying they still belong to this probe; a matching executable name, command substring or reused PID is not ownership proof. Never use host-wide name/pattern cleanup such as `pkill -f` or `killall` for a probe. If ownership is uncertain, stop cleanup and report the known targets and uncertainty; do not restart unknown processes. Wait for owned children to exit and record any survivors honestly.
+## Settle every turn
 
-Run synthetic probes with explicit disposable configuration and synthetic inputs. Keep real host settings and raw probe artifacts private; fixtures and published evidence contain only inspected, safe synthetic data.
-
-## Record the turn outcome
-
-Linear status is a reflection; it does not tell the runner whether this owner is waiting or complete. Write an outcome JSON file in the supplied private task directory, then call the runner supplied by the current turn:
+Linear status does not tell the runner your outcome. Write an outcome JSON in the private task directory and run:
 
 ```sh
 python3 "$OMP_TICKETS_RUNNER" settle "$OMP_TICKET_ID" --input /absolute/path/outcome.json
 ```
 
-The runner supplies its configuration and turn identity in this process's environment. The JSON uses:
+- `lifecycle`: `active` (needs another turn), `waiting` (park), or `complete` (landed and accepted).
+- `stage`: optional publication key such as `review`, `ready`, `landed`; completion selects `complete`.
+- `attention`: null, or `{reason, kind?, url?}` where `reason` is the question plus your recommended default.
+- `next_check_at`: null, or a Unix timestamp for the next pipeline check. Waiting on an answer needs no timer.
+- `evidence`: concise acceptance evidence; required for `complete`, including findings-only work.
 
-- `lifecycle`: `active` for unfinished work needing another turn, `waiting` to park, or `complete` after acceptance.
-- `stage`: an optional publication key from the workspace policy, such as `review`, `ready` or `landed`. Completion selects `complete`.
-- `attention`: null or an object with a concrete `reason` (the question itself and your recommended default), optional `kind` and PR `url`. The conversation agent reads it with `omp-tickets attention`; it is not published as a ticket state or comment.
-- `next_check_at`: null or a Unix timestamp for the next pipeline check. Waiting for an answer normally needs no timer.
-- `evidence`: concise acceptance evidence, required for completion, including findings-only work. Keep detailed logs/review records private.
-
-An unchanged wake caused by your own update needs no new public comment, but still records the appropriate outcome. Completed tickets remain watched for later feedback; reassess it without reopening work merely to acknowledge thanks. When feedback requires more implementation, record active before starting so the internal/public state can reflect that work. Completion means the project's intended landed result and acceptance, not green PR CI or a process exit.
+Completed tickets stay watched. When later feedback needs more work, settle `active` before starting it.

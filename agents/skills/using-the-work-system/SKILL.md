@@ -1,20 +1,33 @@
 ---
 name: using-the-work-system
-description: Create or refine Linear work-system tickets, enroll repositories, answer worker questions, hold or resume owners, and inspect their progress. Load the target workspace and repository policy; ordinary coding conversations need no ticket.
+description: Linear tickets and the personal ticket dispatcher. Use when deciding whether work needs a ticket, writing or marking one agent-ready, relaying an owner's question, holding or resuming an owner, enrolling a repository, or settling an owner turn. Ordinary efforts need no ticket.
 ---
 
-Resolve the target from the repository, ticket URL or user's request. Read the executing host's `~/.config/omp-linear/config.json` and its referenced registry. When this host has no deployment, `~/.config/agent-setup/workspaces.json` may point to its owning host and configuration. Match the requested ticket/workspace to that configuration before any mutation; do not fall back to this machine's other workspace. Run commands on the owning host with its existing local authentication. Without a known deployment, discuss the work or follow enrollment; do not invent an account, queue or dispatcher.
+Work starts as an **effort**: a session started from the chief-of-staff (CoS) or a conversation, using subagents freely. An effort needs no ticket.
 
-Load the configured workspace authoring reference and repository profile/pipeline before changing a ticket. Linear's visible teams, labels, projects and states are workspace conventions. The private registry and ticket record hold resolved routing, canonical scope and execution state.
+## When a ticket earns its place
 
-In OMP, run authenticated CLI commands and ticket-control commands through the native Bash tool. Python eval filters the launch-selected `GH_TOKEN` and `OMP_TICKET_*` variables; its subprocesses can select a different GitHub account or lose the owner turn identity. Verify the selected account in the environment that will perform the operation. Keep the Python filter intact rather than copying credentials into eval.
+Create a Linear ticket only when at least one holds:
 
-Choose the relevant reference:
+- someone else must act on it or wait on it;
+- input arrives asynchronously (a reply, a review, an external event);
+- it needs team prioritization or visibility;
+- ownership or decisions must survive a session or machine restart;
+- it is independently reviewable work likely to outlive the current effort.
 
-- Creating/refining tickets, answering questions or pausing work: [authoring.md](authoring.md).
-- Adding a persistent repository or preparing its policy: [enrollment.md](enrollment.md).
-- Owning a ticket through work, waiting and completion: [worker.md](worker.md).
+If none holds, keep the work in the effort.
 
-Use `omp-tickets show <issue>` and live Linear/PR context before contributing to existing work. Preserve its owner, session and worktree. Linear is team-facing: it carries the change, evidence and acceptance. An owner's questions live in its private attention/notes (`omp-tickets attention`); a conversation relays them to Tim and answers with `refine` or a comment. Detailed execution evidence stays in the private task directory. Ordinary conversations can contribute without becoming another implementation owner.
+## Workspaces
 
-Keep credentials and work code on their owning host. Follow the selected workspace's existing conventions and merge authority. Personal repository labels are personal policy; Lindy requires its own existing fields and authoring guidance.
+- **Personal (`twaldin`, TWA team).** The dispatcher runs on twaldin-home (`~/.config/omp-linear/config.json`, registry `~/agent-system/policy/personal.json`). It picks up only tickets assigned to Tim, in **Todo**, labelled **`agent-ready`**, with a repository route. Tim decides what is agent-ready: add the label only when he says so. Every other ticket is a record that an effort or a person owns.
+- **Lindy (work).** Linear is team truth and the work seat on twaldin-work creates lanes; no dispatcher runs there. Follow `~/work-agent-system/SEAT.md` on twaldin-work.
+
+`omp-tickets` runs on the owning host; `~/.config/agent-setup/workspaces.json` names it when this machine has no deployment.
+
+In OMP, run `omp-tickets`, `gh` and `linear` through the Bash tool. Python eval filters `GH_TOKEN` and `OMP_TICKET_*`, so its subprocesses can pick another GitHub account or lose the owner turn identity.
+
+## References
+
+- Writing a ticket, marking it agent-ready, relaying owner questions, holds: [authoring.md](authoring.md).
+- Enrolling a repository with the dispatcher: [enrollment.md](enrollment.md).
+- You are a dispatcher owner (your prompt says you own a ticket): [worker.md](worker.md).

@@ -1,24 +1,32 @@
-# Conversations and tickets
+# Tickets and owners
 
-Read the workspace's configured authoring reference and repository profile. Inspect existing tickets, PRs, ownership and current source before creating or scoping work. Use the native question tool for decisions you cannot establish from that context.
+Read the workspace authoring policy named by the registry's `authoring` field before writing a personal ticket. For Lindy, SEAT.md governs.
 
-The internal brief is the maintained scope, decisions, constraints and acceptance. Linear presents that agreement concisely and holds durable human questions/answers. Detailed investigations and logs stay private. A Linear edit is new input for the owner to reconcile; it does not replace a saved worker or silently change its repository.
+## Writing a ticket
 
-Create one executable ticket per repository, linking tickets for a cross-repository effort. Assign it to the configured user. Select teams, efforts and required labels according to this workspace's rules. Personal policy may create/use a repository label; Lindy may require unrelated conventions such as an on-call label. Infer neither from generic engine rules.
+- One ticket per repository; link tickets for a cross-repository effort. Assign it to Tim.
+- The description is the team-facing agreement: intent, scope, acceptance, links. Decisions live in comments; detailed evidence stays private.
+- A ticket an effort is already working on stays without `agent-ready`. The effort owns it: link the PR and move the status itself.
 
-Record a known route with `omp-tickets register <issue> --repo <key>`. A conversation in a registered repository can supply that route directly. This does not dispatch work. Keep ideas deferred; the configured intake state requests an owner. Initially this is Todo in both deployments. Thin tickets may get brief owner investigation, then a question and a wait; authorship by a teammate or agent is not an authorization class.
+## Handing a ticket to the dispatcher
 
-For a conversation-created scoped ticket, prepare its public scope and private brief before requesting intake. Create it in the workspace's deferred state, register the known repository, save the brief with `refine`, then move it to the configured start state when ready. A human-created ticket can instead arrive through configured label/team/default routing; the owner investigates its supplied context.
+Only when Tim marks it ready:
 
-After requesting intake, inspect `omp-tickets show <issue>` and live progress. Report started only when a native owner/session exists; Todo, registration or a PR label alone is not proof. If no owner starts, check assignment, configured start state, repository route, explicit hold/dependencies, pilot admission, capacity and preparation errors. Preserve the existing record when correcting these inputs. An active pilot allowlist needs deliberate admission under the rollout policy; do not silently broaden it or create a second owner to bypass it.
+1. Create it in Backlog and route it: the `repo:<key>` label, or `omp-tickets register <issue> --repo <key>`.
+2. Save the private brief: `omp-tickets refine <issue> --input <file>`.
+3. Add `agent-ready` and move it to Todo.
 
-For an existing ticket:
+Report it started only when `omp-tickets show <issue>` names a native session. If none starts, check in order: `agent-ready`, assignee, Todo, route, hold or blocking dependencies, `pilot_issues`, capacity, preparation errors. Fix the input and keep the existing record. Removing `agent-ready` later does not stop an owner that already started; use `hold`.
 
-- Read `omp-tickets show <issue>`, current Linear discussion and deliverables.
-- Owner questions are listed by `omp-tickets attention`; relay them to Tim in chat. Deliver his answer with `refine` (private brief) or, when it is a team-facing decision, as his Linear comment; either wakes the existing owner. Resolve a question through the actual discussion, not a comment prefix or shared account identity.
-- When scope changes, save the updated internal brief to a local text file and run `omp-tickets refine <issue> --input <file>`. Keep the concise Linear description consistent with the agreement. This wakes the same owner.
-- For an explicit pause, use `omp-tickets hold <issue> --reason '<reason>'` and record the human explanation on Linear. It stops the current turn/helpers and preserves work. `release <issue>` resumes the same owner; a brief edit alone does not release a hold. Configured deferred/start states provide the workspace's Linear control surface too.
+## Existing owners
 
-Tim coordinates competing conversations. Reread current context and preserve others' changes; do not add semantic conflict arbitration or revision approval rituals.
+```sh
+omp-tickets show TWA-7        # record, brief, phase
+omp-tickets attention         # owner questions waiting on Tim
+omp-tickets refine TWA-7 --input /abs/brief.md   # new scope or an answer; wakes the same owner
+omp-tickets hold TWA-7 --reason '...'            # stop the turn, keep session and worktree
+omp-tickets release TWA-7
+omp-tickets retry TWA-7
+```
 
-A finding can be the right deliverable. Preserve useful project knowledge and unrelated work; a docs audit with no justified edit needs no cosmetic PR. Put reusable pipeline rules in the profile, and ticket-specific overrides in its brief and human agreement.
+Owner questions are private attention, not Linear comments. Relay them to Tim and deliver his answer with `refine`, or as his Linear comment when the team should see the decision. Either wakes the same owner. A brief edit does not release a hold.
