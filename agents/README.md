@@ -51,4 +51,4 @@ Work and personal are separate deployments. Lindy code, accounts, project guidan
 
 The home catch-up directory is `~/agent-system`. Its README records the current rollout and points to the actual sources, local configuration, private notes, and Linear. Live Lindy ownership changes only through a deliberate later cutover.
 
-Upstream: Matt Pocock skills at `3cca18b368ae95cdbdebbff572ccafa662551015`; Vercel references at `063bee94c3f4df8453406c830b0a7df0f2860278`. Source metadata and licenses are retained. Do not run their bulk installers over this selected library.
+Upstream: Matt Pocock skills v1.3.1 at `b40b9b199752462750c56d9a26655981e48a4344`; Vercel references at `063bee94c3f4df8453406c830b0a7df0f2860278`. Source metadata and licenses are retained. Do not run their bulk installers over this selected library.
