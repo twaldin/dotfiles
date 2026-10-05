@@ -1,6 +1,6 @@
 ---
 name: using-the-work-system
-description: Linear tickets and the personal ticket dispatcher. Use when deciding whether work needs a ticket, writing or marking one agent-ready, relaying an owner's question, holding or resuming an owner, enrolling a repository, or settling an owner turn. Ordinary efforts need no ticket.
+description: Linear tickets for personal and Lindy work. Use when deciding whether work needs a ticket or writing one. Ordinary efforts need no ticket.
 ---
 
 Work starts as an **effort**: a session started from the chief-of-staff (CoS) or a conversation, using subagents freely. An effort needs no ticket.
@@ -19,15 +19,13 @@ If none holds, keep the work in the effort.
 
 ## Workspaces
 
-- **Personal (`twaldin`, TWA team).** The dispatcher runs on twaldin-home (`~/.config/omp-linear/config.json`, registry `~/agent-system/policy/personal.json`). It picks up only tickets assigned to Tim, in **Todo**, labelled **`agent-ready`**, with a repository route. Tim decides what is agent-ready: add the label only when he says so. Every other ticket is a record that an effort or a person owns.
-- **Lindy (work).** Linear is team truth and the work seat on twaldin-work creates lanes; no dispatcher runs there. Follow `~/work-agent-system/SEAT.md` on twaldin-work.
+- **Personal (`twaldin`, TWA team).** A ticket is a record. The effort or person working on it owns it: link the PR and move the status yourself. Nothing picks tickets up automatically; work starts when Tim or the CoS starts an effort.
+- **Lindy (work).** Linear is team truth and the work seat on twaldin-work creates lanes. Follow `~/work-agent-system/SEAT.md` on twaldin-work.
 
-`omp-tickets` runs on the owning host; `~/.config/agent-setup/workspaces.json` names it when this machine has no deployment.
+## Writing a ticket
 
-In OMP, run `omp-tickets`, `gh` and `linear` through the Bash tool. Python eval filters `GH_TOKEN` and `OMP_TICKET_*`, so its subprocesses can pick another GitHub account or lose the owner turn identity.
+- One ticket per repository; link tickets for a cross-repository effort. Assign it to Tim.
+- The description is the team-facing agreement: intent, scope, acceptance, links. Decisions live in comments; detailed evidence stays private.
+- Backlog while refining; Todo when Tim has authorized the work and its acceptance and dependencies are clear. A specification alone is not authorization.
 
-## References
-
-- Writing a ticket, marking it agent-ready, relaying owner questions, holds: [authoring.md](authoring.md).
-- Enrolling a repository with the dispatcher: [enrollment.md](enrollment.md).
-- You are a dispatcher owner (your prompt says you own a ticket): [worker.md](worker.md).
+In OMP, run `gh` and `linear` through the Bash tool. Python eval filters `GH_TOKEN`, so its subprocesses can pick another GitHub account.

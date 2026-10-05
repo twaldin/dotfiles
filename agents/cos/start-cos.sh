@@ -1,8 +1,9 @@
 #!/bin/sh
 # Start the chief-of-staff (CoS) omp session in a herdr tab named `cos`.
 #   start-cos.sh            start it; refuses if a `cos` agent already exists
-#   start-cos.sh --replace  rotate: close the old `cos` pane and start fresh.
-#                           Requires ~/cos/handoff.md written in the last hour.
+#   start-cos.sh --replace  rotate: close the old `cos` pane and start fresh. State lives in
+#                           ~/cos (registry, briefs, .omp/RULES.md), so no handoff is needed;
+#                           callers restart only while cos is idle.
 set -eu
 
 COS_HOME="$HOME/cos"
@@ -16,10 +17,6 @@ ln -sfn "$PROMPT_SRC" "$COS_HOME/.omp/AGENTS.md"
 if "$HERDR" agent get cos >/dev/null 2>&1; then
   if [ "${1:-}" != "--replace" ]; then
     echo "a cos agent is already running; use --replace to rotate it" >&2
-    exit 1
-  fi
-  if [ -z "$(find "$COS_HOME/handoff.md" -mmin -60 2>/dev/null)" ]; then
-    echo "refusing to rotate: ~/cos/handoff.md is missing or older than 60 min" >&2
     exit 1
   fi
   old_pane=$("$HERDR" agent get cos | jq -r '.result.agent.pane_id')

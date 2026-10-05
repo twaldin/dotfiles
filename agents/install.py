@@ -449,7 +449,7 @@ def main():
                 raise ValueError('Codex selection edit changed unexpected settings; original retained')
             plan(path, 'write', text.encode())
 
-        print(f'Shared library: {len(selected)} global skills. Ticket-system guidance loads workspace and repository policy when applicable.')
+        print(f'Shared library: {len(selected)} global skills.')
         for change in changes:
             print(change['kind'].upper(), change['path'])
         if not args.apply:
