@@ -69,8 +69,14 @@ export default function (pi) {
     const target = host !== undefined && host !== HOST ? `${name}@${host}` : name;
     const sent = await run(SENDER, [target, text, "--from", await selfAddress(ctx)]);
     if (/agent-msg: (queued for|typed into)/.test(sent.out)) {
+      // The IRC card renders from the native receipts, so mark them delivered too.
+      const message = event.details?.message;
+      const details = Array.isArray(message?.receipts)
+        ? { ...event.details, message: { ...message, receipts: message.receipts.map((r) => ({ to: r.to, outcome: "injected" })) } }
+        : event.details;
       return {
         isError: false,
+        details,
         content: [{ type: "text", text: `Delivered to ${target}, an agent in another session. It arrives at that agent's next step; replies come back as messages from ${target}.` }],
       };
     }
