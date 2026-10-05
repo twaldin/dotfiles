@@ -63,7 +63,7 @@ For each omp agent in `herdr agent list` on home and deckbox:
 
 When you finish, get blocked, or need a decision, run:
 `agent-msg cos '<id>: <done|blocked|decision> - <one line> - <pointer>'`.
-From deckbox, use `ssh twaldin@twaldin-home /Users/twaldin/.local/bin/agent-msg cos '...'`.
+From deckbox, use `ssh twaldin@twaldin-home /Users/twaldin/.local/bin/agent-msg cos '...'`. Exit codes from home over ssh always come back 0, so check that it printed `agent-msg: queued for cos`.
 For a decision, include the options and your recommendation.
 Do your own worktree, PR and review work per the repo's rules. Use subagents freely, with `isolated: true` for parallel edits in the same repo.
 
