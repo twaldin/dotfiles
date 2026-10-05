@@ -29,7 +29,10 @@
       "security-reviewer": "@review",
       "scout": "@sol"
     },
-    "showResolvedModelBadge": true
+    "showResolvedModelBadge": true,
+    "isolation": {
+      "enabled": true
+    }
   },
   "compaction": {
     "thresholdPercent": -1,
