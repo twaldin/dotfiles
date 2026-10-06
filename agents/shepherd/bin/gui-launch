@@ -25,8 +25,9 @@ and/or guards one that something else starts, then checks that nothing took it.
 - Before it launches anything the guard takes its baseline: Tim's front app, his focused window and its Space
   (from yabai's window list), the Space his display shows, and yabai's Spaces by SkyLight id. A yabai query there
   that fails, misses its 2 s deadline or answers unreadably (a window row that does not say whether it has focus,
-  a focused row without its id, pid or Space, a Space without its id), or a direct read of his display (SkyLight)
-  that does not show the Space yabai says it shows, launches nothing: exit 2.
+  a focused row without its id, pid or Space, a Space without its id), a direct read of his display (SkyLight)
+  that does not show the Space yabai says it shows, or an AppKit app (below) whose activation policy will not be
+  .prohibited, launches nothing: exit 2.
 - Guard, until --guard-seconds pass, the launched tree exits (without attach), or SIGTERM/SIGINT:
   gui-launch-guard (src/gui-launch-guard.swift) adopts processes as they activate or launch and in a scan
   of all processes every 150 ms. A theft window runs from a tree activation until focus is back with Tim's app,
@@ -54,8 +55,16 @@ and/or guards one that something else starts, then checks that nothing took it.
   coincides with another display's change is a breach too. So callers must not drive other displays (their
   Spaces) during a guarded launch: doing so produces false failures by design. This rests on an assumption
   [INFERENCE, not shown]: macOS posts at least one Space notification after each completed Space change (Apple
-  documents only that it is posted "when a Spaces change occurs"). In a theft window,
-  reads more than 100 ms apart, or a read that fails, are a problem. That is all it does to his windows. It moves
+  documents only that it is posted "when a Spaces change occurs"). That they arrive at all is checked (GR1: guard
+  04448d35 never got one): each change of any display that a read other than a notification's finds (at an
+  activation, a poll, a restore, the end) must be followed by a Space notification within 0.5 s, or the check fails
+  ("Space notifications are not arriving", once per run). macOS delivers them through an app's AppKit event loop,
+  so the guard runs as an AppKit app that is never activated (activation policy .prohibited: no Dock icon, no menu
+  bar, no windows, never frontmost; AppKit opens nothing for it, and a quit Apple Event ends it as SIGTERM does).
+  The residual: a change no read finds is still unchecked, so missing notifications show only once a read finds a
+  change; and [INFERENCE] a notification that comes more than 0.5 s after the change SkyLight shows fails the
+  check. In a theft window, reads more than 100 ms apart, or a read that fails, are a problem. That is all it does
+  to his windows. It moves
   every tree window to the target Space by id as Accessibility reports it created or focused (and again whenever the
   tree activates or the active Space changes); a window yabai will not place or name the owner of, a window list
   that fails, and a tree window still off the target after its move are recorded as they happen, and the tree's
@@ -66,16 +75,19 @@ and/or guards one that something else starts, then checks that nothing took it.
   whether or not the helper exits, and fails it), runs none on its main thread, and ends each with its process
   group (a member it cannot read counts as alive). At its end, work in flight (reverts included) gets 3 s to finish
   and its own final checks 3 s more (what does not finish fails the check, and so does a theft it can no longer
-  revert), then any yabai helper still running is killed, with what it started; then its watch of the displays
-  stops polling, and in one turn of its main queue takes its last read, is sealed and has the summary's records
-  taken (a Space notification after the seal is a problem, never dropped unrecorded).
+  revert), then any yabai helper still running is killed, with what it started; then, while a change a read found
+  waits for its Space notification, it waits for that (at most 0.5 s, still polling); then its watch of the
+  displays stops polling, and in one turn of its main queue takes its last read, is sealed and has the summary's
+  records taken (a change still waiting for its notification then fails the check, however young; a Space
+  notification after the seal is a problem, never dropped unrecorded).
 - Check: no tree window on Spaces 1-4; Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
   himself); no Space the tree showed his display in a theft window, each one a breach even when the guard brought
   his Space back (the check shows both), no Space notification in a theft window that no change of his display
   explains, and no switch of his that a theft came within 2 s of; the active display
   unchanged, by both yabai's focused display and AppKit's main screen; no fault, no yabai timeout but an
-  expected-slow owner query, no gap or failed read of his display in a theft window, no tree window the guard could
+  expected-slow owner query, no gap or failed read of his display in a theft window, no change a read found
+  without a Space notification within 0.5 s, no tree window the guard could
   not locate at its end, no unsettled or killed work. The guard gives focus back without moving the active display,
   so a theft from another display can leave it there (yabai still reported it after Superwhisper got focus back):
   that fails the check, and a click on his display clears it. A reverted activation alone does not fail it: the

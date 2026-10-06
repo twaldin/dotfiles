@@ -16,7 +16,7 @@
 // yabai's Spaces by SkyLight id. A yabai call there that fails, misses its deadline or answers unreadably (a window
 // row that does not say whether it has focus, a focused row without its id, pid or Space, a Space without its id
 // and index) is an error (exit 2): nothing launches; so is a direct read of his display (below) that fails or does
-// not show the Space yabai says it shows.
+// not show the Space yabai says it shows, and an AppKit app (Threads, below) whose policy will not be .prohibited.
 // Until the guard ends it
 //   - attributes: a theft window runs from a tree activation until focus is back with Tim's app (or, with no app
 //     to give it back to, with any app outside the tree) and 2 s after. Inside it no activation and no Space
@@ -45,10 +45,16 @@
 //     drives another display's Spaces during a guarded launch gets false failures by design); outside them any
 //     display's does. One that is not explained is a change and back that no read saw: in a theft or grace window
 //     a breach that cannot be named (space-unseen), outside them his own, as his changes are. This rests on macOS
-//     posting at least one notification after each completed Space change [INFERENCE: not shown here]. In a theft
-//     or grace window, reads more than 100 ms apart, and any read that fails, leave a Space possibly unseen: a
-//     problem. As the guard ends the poll stops; then, in one main-queue turn, the watch takes its last read and is
-//     sealed and the summary's records are taken; a notification after the seal is a problem;
+//     posting at least one notification after each completed Space change [INFERENCE: not shown here]. That the
+//     notifications arrive at all is checked (GR1): a change of any display that another read (an activation's, a
+//     poll's, a restore's, the end's) finds must be followed by a notification within 0.5 s, or they are not
+//     arriving: a problem, once per run. A change no read finds stays unchecked, so this can show them missing only
+//     when a read finds a change. In a theft or grace window, reads more than 100 ms apart, and any read that fails,
+//     leave a Space possibly unseen: a problem. As the guard ends, while a change a read found waits for its
+//     notification, it waits for that (at most 0.5 s, the poll still running); then the poll stops; then, in one
+//     main-queue turn, the watch takes its last read and is sealed (a change still waiting for its notification
+//     then is a problem, however young) and the summary's records are taken; a notification after the seal is a
+//     problem;
 //   - restores Tim's Space: focusing the restore target, when it was last seen on the expected Space and its owner
 //     checks out, brings that Space back, if a fresh read still wants it before each owner query and the focus;
 //     each restore is recorded too. A change taken for Tim's is undone when a theft turns out to have come within
@@ -66,7 +72,10 @@
 // group (SIGTERM, then SIGKILL) and reaped. Work that has not finished by then is a problem for the check; nothing
 // is printed after guard-end. It never quits what it launched.
 // Events go to stdout as JSON lines; the summary gui-launch checks goes to --summary.
-// Threads: main handles workspace notifications, signals and gui-launch's exit, and never waits on a child
+// Threads: main runs NSApplication's own loop (except in the rig), the event loop macOS delivers Space
+// notifications through: the guard is an AppKit app whose activation policy is .prohibited, so it has no Dock icon,
+// no menu bar and no windows and is never activated; AppKit opens nothing for it, and a quit Apple Event ends it as
+// SIGTERM does. Main handles workspace notifications, signals and gui-launch's exit, and never waits on a child
 // process (a yabai call there is refused, and is a problem); reverts run on restoreQueue, Accessibility calls on
 // axQueue (observer callbacks on their own run loop thread), window moves on yabaiQueue, Tim's restore target
 // and Space restores on timQueue, the theft-window reads of his display on watchQueue, yabai's Space map on
@@ -697,7 +706,8 @@ struct DisplayRead: Equatable {
 /// count, no coalescing rule and no userInfo; no source found shows a completed change that posts none, nor proves
 /// that none ever does; and no per-transition source (SkyLight's 1401 and 1329 events included) is documented as
 /// lossless. Under it, an excursion of Tim's display between two reads, however short, leaves a notification that
-/// no read of his display explains. That is not checked here: the guard relies on it. Times: seconds since launch.
+/// no read of his display explains. That is not checked here: the guard relies on it. That notifications arrive at
+/// all is checked (NoticeFeed). Times: seconds since launch.
 struct SpaceNotices: Equatable {
     /// The last Space each display was positively read to show (Tim's apart).
     private(set) var lastTim: UInt64?
@@ -711,14 +721,24 @@ struct SpaceNotices: Equatable {
 
     init(since: Double) { self.since = since }
 
-    /// A read of every display.
-    mutating func read(_ read: DisplayRead) {
-        if let lastTim, lastTim != read.timSpace { timChanged = true }
+    /// A read of every display. Returns whether it found Tim's display, and which other displays, showing another
+    /// Space than at their last positive reading.
+    @discardableResult
+    mutating func read(_ read: DisplayRead) -> (tim: Bool, others: [String]) {
+        var changed: (tim: Bool, others: [String]) = (false, [])
+        if let lastTim, lastTim != read.timSpace {
+            timChanged = true
+            changed.tim = true
+        }
         for (key, now) in read.others.sorted(by: { $0.key < $1.key }) {
-            if let before = lastOthers[key], before != now, !othersChanged.contains(key) { othersChanged.append(key) }
+            if let before = lastOthers[key], before != now {
+                changed.others.append(key)
+                if !othersChanged.contains(key) { othersChanged.append(key) }
+            }
             lastOthers[key] = now
         }
         lastTim = read.timSpace
+        return changed
     }
 
     /// A notification, read at `t` (after `read`, if the read succeeded; `readOK`: false, it failed, and then
@@ -755,6 +775,62 @@ struct SpaceSampling: Equatable {
         guard let since = watchingSince else { return nil }
         let from = max(lastRead ?? since, since)
         return t - from > SpaceSampling.maxGap ? from : nil
+    }
+}
+
+/// GR1: whether macOS's Space notifications reach the guard at all. A Space notification's read must follow each
+/// change of any display (Tim's or another; decision A needs both) that another read found (an activation's, a
+/// poll's, a restore's, the end's) within `limit`: without them the checks that rest on them (SpaceNotices: a change
+/// and back that no read saw, decision A) are blind, and fail open. A notification names no display, so any one
+/// follows every change waiting. The first change that waits longer than `limit`, or that still waits when the guard
+/// seals its records however young it is, is missed: a problem, once per run, after which nothing is tracked. (The
+/// guard's end waits up to `limit`, the poll still running, for a change still waiting to get its notification.) A
+/// change no read finds still goes unchecked: this can show the notifications missing only when a read finds a
+/// change. [INFERENCE] macOS posts the notification within `limit` of the change SkyLight's record shows: a later
+/// one fails the check. Times: seconds since launch.
+struct NoticeFeed: Equatable {
+    static let limit = 0.5
+    struct Change: Equatable {
+        /// When the read that found it was taken.
+        let at: Double
+        /// The display's identifier; nil: Tim's display.
+        let display: String?
+        /// The Space it showed then, by SkyLight id.
+        let space: UInt64
+        let via: String
+    }
+    /// The changes found since the last notification's read, oldest first.
+    private(set) var waiting: [Change] = []
+    /// The change no notification followed, once there is one.
+    private(set) var missed: Change?
+
+    /// A read at `t`, before what it found: the change that has waited longer than `limit`, if one has.
+    mutating func read(at t: Double) -> Change? {
+        guard missed == nil, let oldest = waiting.first, t - oldest.at > NoticeFeed.limit else { return nil }
+        return miss(oldest)
+    }
+
+    /// What a read other than a notification's found.
+    mutating func found(_ changes: [Change]) {
+        if missed == nil { waiting += changes }
+    }
+
+    /// A notification's read (after `read(at:)`): it follows every change still waiting.
+    mutating func notified() { waiting.removeAll() }
+
+    /// The seal, after its read: a change still waiting is missed, however young.
+    mutating func seal() -> Change? {
+        guard missed == nil, let oldest = waiting.first else { return nil }
+        return miss(oldest)
+    }
+
+    /// Whether a change still waits that has waited at most `limit` at `t`.
+    func pending(at t: Double) -> Bool { waiting.contains { t - $0.at <= NoticeFeed.limit } }
+
+    private mutating func miss(_ change: Change) -> Change {
+        missed = change
+        waiting.removeAll()
+        return change
     }
 }
 
@@ -1506,6 +1582,10 @@ func unknownWindow(_ id: Int) -> String { "yabai knows no window \(id)" }
 /// - `{"t", "notice": s, "tim": true|false, "others": [display]}`: a Space notification read at t, the one before
 ///   it read at s; "tim", whether reads of Tim's display named two Spaces since then, "others" the other displays
 ///   they did that for: "explained" (with "explainedBy"), "tree" or "tim".
+/// - `{"t", "feed": via, "changes": [{"display": d|null, "space": id}], "seal": true|false}` (NoticeFeed): a read of
+///   the displays at t, via "notification" or another read that found `changes` (display null: Tim's), then, with
+///   "seal", the seal: "missed" (`{"at", "display", "space", "via", "sealed"}`, or null), "waiting" (how many
+///   changes still wait) and "pending" (one still within the limit).
 /// Other keys (such as "input") play no part. stdout: one line per row.
 func decide() -> Never {
     var procs: [pid_t: [String: Any]] = [:]
@@ -1533,6 +1613,7 @@ func decide() -> Never {
     var lineage = Lineage(tokenEntry: nil, matcher: nil)
     var target = RestoreTarget(pid: nil, start: nil)
     var spaces = SpacePolicy(expected: nil)
+    var feed = NoticeFeed()
     var epoch = 0
     var started = false
     func inTree(_ p: pid_t) -> Bool { lineage.resolve(p, adopting: true, source).inTree }
@@ -1726,6 +1807,23 @@ func decide() -> Never {
             case .tree: out["notice"] = "tree"
             case .tim: out["notice"] = "tim"
             }
+        } else if let via = row["feed"] as? String {
+            func record(_ change: NoticeFeed.Change, sealed: Bool) -> [String: Any] {
+                ["at": change.at, "display": change.display ?? NSNull(), "space": NSNumber(value: change.space), "via": change.via,
+                 "sealed": sealed]
+            }
+            out["missed"] = NSNull()
+            if let late = feed.read(at: t) { out["missed"] = record(late, sealed: false) }
+            if via == "notification" {
+                feed.notified()
+            } else {
+                feed.found((row["changes"] as? [[String: Any]] ?? []).compactMap { change in
+                    number(change["space"]).map { NoticeFeed.Change(at: t, display: change["display"] as? String, space: $0.uint64Value, via: via) }
+                })
+            }
+            if row["seal"] as? Bool == true, let late = feed.seal() { out["missed"] = record(late, sealed: true) }
+            out["waiting"] = feed.waiting.count
+            out["pending"] = feed.pending(at: t)
         } else {
             continue
         }
@@ -2453,15 +2551,19 @@ enum SkyLight {
 /// read that fails, and, while a theft or grace window lasts, reads more than SpaceSampling.maxGap apart, are
 /// problems: nothing then proves that no Space went unseen. A restore is asked of timQueue for each new breach and
 /// each notification that still finds the tree's Space; it acts on the latest read. Every read holds the lock
-/// throughout. Once the guard's end has done its work the poll stops (stopPolling, off main); then main takes the
-/// last read and seals the watch (seal) in the turn that takes the summary's records: no read records anything after
-/// that, and a notification that comes after it is a problem, never dropped unrecorded.
+/// throughout. A change of any display that a read other than a notification's finds must be followed by a
+/// notification within NoticeFeed.limit, or the notifications are not arriving: a problem, once per run. Once the
+/// guard's end has done its work, it waits (awaitNotices, at most NoticeFeed.limit) while such a change still waits
+/// for its notification; then the poll stops (stopPolling, off main); then main takes the last read and seals the
+/// watch (seal) in the turn that takes the summary's records: a change still waiting then is a problem too, no read
+/// records anything after that, and a notification that comes after it is a problem, never dropped unrecorded.
 final class SpaceWatch {
     private let lock = NSLock()
     private var rows: (() -> Any?)?
     private var map: SpaceMap?
     private var sampling = SpaceSampling()
     private var notices = SpaceNotices(since: 0)
+    private var feed = NoticeFeed()
     private var shown: UInt64?
     private var failing = false
     /// The poll stopped for good (the guard's end).
@@ -2507,12 +2609,16 @@ final class SpaceWatch {
             }
             return nil
         }
+        if let late = feed.read(at: t) { missed(late, sealing: false) }
         if let from = sampling.read(at: t) {
             problem(String(format: "Tim's display went unread for %.0f ms in a theft or grace window (%.3f to %.3f s after launch): a Space shown then may be unrecorded",
                            (t - from) * 1000, from, t))
         }
         guard let map, let read = DisplayRead(rows?(), anchor: map.anchor) else {
-            if notice { _ = notices.notified(at: t, readOK: false) }  // nothing explains it; the failed read is a problem
+            if notice {
+                _ = notices.notified(at: t, readOK: false)  // nothing explains it; the failed read is a problem
+                feed.notified()
+            }
             if !failing {
                 failing = true
                 problem(String(format: "Tim's display could not be read directly %.3f s after launch (%@): SkyLight's record shows no display holding Space 1", t, via))
@@ -2521,7 +2627,16 @@ final class SpaceWatch {
             return nil
         }
         failing = false
-        notices.read(read)
+        let moved = notices.read(read)
+        if notice {
+            feed.notified()
+        } else {
+            var changes = moved.tim ? [NoticeFeed.Change(at: t, display: nil, space: read.timSpace, via: via)] : []
+            for key in moved.others {
+                if let other = read.others[key] { changes.append(NoticeFeed.Change(at: t, display: key, space: other, via: via)) }
+            }
+            feed.found(changes)
+        }
         let id = read.timSpace
         let index = map.indexes[id]
         if index == nil { refreshMap() }
@@ -2668,6 +2783,21 @@ final class SpaceWatch {
         }
     }
 
+    /// The guard's end, once its work is done and before the poll stops (endQueue, never main): while a change a read
+    /// found has waited less than NoticeFeed.limit for its notification, waits (at most that long), so main, which
+    /// keeps serving notifications, can take one still on its way before the seal. The poll goes on meanwhile: the
+    /// wait leaves no gap in a theft or grace window.
+    func awaitNotices() {
+        let until = uptime() + NoticeFeed.limit
+        while uptime() < until {
+            lock.lock()
+            let pending = !sealed && feed.pending(at: uptime() - t0)
+            lock.unlock()
+            guard pending else { return }
+            usleep(10_000)
+        }
+    }
+
     /// The guard's end, once its work is done (endQueue, never main): the poll stops for good, and watchQueue is
     /// drained (for up to 1 s) so no poll is under way as the records are taken. Notifications and other reads are
     /// still taken and recorded until the seal; a theft or grace window still counts as watched, so the seal's read
@@ -2685,20 +2815,32 @@ final class SpaceWatch {
 
     /// The seal, on main, in the turn that takes the summary's records (conclude): the last read of every display
     /// (a change since the last read, a breach, a gap or an unexplained notification is judged now; none if the watch
-    /// never began), then, under the lock every read holds throughout, nothing records any more. Main serves the
-    /// notifications, so none can come between the seal and the records; one that comes after the seal is a problem
-    /// (sample), never dropped unrecorded.
+    /// never began), then, under the lock every read holds throughout, a change still waiting for its notification is
+    /// a problem (NoticeFeed.seal), and nothing records any more. Main serves the notifications, so none can come
+    /// between the seal and the records; one that comes after the seal is a problem (sample), never dropped
+    /// unrecorded.
     func seal() {
         lock.lock()
         let begun = rows != nil
         lock.unlock()
         if begun { sample(via: "end") }
         lock.lock()
+        if let late = feed.seal() { missed(late, sealing: true) }
         sealed = true
         timer?.cancel()
         timer = nil
         sampling.unwatch()
         lock.unlock()
+    }
+
+    /// The problem a change no notification followed makes (NoticeFeed): within the limit, or (`sealing`) before
+    /// the seal. Lock held.
+    private func missed(_ change: NoticeFeed.Change, sealing: Bool) {
+        let space = map?.indexes[change.space].map { "Space \($0)" } ?? "a Space yabai did not list (SkyLight id \(change.space))"
+        let display = change.display.map { "display \($0)" } ?? "Tim's display"
+        let late = sealing ? "before the guard sealed its records" : "within \(NoticeFeed.limit) s"
+        problem(String(format: "Space notifications are not arriving: a change to %@ at %.3f s after launch (%@, read by %@) got none %@, so the guard cannot check for unseen excursions",
+                       space, change.at, display, change.via, late))
     }
 
     /// Asks yabai for its Space map again: for a Space it does not know, or a read that found no display holding
@@ -2792,10 +2934,11 @@ func scanOnce() {
 
 /// Ends the guard (main): no new work starts; on endQueue, work in flight (reverts still queued included) settles
 /// within its 3 s, then the final scan, sweep and focus read get their own 3 s (unless gui-launch is gone): the
-/// tree's windows that the final sweep cannot locate are a problem. Then the helpers still running are ended; then
-/// the Space watch's poll stops (off main). Then, in one main-queue turn, the watch takes its last read and is
-/// sealed, the summary's records are taken, and the summary and guard-end are written. The main thread keeps
-/// serving events, Space notifications included, until that turn.
+/// tree's windows that the final sweep cannot locate are a problem. Then the helpers still running are ended; then,
+/// while a change a read found still waits for its Space notification, the end waits for it (at most
+/// NoticeFeed.limit, the poll still running); then the Space watch's poll stops (off main). Then, in one main-queue
+/// turn, the watch takes its last read and is sealed, the summary's records are taken, and the summary and guard-end
+/// are written. The main thread keeps serving events, Space notifications included, until that turn.
 func finish(_ reason: String) {  // main
     guard !finishing else { return }
     finishing = true
@@ -2818,6 +2961,7 @@ func finish(_ reason: String) {  // main
             }
             focusAtEnd = windowFields(yabai(["query", "--windows", "--window"]) as? [String: Any])
         }
+        spaceWatch.awaitNotices()
         spaceWatch.stopPolling()
         DispatchQueue.main.async { conclude(reason, orphaned: orphaned, focusAtEnd: focusAtEnd) }
     }
@@ -2874,6 +3018,53 @@ func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  //
         exit(2)
     }
     exit(0)
+}
+
+// MARK: - AppKit (GR1; not in the rig)
+
+/// The guard's AppKit app keeps AppKit from acting for it: what AppKit would open (it takes the arguments it does not
+/// know, such as the launch's executable, for files to open) is ignored, and a quit Apple Event ends the guard as
+/// SIGTERM does, with its check.
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {}
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        finish("signal")
+        return .terminateCancel
+    }
+}
+
+/// The app's delegate (NSApplication holds it weakly), its activation policy for the start record (null in the
+/// rig), and the activity that keeps App Nap off the guard's timers.
+var appDelegate: AppDelegate?
+var appKitPolicy: Any = NSNull()
+var appNapHold: NSObjectProtocol?
+
+/// GR1: makes the guard an AppKit app that macOS never activates, after the GUI-session check and before SkyLight's
+/// first read and the workspace observers; main then runs NSApplication's own loop (run()), not a bare run loop. A
+/// plain process whose main thread ran the main run loop got its activations, which LaunchServices reports, and never
+/// one Space notification (roblox's receipt 20261006T163321Z: four changes of Tim's display read, none by a
+/// notification). yabai (dd84572) starts this way: NSApplicationLoad() (src/yabai.c:139), which creates the shared
+/// NSApplication; its workspace observers (src/workspace.m:157-165, from src/yabai.c:295); then [NSApp run]
+/// (src/yabai.c:350), which replaced a bare CFRunLoopRunInMode loop when its Space notifications stopped on macOS 26
+/// (3861367, yabai #2680). [INFERENCE] The notifications then reach the guard too; NoticeFeed fails the check when
+/// they do not. The app is never activated: its policy is .prohibited (no Dock icon, no menu bar, no windows, never
+/// frontmost), set before it runs, and a policy that does not take is an error before anything launches. AppKit
+/// opens nothing for it (NSTreatUnknownArgumentsAsOpen, AppDelegate). As before AppKit's loop ran, an Objective-C
+/// exception ends the process (that loop would log it and go on; gui-launch fails a guard that dies), and App Nap
+/// does not slow its reads and reverts. false: the policy did not take.
+@MainActor func startAppKit() -> Bool {
+    UserDefaults.standard.register(defaults: ["NSTreatUnknownArgumentsAsOpen": "NO", "NSApplicationCrashOnExceptions": true])
+    let app = NSApplication.shared
+    _ = app.setActivationPolicy(.prohibited)
+    guard app.activationPolicy() == .prohibited else { return false }
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    appDelegate = delegate
+    appKitPolicy = "prohibited"
+    appNapHold = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                       reason: "gui-launch-guard times its reads and reverts in milliseconds")
+    return true
 }
 
 // MARK: - Start
@@ -3030,6 +3221,10 @@ if !rigTest {
           sessionBits.contains(.sessionHasGraphicAccess) else {
         fail("this process is not in a GUI session, where activations are reported: start it through gui-launch")
     }
+    // GR1: an AppKit app macOS never activates, before SkyLight's first read and the observers (startAppKit).
+    guard MainActor.assumeIsolated({ startAppKit() }) else {
+        fail("AppKit would not make this process an app that can never be activated, so nothing was launched")
+    }
 }
 
 // Tim's display, read directly from here on (the rig reads its stand-in file): the first read must show the Space
@@ -3091,7 +3286,7 @@ let attachRecord: Any = matcher.map { ["exe": $0.exe, "needle": attachNeedle ?? 
 let startRecord: [String: Any] = [
     "space": space, "guardSeconds": guardSeconds, "front": describe(frontAtLaunch), "focus": focusAtLaunch,
     "timSpace": timSpaceAtLaunch ?? NSNull(), "restoreWindow": baseline.target.window ?? NSNull(),
-    "restoreWindowSpace": baseline.target.windowSpace ?? NSNull(), "attach": attachRecord,
+    "restoreWindowSpace": baseline.target.windowSpace ?? NSNull(), "attach": attachRecord, "activationPolicy": appKitPolicy,
 ]
 if launchArgv.isEmpty {
     started = true
@@ -3195,4 +3390,10 @@ if rigTest {
 }
 
 Timer.scheduledTimer(withTimeInterval: guardSeconds, repeats: false) { _ in finish("timeout") }
-RunLoop.main.run()
+// GR1: NSApplication's own loop (startAppKit), which serves the main run loop and queue as RunLoop.main.run() does,
+// and the AppKit events macOS's Space notifications come through; the rig has no AppKit app.
+if rigTest {
+    RunLoop.main.run()
+} else {
+    MainActor.assumeIsolated { NSApplication.shared.run() }
+}
