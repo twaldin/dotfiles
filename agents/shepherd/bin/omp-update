@@ -8,7 +8,8 @@ Policy (Tim, 2026-10-05, via the meta pane):
   24 h ago. A tag without a published release (e.g. v18.6.2) never counts. Every host
   goes to the target; a host that is ahead is reported, never downgraded.
 - No install or restart on a host while it is in a quiet window, or when one starts
-  within 30 min (home's book: ~/.config/machine-shepherd/quiet-windows.json). The run
+  within 30 min (home's book: ~/.config/machine-shepherd/quiet-windows.json, plus the holds in
+  quiet-holds.json beside it). The run
   waits for the window to end, up to quiet_wait_hours, then skips that host for the day.
 - herdr panes: never touch one that is `working` (or `blocked`). An `idle`/`done` pane is
   restarted (/exit, then `herdr agent start <name> --kind omp --pane <id> -- --resume=<session>`)
