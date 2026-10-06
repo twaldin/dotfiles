@@ -21,6 +21,7 @@ import os
 import platform
 import pwd
 import queue
+import select
 import shutil
 import signal
 import subprocess
@@ -265,6 +266,40 @@ def show(root, shown, extra=(), anchor=True, other=110):
     if other is not None:
         d2['Current Space'] = {'id64': other}
     put(root / 'displays.json', json.dumps([{'Display Identifier': 'D1', 'Current Space': {'id64': shown}, 'Spaces': spaces}, d2]))
+
+
+def started_event(fd, timeout=15):
+    """Reads a guard's stdout, the pipe `fd`, until its start event (guarding) or an error, and returns which; then
+    stops reading."""
+    data, deadline = b'', time.monotonic() + timeout
+    while True:
+        for line in data.split(b'\n')[:-1]:
+            event = json.loads(line).get('event')
+            if event in ('guarding', 'error'):
+                return event
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([fd], [], [], left)[0]:
+            raise AssertionError('no start within %s s; got %r' % (timeout, data))
+        chunk = os.read(fd, 1 << 16)
+        if not chunk:
+            raise AssertionError('the output ended; got %r' % data)
+        data += chunk
+
+
+def fill_pipe(fd):
+    """Fills the pipe whose write end is `fd` to the brim (nobody reads it), then makes `fd` blocking again: the flag
+    is the open file description's, which a process given this end shares."""
+    os.set_blocking(fd, False)
+    try:
+        for size in (4096, 1):
+            while True:
+                try:
+                    os.write(fd, b' ' * size)
+                except BlockingIOError:
+                    break
+    finally:
+        os.set_blocking(fd, True)
+
 
 
 class Lines:
@@ -1595,10 +1630,10 @@ class Guard(unittest.TestCase):
 
     # The rig: the guard without a GUI ---------------------------------------------------------------------
 
-    def rig(self, windows=()):
-        """A --rig guard (--space 7) over RIG_YABAI: yabai's Spaces as rig_spaces() says, answered 0.6 s late;
-        `windows` its window list; Tim's display on Space 1. The process, its stdout lines, and its directory; its
-        start event (guarding) is self.rig_start."""
+    def rig_argv(self, windows=()):
+        """What a --rig guard (--space 7) reads, in a directory of its own: RIG_YABAI, with yabai's Spaces as
+        rig_spaces() says, answered 0.6 s late, and `windows` its window list; Tim's display on Space 1. Its argv,
+        and the directory."""
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))
         yabai = root / 'yabai'
         yabai.write_text(RIG_YABAI % {'dir': root})
@@ -1611,9 +1646,14 @@ class Guard(unittest.TestCase):
         for w in windows:
             put(root / ('window-%d.json' % w['id']), json.dumps(w))
         show(root, 101)
-        process = subprocess.Popen([str(self.binary), '--rig', '--space', '7', '--guard-seconds', '60', '--yabai', str(yabai),
-                                    '--displays', str(root / 'displays.json'), '--summary', str(root / 'summary.json')],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        return [str(self.binary), '--rig', '--space', '7', '--guard-seconds', '60', '--yabai', str(yabai),
+                '--displays', str(root / 'displays.json'), '--summary', str(root / 'summary.json')], root
+
+    def rig(self, windows=()):
+        """A --rig guard as rig_argv() sets it up. The process, its stdout lines, and its directory; its start event
+        (guarding) is self.rig_start."""
+        argv, root = self.rig_argv(windows)
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         lines = Lines(process.stdout)
         self.addCleanup(lambda: (process.kill(), process.wait(), lines.thread.join(5), process.stdin.close(), process.stdout.close()))
         started = lines.until(lambda row: row.get('event') in ('guarding', 'error'), 15)
@@ -1897,6 +1937,41 @@ class Guard(unittest.TestCase):
         self.assertEqual(process.wait(10), 2)
         self.assertIsNone(lines.rows.get(timeout=5), 'nothing is printed after the error')
         self.assertFalse((root / 'summary.json').exists())
+
+    def test_an_objective_c_exception_ends_the_guard_within_a_second_though_nobody_drains_its_output(self):
+        # GR1-F2: the end on an exception cannot hang on the guard's output. Its stdout (then its stderr too) is a pipe
+        # nobody reads, filled to the brim by the test (through its own copy of the write end) while the rig is idle
+        # after its start; then the rig raises an exception nothing catches. The guard must exit 2 within 1 s: its
+        # error event and stderr line are best-effort (one write each, made only if the pipe can take it at once), and
+        # a watchdog it arms first ends it after 0.5 s whatever blocks. 67b2e27's guard blocks in its write to stdout,
+        # or, with stderr full, in CoreFoundation's own report of the exception before its handler runs. The rig has no
+        # AppKit loop, so this is the uncaught path; GuardApplication.reportException calls the same exceptionEnds.
+        for stalled in (('stdout',), ('stdout', 'stderr')):
+            with self.subTest(stalled=stalled):
+                argv, root = self.rig_argv()
+                out_r, out_w = os.pipe()
+                err_r, err_w = os.pipe()
+                process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out_w, stderr=err_w)
+                self.addCleanup(lambda p=process, fds=(out_r, out_w, err_r, err_w): (
+                    p.kill(), p.wait(), p.stdin.close(), [os.close(fd) for fd in fds]))
+                self.assertEqual(started_event(out_r), 'guarding')
+                fill_pipe(out_w)
+                if 'stderr' in stalled:
+                    fill_pipe(err_w)
+                began = time.monotonic()
+                process.stdin.write(b'raise\n')
+                process.stdin.flush()
+                try:
+                    code = process.wait(5)
+                except subprocess.TimeoutExpired:
+                    self.fail('the guard had not exited 5 s after the exception')
+                self.assertEqual(code, 2)
+                self.assertLess(time.monotonic() - began, 1.0)
+                self.assertFalse((root / 'summary.json').exists())
+                if 'stderr' not in stalled:
+                    os.set_blocking(err_r, False)
+                    self.assertIn(b'gui-launch-guard: an Objective-C exception that nothing caught (GuiLaunchRigException: raised by the rig) '
+                                  b'ended the guard at once', os.read(err_r, 1 << 16))
 
     def test_a_tree_window_whose_owner_yabai_does_not_name_stays_unknown_and_fails_the_check(self):
         # GP2: windows 9003 (on Space 6) and 9004 (no Space) are the tree's in yabai's list, but its answer about each

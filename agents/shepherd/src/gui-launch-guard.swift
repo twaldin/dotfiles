@@ -72,7 +72,8 @@
 // scan, sweep and focus read) gets its own 3 s; then every yabai helper still running is killed with its process
 // group (SIGTERM, then SIGKILL) and reaped. Work that has not finished by then is a problem for the check; nothing
 // is printed after guard-end. It never quits what it launched. An Objective-C exception, whether AppKit's loop caught
-// it or nothing did, ends the guard at once instead, whatever the defaults say: an error event, no summary, exit 2.
+// it or nothing did, ends the guard at once instead, whatever the defaults say, within 0.5 s whether or not anyone
+// drains its output: a best-effort error event (it may be missing), no summary, no helper teardown, exit 2.
 // Events go to stdout as JSON lines; the summary gui-launch checks goes to --summary.
 // Threads: main runs NSApplication's own loop (except in the rig), the event loop macOS delivers Space
 // notifications through: the guard is an AppKit app of its own class (GuardApplication) whose activation policy is
@@ -896,26 +897,58 @@ func fail(_ message: String) -> Never {
     exit(2)
 }
 
-/// GR1-F1: an Objective-C exception ends the guard at once, as a failure: the `error` event (if stdout is free within
-/// 0.2 s and nothing ended the output) and the message on stderr, then exit 2, which gui-launch fails. Nothing else
-/// runs: the exception may have left any lock held and any record half made (Swift code does not unwind it), so no
-/// summary is written and the yabai helpers are left to end on their own, as on a crash. `inAppKit`: AppKit's loop
-/// caught it (GuardApplication); else nothing caught it (the uncaught-exception handler).
-func exceptionEnds(_ exception: NSException, inAppKit: Bool) -> Never {
-    let message = "an Objective-C exception \(inAppKit ? "in AppKit's loop" : "that nothing caught") (\(exception.name.rawValue): " +
-        "\(exception.reason ?? "no reason given")) ended the guard at once: its records are incomplete"
+/// GR1-F1/F2: an Objective-C exception ends the guard at once, as a failure, and nothing it waits on can stop that:
+/// first a watchdog thread is armed that exits 2 after 0.5 s whatever else blocks (armExitWatchdog); then, best
+/// effort, the `error` event (if stdout's lock is free within 0.2 s and nothing ended the output) and the message on
+/// stderr, each one write made only if its pipe can take it at once (writeIfReady), so an output nobody drains is
+/// skipped, never waited on; then exit 2, which gui-launch fails. Nothing else runs: the exception may have left any
+/// lock held and any record half made (Swift code does not unwind it), so no summary is written and the yabai helpers
+/// are left to end on their own, as on a crash. `thrown`: what was raised (an NSException, or any object);
+/// `inAppKit`: AppKit's loop caught it (GuardApplication); else nothing caught it (the uncaught-exception handlers).
+func exceptionEnds(_ thrown: Any?, inAppKit: Bool) -> Never {
+    armExitWatchdog()
+    func capped(_ text: String, _ bytes: Int) -> String { String(decoding: Array(text.utf8.prefix(bytes)), as: UTF8.self) }
+    let exception = thrown as? NSException
+    let name = capped(exception?.name.rawValue ?? thrown.map { "a \(type(of: $0))" } ?? "nil", 100)
+    let reason = capped(exception?.reason ?? "no reason given", 200)
+    let message = "an Objective-C exception \(inAppKit ? "in AppKit's loop" : "that nothing caught") (\(name): \(reason)) " +
+        "ended the guard at once: its records are incomplete"
+    // The lock stays held: nothing is printed after the error event, or in its place.
     if outLock.lock(before: Date(timeIntervalSinceNow: 0.2)) {
         if !outputClosed, var line = try? JSONSerialization.data(withJSONObject: ["event": "error", "message": message, "at": iso()],
                                                                  options: [.sortedKeys, .withoutEscapingSlashes]) {
             line.append(10)
-            line.withUnsafeBytes { _ = write(1, $0.baseAddress, $0.count) }
-            outputClosed = true
+            if line.count <= Int(PIPE_BUF) { writeIfReady(1, Array(line)) }  // a JSON line goes whole, or not at all
         }
-        outLock.unlock()
+        outputClosed = true
     }
-    let text = Array(("gui-launch-guard: " + message + "\n").utf8)
-    _ = write(2, text, text.count)
+    writeIfReady(2, Array(("gui-launch-guard: " + message + "\n").utf8))
     _exit(2)
+}
+
+/// GR1-F2: a thread of its own (no queue, no lock, no output) that exits 2 once 0.5 s have passed, so the guard's
+/// end on an exception never waits on anything for longer. (alarm would end it by SIGALRM, not exit 2.)
+func armExitWatchdog() {
+    var thread: pthread_t?
+    guard pthread_create(&thread, nil, { _ in
+        var want = timespec(tv_sec: 0, tv_nsec: 500_000_000)
+        var left = timespec()
+        while nanosleep(&want, &left) == -1 && errno == EINTR { want = left }
+        _exit(2)
+    }, nil) == 0, let thread else { return }
+    pthread_detach(thread)
+}
+
+/// GR1-F2: one write to `fd` of at most PIPE_BUF bytes, made only if poll shows that `fd` can take it now: a pipe
+/// shows writable only with PIPE_BUF bytes free, and a write that small goes in whole, so it does not block (unless
+/// another process fills the pipe in between: the watchdog bounds that). Not O_NONBLOCK: that flag belongs to the
+/// open file description, which the guard's stdout and stderr share with gui-launch, its caller and (stderr) the
+/// launched app, whose writes it would make fail once the guard is gone.
+func writeIfReady(_ fd: Int32, _ bytes: [UInt8]) {
+    var ready = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+    guard poll(&ready, 1, 0) == 1, ready.revents & Int16(POLLOUT) != 0 else { return }
+    let count = min(bytes.count, Int(PIPE_BUF))
+    _ = bytes.withUnsafeBytes { write(fd, $0.baseAddress, count) }
 }
 
 func describe(_ app: NSRunningApplication?) -> Any {
@@ -3265,9 +3298,14 @@ if !rigTest {
     if let why = MainActor.assumeIsolated({ startAppKit() }) { fail(why) }
 }
 focusAtLaunch["mainScreen"] = NSScreen.main?.localizedName ?? NSNull()
-// GR1-F1: an Objective-C exception that nothing catches (on any thread, or on main outside AppKit's loop; in the rig,
-// any) ends the guard at once as well (exceptionEnds); AppKit's loop hands the ones it catches to GuardApplication.
+// GR1-F1/F2: an Objective-C exception that nothing catches (on any thread, or on main outside AppKit's loop; in the
+// rig, any) ends the guard at once as well (exceptionEnds); AppKit's loop hands the ones it catches to
+// GuardApplication. The runtime's own handler is the guard's: CoreFoundation's, which calls the one Foundation's
+// NSSetUncaughtExceptionHandler sets, first reports the exception on stderr, a write that blocks when nobody drains
+// stderr, before exceptionEnds could arm its watchdog. Foundation's handler is set too, in case CoreFoundation's
+// comes back.
 NSSetUncaughtExceptionHandler { exceptionEnds($0, inAppKit: false) }
+_ = objc_setUncaughtExceptionHandler { exceptionEnds($0, inAppKit: false) }
 
 // Tim's display, read directly from here on (the rig reads its stand-in file): the first read must show the Space
 // yabai says it shows, or nothing launches.

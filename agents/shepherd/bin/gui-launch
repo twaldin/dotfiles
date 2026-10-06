@@ -62,7 +62,9 @@ and/or guards one that something else starts, then checks that nothing took it.
   so the guard runs as an AppKit app that is never activated (activation policy .prohibited: no Dock icon, no menu
   bar, no windows, never frontmost; AppKit opens nothing for it, and a quit Apple Event ends it as SIGTERM does).
   An Objective-C exception, whether AppKit's loop caught it or nothing did, ends the guard at once whatever the
-  defaults say: an `error` event, no summary, and the guard exits 2, so gui-launch exits 2.
+  defaults say, within 0.5 s whether or not anyone drains its output: an `error` event if stdout can take it at
+  once (it may be missing), no summary, no teardown of its yabai helpers, and the guard exits 2, so gui-launch
+  exits 2: treat that as a crash.
   The residual: a change no read finds is still unchecked, so missing notifications show only once a read finds a
   change; and [INFERENCE] a notification that comes more than 0.5 s after the change SkyLight shows fails the
   check. In a theft window, reads more than 100 ms apart, or a read that fails, are a problem. That is all it does
