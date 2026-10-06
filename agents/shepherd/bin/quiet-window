@@ -2,7 +2,7 @@
 """quiet-window: book and enforce quiet windows for measured runs on twaldin-home.
 
   quiet-window add START END OWNER LABEL   START/END in UTC, e.g. 2026-10-01T08:30Z; OWNER = herdr agent
-                                           name (preferred: survives pane moves) or pane id
+                                           name (preferred: survives pane moves) or pane id, or easl tile name
   quiet-window list | remove ID            remove ends a running window now (it still gets its summary)
   quiet-window mute ID                     end summary to the shepherd only (owner busy with Tim)
   quiet-window tick                        run every minute by launchd (net.waldin.quiet-window)
@@ -10,6 +10,9 @@
 tick: 10 minutes before a window, every other herdr pane gets the hold notice. During the window,
 quiet-check --pane OWNER names processes of other agents at 10%+ CPU; each such pane gets a "stop
 now" prompt (at most every 4 minutes). At the end, the owner and the shepherd get a summary.
+With ~/.config/machine-shepherd/easl.json enabled, easl agent tiles take part too: a tile may own a window,
+and omp tiles with an easl protocol get the notice, "stop now" and summary through `easl agent.prompt`
+(any other tile is skipped, never typed into).
 Why (2026-10-01): sky-lead's quiet notices reached only its own panes, so canvas's encode and
 build cancelled bench-judge's measured sitting 24 of 48 legs in."""
 import datetime as dt
@@ -22,13 +25,19 @@ import sys
 BOOK = os.path.expanduser("~/.config/machine-shepherd/quiet-windows.json")
 STATE = os.path.expanduser("~/.local/state/machine-shepherd/quiet-window-state.json")
 LOG = os.path.expanduser("~/.local/state/machine-shepherd/quiet-window.log")
-# Agent name or pane id; names survive herdr pane moves (pane ids change on every move).
+# Agent name or pane id; names survive herdr pane moves (pane ids change on every move). An easl tile name works too.
 SHEPHERD = open(os.path.expanduser("~/.config/machine-shepherd/pane")).read().strip() \
     if os.path.exists(os.path.expanduser("~/.config/machine-shepherd/pane")) else "shepherd"
 HERDR = os.path.expanduser("~/.local/bin/herdr")
 NOTICE_MIN, REPEAT_MIN = 10, 4
 HOLD = ("no builds, renders, encodes, benchmarks, game clients or screen captures; "
         "editing, reading, git and idle agents are fine")
+# The easl switch: {"enabled": true, "cli": "<easl path>"}. A missing or unreadable file,
+# or "enabled" not true, keeps quiet-window herdr-only.
+EASL_CONF = os.path.expanduser("~/.config/machine-shepherd/easl.json")
+# Fields new in easl R1, unconfirmed until it ships: a rename is a change here only.
+TILE_PROTOCOL = "protocol"  # Agent: present once the tile's easl integration reports
+DELIVERY = "delivery"  # agent.prompt result: "message", or "typed" when easl pasted into the terminal
 
 
 def load(path, default):
@@ -82,6 +91,63 @@ def agents():
         return {}
 
 
+def easl(*args):
+    """stdout of the easl CLI when the switch is on and the call succeeds, else None (one stderr line
+    on failure). The CLI's launcher execs bun, which launchd's PATH lacks."""
+    try:
+        with open(EASL_CONF) as f:
+            conf = json.load(f)
+        if conf.get("enabled") is not True:
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    env = {**os.environ, "PATH": os.path.expanduser("~/.bun/bin") + ":" + os.environ.get("PATH", "")}
+    try:
+        r = subprocess.run([conf.get("cli"), *args], capture_output=True, text=True, timeout=15, env=env)
+        err = f"exit {r.returncode}: {' '.join(r.stderr.split())[-160:]}" if r.returncode else None
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError) as e:
+        r, err = None, type(e).__name__
+    if err:
+        print(f"quiet-window: easl {args[0]} failed ({err})", file=sys.stderr)
+        return None
+    return r.stdout
+
+
+def easl_tiles():
+    """{tile id: easl Agent} for every easl agent tile; {} when the switch is off or the CLI fails."""
+    out = easl("agent.list")
+    if out is None:
+        return {}
+    try:
+        return {t["tile"]: t for t in json.loads(out)["agents"] if isinstance(t, dict) and t.get("tile")}
+    except (ValueError, KeyError, TypeError):
+        print("quiet-window: easl agent.list printed no agent list; no easl tiles this run", file=sys.stderr)
+        return {}
+
+
+def tile_name(t):
+    """A tile's display name: its agent name, else its tile id."""
+    return t.get("name") or t["tile"]
+
+
+def promptable(t):
+    """Only an omp tile whose easl integration reports a protocol takes agent.prompt as a message;
+    any other tile would get it pasted into its terminal."""
+    return t.get("kind") == "omp" and type(t.get(TILE_PROTOCOL)) is int
+
+
+def easl_prompt(t, text):
+    """`agent.prompt` to tile t at its next turn, addressed by tile id (a bare name can match several
+    tiles). Returns its delivery ("unknown" when the result does not say), or None when the call failed."""
+    out = easl("agent.prompt", "--target", t["tile"], "--text", text, "--from", "shepherd", "--when", "next-turn")
+    if out is None:
+        return None
+    try:
+        return str(json.loads(out)[DELIVERY])
+    except (ValueError, KeyError, TypeError):
+        return "unknown"
+
+
 def find(book, wid):
     """A window by id, or by an id it had before its owner's pane moved (former_ids)."""
     return next((w for w in book if w["id"] == wid or wid in w.get("former_ids", [])), None)
@@ -90,14 +156,42 @@ def find(book, wid):
 def tick():
     book, state = load(BOOK, []), load(STATE, {})
     now = dt.datetime.now(dt.timezone.utc)
-    ags = None
+    ags = tls = None
 
     def pane_of(x):
-        """Current pane id of an agent name or pane id; None when no such agent runs."""
-        nonlocal ags
+        """Current pane id of an agent name or pane id, else the tile id of the easl tile with that name or
+        tile id (herdr first); None when no such agent runs."""
+        nonlocal ags, tls
         if ags is None:
-            ags = agents()
-        return x if x in ags else next((p for p, n in ags.items() if n == x), None)
+            ags, tls = agents(), easl_tiles()
+        p = x if x in ags else next((p for p, n in ags.items() if n == x), None)
+        if p is not None:
+            return p
+        return x if x in tls else next((i for i, t in tls.items() if t.get("name") == x), None)
+
+    def send(s, target, text):
+        """prompt() a herdr pane or agent. Where pane_of() resolves target to an easl tile, an omp tile with a
+        protocol gets `agent.prompt` instead, and any other tile is skipped (a prompt would be typed into its
+        terminal), as is a tile easl once typed into during this window. True when delivered or skipped."""
+        key = pane_of(target)
+        t = tls.get(key)
+        if t is None:
+            return prompt(target, text)
+        tid, name = t["tile"], tile_name(t)
+        if tid in s.get("typed", []) or not promptable(t):
+            why = "easl typed into it earlier in this window" if tid in s.get("typed", []) else \
+                f"kind {t.get('kind')!r}, protocol {t.get(TILE_PROTOCOL)!r}"
+            log(f"skip easl tile {tid} ({name}): {why}; never typed into: {text[:120]}")
+            return True
+        delivery = easl_prompt(t, text)
+        log(f"easl msg {tid} ({name}) delivery={delivery or 'failed'}: {text[:120]}")
+        if delivery == "typed":
+            warn = f"WARNING: easl TYPED into tile {tid} ({name}) instead of messaging it; no more prompts to it this window"
+            log(warn)
+            print(f"quiet-window: {warn}", file=sys.stderr)
+            s.setdefault("typed", []).append(tid)
+            return False
+        return delivery is not None
 
     for w in book:
         s = state.setdefault(w["id"], {"noticed": False, "started": False, "ended": False, "last": {}, "hits": {}})
@@ -108,15 +202,16 @@ def tick():
         owner, me = pane_of(w["owner"]), pane_of(SHEPHERD)
         if owner is None and not s.get("owner_missing"):
             log(f"owner {w['owner']} of {w['id']} not found in herdr")
-            prompt(SHEPHERD, f"shepherd: quiet window {w['id']} names owner {w['owner']}, which no herdr agent "
-                             f"matches (moved pane? use agent names); its own processes will count as offenders.")
+            send(s, SHEPHERD, f"shepherd: quiet window {w['id']} names owner {w['owner']}, which no herdr agent "
+                              f"matches (moved pane? use agent names); its own processes will count as offenders.")
             s["owner_missing"] = True
         if start - dt.timedelta(minutes=NOTICE_MIN) <= now < end and (not s["noticed"] or s.get("notice_pending")):
-            targets = s["notice_pending"] if s["noticed"] else [p for p in ags if p not in (owner, me)]
+            targets = s["notice_pending"] if s["noticed"] else [p for p in ags if p not in (owner, me)] + [
+                i for i, t in tls.items() if i not in (owner, me) and t.get("name") not in (w["owner"], SHEPHERD)]
             s["notice_pending"] = [
-                p for p in targets if p in ags and not prompt(
-                    p, f"shepherd: QUIET WINDOW {span} for {w['label']} ({w['owner']}). "
-                       f"Hold during it: {HOLD}. Finish or park heavy work before {local(w['start'])}.")]
+                p for p in targets if (p in ags or p in tls) and not send(
+                    s, p, f"shepherd: QUIET WINDOW {span} for {w['label']} ({w['owner']}). "
+                          f"Hold during it: {HOLD}. Finish or park heavy work before {local(w['start'])}.")]
             s["noticed"] = True
         if start <= now < end:
             s["started"] = True
@@ -132,6 +227,11 @@ def tick():
                     for pane in m.group(4).split("|"):
                         if pane != owner:
                             offenders.setdefault(pane, []).append(f"{m.group(3)} pid {m.group(2)} {m.group(1)}%")
+                elif "(easl tile " in line:
+                    # quiet-check labels a tile's processes "<name> (easl tile <tile id>)"; it is asked by tile id.
+                    tm = re.match(r"\s*([\d.]+)%\s+(\d+)\s+(\S+)\s.*\(easl tile (\S+)\)", line)
+                    if tm and tm.group(4) != owner:
+                        offenders.setdefault(tm.group(4), []).append(f"{tm.group(3)} pid {tm.group(2)} {tm.group(1)}%")
                 elif "owner unknown" in line:
                     # A shared omp service child whose cwd matches no pane: the shepherd finds the owner.
                     u = re.match(r"\s*([\d.]+)%\s+(\d+)\s+(\S+)", line)
@@ -144,18 +244,18 @@ def tick():
                 s["hits"][pane] = s["hits"].get(pane, 0) + 1
                 last = s["last"].get(pane)
                 if last is None or now - dt.datetime.fromisoformat(last) >= dt.timedelta(minutes=REPEAT_MIN):
-                    if prompt(pane, f"shepherd: STOP NOW. Quiet window {span} for {w['label']} is running, and "
-                                    f"your processes are loading the machine: {', '.join(procs)}. Stop or pause "
-                                    f"them until {local(w['end'])} local; {HOLD}."):
+                    if send(s, pane, f"shepherd: STOP NOW. Quiet window {span} for {w['label']} is running, and "
+                                     f"your processes are loading the machine: {', '.join(procs)}. Stop or pause "
+                                     f"them until {local(w['end'])} local; {HOLD}."):
                         s["last"][pane] = now.isoformat()
         if now >= end and s["started"] and not s["ended"]:
-            hits = ", ".join(f"{p} x{n}" for p, n in s["hits"].items()) or "none"
+            hits = ", ".join(f"{tile_name(tls[p]) if p in tls else p} x{n}" for p, n in s["hits"].items()) or "none"
             # A muted owner is busy with Tim (e.g. a live capture in its pane); the shepherd forwards later.
             targets = s["summary_pending"] if "summary_pending" in s else \
                 [SHEPHERD] if w.get("mute_owner") else [w["owner"], SHEPHERD]
-            s["summary_pending"] = [p for p in targets if not prompt(
-                p, f"shepherd: quiet window {span} for {w['label']} ended. "
-                   f"Panes caught loading the machine (minute samples): {hits}.")]
+            s["summary_pending"] = [p for p in targets if not send(
+                s, p, f"shepherd: quiet window {span} for {w['label']} ended. "
+                      f"Panes caught loading the machine (minute samples): {hits}.")]
             # Retried each tick while a recipient refuses (blocked/focused, no inbox yet), for up to 30 min.
             s["ended"] = not s["summary_pending"] or now - end > dt.timedelta(minutes=30)
     keep = [w for w in book if utc(w["end"]) > now - dt.timedelta(hours=12)]

@@ -4,11 +4,13 @@ machine-watch runs `machine-census --json --sample 2` and reads memory, cpu_idle
 top_compressed from it, so that JSON is the contract. Two kinds of run:
   * the real machine (ps, top, vm_stat, sysctl, memory_pressure are real and read-only), asserting the shape;
   * a stubbed machine with a known process table, asserting grouping, agent rows and the failure exit.
-sudo, herdr and lsof are always stubbed so nothing privileged runs and no pane is queried.
+sudo, herdr and lsof are always stubbed so nothing privileged runs and no pane is queried. easl is only reachable
+through the switch file a test writes into the temp HOME, naming a stub CLI that logs its calls.
 """
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -81,6 +83,46 @@ case "$*" in
 esac
 '''
 
+# Two omp agents in easl tiles under the easl app (890): `bench` (900, a cargo build under it) and an unnamed
+# one (950). Columns as in PS_TABLE and TOP_OUT; appended to the stubbed machine's tables.
+TILE_PS = '''\
+  890     1    06:00:00 /Applications/easl.app/Contents/MacOS/easl
+  900   890    01:00:00 omp --resume {session}
+  910   900    00:30:00 /usr/bin/cargo build
+  950   890    00:10:00 omp
+'''
+TILE_TOP = '''\
+890    2.0  100M  0B
+900    5.0  700M  0B
+910    30.0 400M  0B
+950    1.0  300M  0B
+'''
+TILES = [
+    {'tile': 'obj_bench', 'board': 'brd_lab', 'name': 'bench', 'kind': 'omp', 'lifecycle': {'state': 'working'},
+     'pid': 900, 'protocol': 1},
+    {'tile': 'obj_anon', 'board': 'brd_lab', 'kind': 'omp', 'lifecycle': {'state': 'idle'}, 'pid': 950},
+    # herdr's pane w1:p2 owns pid 300; a tile claiming it does not take it over.
+    {'tile': 'obj_thief', 'board': 'brd_lab', 'name': 'thief', 'kind': 'omp', 'lifecycle': {'state': 'idle'},
+     'pid': 300, 'protocol': 1},
+    {'tile': 'obj_term', 'board': 'brd_lab', 'name': 'term', 'kind': 'shell', 'lifecycle': {'state': 'idle'}},
+]
+HERDR_ROW = {'pid': 300, 'pane': 'w1:p2', 'uptime': '04:00:00', 'mem_mb': 1500, 'cpu': 12.5, 'session_mb': 3.0,
+             'project': 'proj', 'sub_mem_mb': 500, 'sub_top': [[300, 'node'], [200, 'ruby']]}
+
+# The easl CLI stand-in. It logs each call (argv, first PATH entry) to calls.jsonl beside itself and prints
+# agents.json from there for `agent.list`; a `mode` file there makes it fail (exit 1) or print bad JSON.
+FAKE_EASL = '''#!%s
+import json, os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+mode = open(os.path.join(here, 'mode')).read().strip() if os.path.exists(os.path.join(here, 'mode')) else 'ok'
+with open(os.path.join(here, 'calls.jsonl'), 'a') as f:
+    f.write(json.dumps({'argv': sys.argv[1:], 'path0': os.environ['PATH'].split(':')[0]}) + '\\n')
+if mode == 'fail':
+    sys.exit('easl: cannot reach easld')
+if sys.argv[1:2] == ['agent.list']:
+    sys.stdout.write('{"agents": [' if mode == 'badjson' else open(os.path.join(here, 'agents.json')).read())
+''' % sys.executable
+
 
 def write_exec(path, body):
     path.write_text(body)
@@ -102,6 +144,24 @@ class CensusCase(unittest.TestCase):
 
     def census(self, *args):
         return subprocess.run([str(MACHINE_CENSUS), *args], env=self.env, capture_output=True, text=True, timeout=120)
+
+    def stub_machine(self):
+        """A known process table: one herdr agent (pid 300, pane w1:p2) and the classes around it."""
+        session = self.root / '.omp/agent/sessions/-proj-/abc.jsonl'
+        session.parent.mkdir(parents=True)
+        session.write_bytes(b'x' * 3 * 1048576)
+        (self.root / 'ps.txt').write_text(PS_TABLE.format(session=session))
+        (self.root / 'top.txt').write_text(TOP_OUT)
+        (self.root / 'vm_stat.txt').write_text(VM_STAT)
+        (self.root / 'herdr.json').write_text(json.dumps({'result': {'agents': [
+            {'pane_id': 'w1:p2', 'agent_session': {'kind': 'path', 'value': str(session)}},
+            {'pane_id': 'w1:p3', 'agent_session': None},
+        ]}}))
+        write_exec(self.bin_dir / 'ps', '#!/bin/sh\ncat "$HOME/ps.txt"\n')
+        write_exec(self.bin_dir / 'top', '#!/bin/sh\ncat "$HOME/top.txt"\n')
+        write_exec(self.bin_dir / 'vm_stat', '#!/bin/sh\ncat "$HOME/vm_stat.txt"\n')
+        write_exec(self.bin_dir / 'sysctl', SYSCTL)
+        write_exec(self.bin_dir / 'memory_pressure', '#!/bin/sh\necho "System-wide memory free percentage: 71%"\n')
 
 
 class RealMachine(CensusCase):
@@ -159,21 +219,7 @@ class RealMachine(CensusCase):
 class StubbedMachine(CensusCase):
     def setUp(self):
         super().setUp()
-        session = self.root / '.omp/agent/sessions/-proj-/abc.jsonl'
-        session.parent.mkdir(parents=True)
-        session.write_bytes(b'x' * 3 * 1048576)
-        (self.root / 'ps.txt').write_text(PS_TABLE.format(session=session))
-        (self.root / 'top.txt').write_text(TOP_OUT)
-        (self.root / 'vm_stat.txt').write_text(VM_STAT)
-        (self.root / 'herdr.json').write_text(json.dumps({'result': {'agents': [
-            {'pane_id': 'w1:p2', 'agent_session': {'kind': 'path', 'value': str(session)}},
-            {'pane_id': 'w1:p3', 'agent_session': None},
-        ]}}))
-        write_exec(self.bin_dir / 'ps', '#!/bin/sh\ncat "$HOME/ps.txt"\n')
-        write_exec(self.bin_dir / 'top', '#!/bin/sh\ncat "$HOME/top.txt"\n')
-        write_exec(self.bin_dir / 'vm_stat', '#!/bin/sh\ncat "$HOME/vm_stat.txt"\n')
-        write_exec(self.bin_dir / 'sysctl', SYSCTL)
-        write_exec(self.bin_dir / 'memory_pressure', '#!/bin/sh\necho "System-wide memory free percentage: 71%"\n')
+        self.stub_machine()
 
     def test_processes_are_grouped_by_owner_with_footprints_from_the_last_top_sample(self):
         result = self.census('--json', '--sample', '1')
@@ -239,6 +285,78 @@ class StubbedMachine(CensusCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, '')
         self.assertIn('machine-census: sample failed (11 processes from ps, 0 rows from top)', result.stderr)
+
+
+class EaslTiles(CensusCase):
+    """The easl switch: tiles add the omp pids herdr does not own, under the tile's name and board."""
+
+    def setUp(self):
+        super().setUp()
+        self.stub_machine()
+        session = self.root / '.omp/agent/sessions/-tileproj-/def.jsonl'
+        session.parent.mkdir(parents=True)
+        session.write_bytes(b'x' * 1048576)
+        with (self.root / 'ps.txt').open('a') as f:
+            f.write(TILE_PS.format(session=session))
+        with (self.root / 'top.txt').open('a') as f:
+            f.write(TILE_TOP)
+        self.easl = self.root / 'easl'
+        self.easl.mkdir()
+        write_exec(self.easl / 'easl', FAKE_EASL)
+        (self.easl / 'agents.json').write_text(json.dumps({'agents': TILES}))
+
+    def switch(self, enabled, mode=None):
+        """Write the switch file naming the stub (enabled None: no file) and the stub's failure mode."""
+        if enabled is not None:
+            conf = self.root / '.config/machine-shepherd/easl.json'
+            conf.parent.mkdir(parents=True, exist_ok=True)
+            conf.write_text(json.dumps({'enabled': enabled, 'cli': str(self.easl / 'easl')}))
+        if mode:
+            (self.easl / 'mode').write_text(mode)
+
+    def easl_calls(self):
+        path = self.easl / 'calls.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def agents(self):
+        """{pid: agent row} of a JSON census, and its stderr."""
+        result = self.census('--json', '--sample', '1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return {a['pid']: a for a in json.loads(result.stdout)['agents']}, result.stderr
+
+    def test_with_the_switch_off_easl_is_never_called_and_tile_agents_stay_unattributed(self):
+        for enabled in (None, False):
+            with self.subTest(enabled=enabled):
+                self.switch(enabled)
+                agents, stderr = self.agents()
+                self.assertEqual(agents[300], HERDR_ROW)
+                self.assertEqual([agents[pid]['pane'] for pid in (900, 950)], ['?', '?'])
+                self.assertFalse([a for a in agents.values() if 'board' in a])
+                self.assertEqual(self.easl_calls(), [])
+                self.assertEqual(stderr, '')
+
+    def test_with_the_switch_on_a_tile_agent_carries_the_tile_name_board_and_session(self):
+        self.switch(True)
+        agents, stderr = self.agents()
+        self.assertEqual(agents[900], {
+            'pid': 900, 'pane': 'bench', 'board': 'brd_lab', 'uptime': '01:00:00', 'mem_mb': 700, 'cpu': 5.0,
+            'session_mb': 1.0, 'project': 'tileproj', 'sub_mem_mb': 400, 'sub_top': [[400, 'cargo']]})
+        self.assertEqual((agents[950]['pane'], agents[950]['board']), ('obj_anon', 'brd_lab'))  # unnamed: tile id
+        self.assertEqual(agents[300], HERDR_ROW)  # herdr's pid stays the pane's although tile `thief` claims it
+        self.assertEqual([c['argv'] for c in self.easl_calls()], [['agent.list']])
+        self.assertEqual(self.easl_calls()[0]['path0'], str(self.root / '.bun/bin'))  # its launcher execs bun
+        self.assertEqual(stderr, '')
+
+    def test_a_failing_easl_cli_leaves_the_herdr_rows_intact(self):
+        for mode, err in (('fail', 'machine-census: easl agent.list failed (exit 1: easl: cannot reach easld)'),
+                          ('badjson', 'machine-census: easl agent.list printed no agent list')):
+            with self.subTest(mode=mode):
+                self.switch(True, mode)
+                agents, stderr = self.agents()
+                self.assertEqual(agents[300], HERDR_ROW)
+                self.assertEqual([agents[pid]['pane'] for pid in (900, 950)], ['?', '?'])
+                self.assertEqual(len(stderr.splitlines()), 1, stderr)
+                self.assertTrue(stderr.startswith(err), stderr)
 
 
 if __name__ == '__main__':

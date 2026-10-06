@@ -5,6 +5,8 @@ fsevents-top (plus agent-msg where delivery is tested). omp-update is absent the
 off the chief-of-staff check. Stubs first on PATH stand in for sudo, pgrep, log (WindowServer and ColorSync
 probes), osascript and ssh; every call to them lands in $CALLS so a test can prove what was and was not run.
 No remotes or broker-clients files exist unless a test makes them, so nothing reaches ssh by accident.
+An easl CLI stub lives outside PATH: only a test that writes the switch file into HOME reaches it, and it
+logs to $CALLS too.
 """
 import json
 import os
@@ -34,6 +36,28 @@ PATH_STUBS = {
     'ssh': 'cat "$HOME/ssh.out" 2>/dev/null; exit 0',
 }
 LOGGING = '#!/bin/sh\necho "$(basename "$0") $*" >> "$CALLS"\n{body}\n'
+
+# The easl CLI. Each call lands in $CALLS as `easl {"argv": [...], "path0": <first PATH entry>}`; agent.list
+# prints agents.json beside it. A `mode` file there makes every call fail (fail, exit 1), agent.list print bad
+# JSON (badjson), agent.prompt fail (prompt-fail) or report that easl typed into the terminal (typed).
+FAKE_EASL = f'#!{sys.executable}\n' + '''\
+import json, os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+args = sys.argv[1:]
+with open(os.environ['CALLS'], 'a') as f:
+    f.write('easl ' + json.dumps({'argv': args, 'path0': os.environ['PATH'].split(':')[0]}) + '\\n')
+mode = open(os.path.join(here, 'mode')).read().strip() if os.path.exists(os.path.join(here, 'mode')) else 'ok'
+if mode == 'fail' or (mode == 'prompt-fail' and args[:1] == ['agent.prompt']):
+    sys.exit('easl: cannot reach easld')
+if args[:1] == ['agent.list']:
+    sys.stdout.write('{"agents": [' if mode == 'badjson' else open(os.path.join(here, 'agents.json')).read())
+elif args[:1] == ['agent.prompt']:
+    sys.stdout.write(json.dumps({'delivery': 'typed' if mode == 'typed' else 'message', 'id': 'msg_1'}))
+'''
+# The shepherd, moved into an easl omp tile whose integration reports a protocol.
+SHEPHERD_TILE = {'tile': 'obj_shep', 'board': 'brd_ops', 'name': 'shepherd', 'kind': 'omp',
+                 'lifecycle': {'state': 'idle'}, 'pid': 777, 'protocol': 1}
+BIG_FSEVENTSD = {'mem_mb': 2000, 'cpu': 1.0, 'procs': 1}
 
 
 def write_exec(path, text):
@@ -211,10 +235,10 @@ class RealRuns(MachineWatchCase):
             self.assertEqual(self.records()[-1]['fired'], [])
         self.assertFalse((self.state_dir / 'machine-watch.alerts').exists())
 
-    def configure_shepherd(self, agent_msg_exit):
+    def configure_shepherd(self, agent_msg_exit, name='w1:shepherd'):
         pane = self.home / '.config/machine-shepherd/pane'
         pane.parent.mkdir(parents=True)
-        pane.write_text('w1:shepherd\n')
+        pane.write_text(name + '\n')
         write_exec(self.bin / 'agent-msg', f'#!{sys.executable}\n' + '''\
 import json, os, sys
 with open(os.environ['CALLS'], 'a') as f:
@@ -228,6 +252,27 @@ sys.exit(%d)
 
     def notifications(self):
         return [line for line in self.calls.read_text().splitlines() if line.startswith('osascript ')]
+
+    def set_easl(self, tiles, enabled=True, mode=None):
+        """The easl switch naming the stub (enabled None: no switch file), its tiles and failure mode."""
+        easl = self.home / 'easl'
+        easl.mkdir(exist_ok=True)
+        write_exec(easl / 'easl', FAKE_EASL)
+        (easl / 'agents.json').write_text(json.dumps({'agents': tiles}))
+        if enabled is not None:
+            (self.home / '.config/machine-shepherd/easl.json').write_text(
+                json.dumps({'enabled': enabled, 'cli': str(easl / 'easl')}))
+        if mode:
+            (easl / 'mode').write_text(mode)
+
+    def easl_calls(self):
+        lines = [line for line in self.calls.read_text().splitlines() if line.startswith('easl ')]
+        return [json.loads(line[len('easl '):]) for line in lines]
+
+    def fresh(self):
+        """Forget earlier runs' calls and the alert cooldown they started (for subtests)."""
+        self.calls.write_text('')
+        (self.state_dir / 'machine-watch.state.json').unlink(missing_ok=True)
 
     def test_alert_goes_to_the_shepherd_pane_through_agent_msg(self):
         self.configure_shepherd(agent_msg_exit=0)
@@ -252,6 +297,91 @@ sys.exit(%d)
         self.watch(report=census(free_pct=12))
         self.assertEqual(len(self.agent_msg_args()), 1)
         self.assertEqual(len(self.notifications()), 1)
+
+    # -- easl tiles
+
+    def test_with_the_switch_off_alerts_never_call_easl(self):
+        self.configure_shepherd(agent_msg_exit=0, name='shepherd')
+        for enabled in (None, False):
+            with self.subTest(enabled=enabled):
+                self.fresh()
+                self.set_easl([SHEPHERD_TILE], enabled)
+                result = self.watch(report=census(fseventsd=BIG_FSEVENTSD))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                sent, = self.agent_msg_args()
+                self.assertEqual(sent[:3], ['--from', 'machine-watch', 'shepherd'])
+                self.assertEqual(self.easl_calls(), [])
+                self.assertEqual(self.notifications(), [])
+
+    def test_an_omp_tile_with_a_protocol_gets_the_alert_through_easl_by_tile_id(self):
+        self.configure_shepherd(agent_msg_exit=0, name='shepherd')
+        self.set_easl([SHEPHERD_TILE])
+        result = self.watch(report=census(fseventsd=BIG_FSEVENTSD))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        listing, prompt = self.easl_calls()
+        self.assertEqual(listing['argv'], ['agent.list'])
+        self.assertEqual(listing['path0'], str(self.home / '.bun/bin'))  # its launcher execs bun
+        self.assertEqual(prompt['argv'][:4], ['agent.prompt', '--target', 'obj_shep', '--text'])
+        self.assertIn('[machine-watch testhost] fseventsd footprint 2000 MB (>1024).', prompt['argv'][4])
+        self.assertEqual(prompt['argv'][5:], ['--from', 'machine-watch', '--when', 'next-turn'])
+        self.assertEqual(self.agent_msg_args(), [])
+        self.assertEqual(self.notifications(), [])  # delivered and not urgent
+        self.assertEqual(result.stderr, 'machine-watch: alert to easl tile obj_shep: delivery message\n')
+
+    def test_low_memory_through_a_tile_still_notifies(self):
+        self.configure_shepherd(agent_msg_exit=0, name='shepherd')
+        self.set_easl([SHEPHERD_TILE])
+        self.watch(report=census(free_pct=12))
+        self.assertEqual([c['argv'][0] for c in self.easl_calls()], ['agent.list', 'agent.prompt'])
+        self.assertEqual(len(self.notifications()), 1)
+
+    def test_a_dry_run_never_calls_easl(self):
+        self.configure_shepherd(agent_msg_exit=0, name='shepherd')
+        self.set_easl([SHEPHERD_TILE])
+        result = self.watch('--dry-run', report=census(free_pct=12))
+        self.assertTrue(self.alerts(result)[0].startswith('ALERT -> shepherd : [machine-watch testhost]'))
+        self.assertEqual(self.easl_calls(), [])
+
+    def test_a_tile_without_a_protocol_is_never_prompted(self):
+        self.configure_shepherd(agent_msg_exit=0, name='shepherd')
+        no_protocol = {k: v for k, v in SHEPHERD_TILE.items() if k != 'protocol'}
+        for tile in (no_protocol, {**SHEPHERD_TILE, 'kind': 'shell'}):
+            with self.subTest(tile=tile):
+                self.fresh()
+                self.set_easl([tile])
+                result = self.watch(report=census(fseventsd=BIG_FSEVENTSD))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual([c['argv'] for c in self.easl_calls()], [['agent.list']])
+                self.assertEqual(len(self.agent_msg_args()), 1)  # today's path, which reaches herdr panes only
+                self.assertIn('machine-watch: skipped easl tile obj_shep (shepherd)', result.stderr)
+
+    def test_a_failing_easl_cli_falls_back_to_agent_msg(self):
+        self.configure_shepherd(agent_msg_exit=0, name='shepherd')
+        for mode, err in (('fail', 'machine-watch: easl agent.list failed (exit 1: easl: cannot reach easld)'),
+                          ('badjson', 'machine-watch: easl agent.list printed no agent list')):
+            with self.subTest(mode=mode):
+                self.fresh()
+                self.set_easl([SHEPHERD_TILE], mode=mode)
+                result = self.watch(report=census(fseventsd=BIG_FSEVENTSD))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual([c['argv'] for c in self.easl_calls()], [['agent.list']])
+                self.assertEqual(len(self.agent_msg_args()), 1)
+                self.assertEqual(self.notifications(), [])
+                self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                self.assertTrue(result.stderr.startswith(err), result.stderr)
+
+    def test_a_failed_or_typed_tile_prompt_falls_back_to_a_desktop_notification(self):
+        self.configure_shepherd(agent_msg_exit=0, name='shepherd')
+        for mode in ('prompt-fail', 'typed'):
+            with self.subTest(mode=mode):
+                self.fresh()
+                self.set_easl([SHEPHERD_TILE], mode=mode)
+                result = self.watch(report=census(fseventsd=BIG_FSEVENTSD))
+                self.assertEqual([c['argv'][0] for c in self.easl_calls()], ['agent.list', 'agent.prompt'])
+                self.assertEqual(self.agent_msg_args(), [])
+                self.assertEqual(len(self.notifications()), 1)
+                if mode == 'typed':
+                    self.assertIn('machine-watch: WARNING: easl TYPED the alert into tile obj_shep', result.stderr)
 
 
 class Relay(MachineWatchCase):

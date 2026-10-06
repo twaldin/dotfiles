@@ -1,14 +1,17 @@
 #!/usr/bin/python3
-"""quiet-check [--pane <agent name or pane id>] [--min-cpu 10]: is the machine quiet enough for a latency benchmark?
+"""quiet-check [--pane <agent name, pane id or tile name>] [--min-cpu 10]: is the machine quiet enough for a latency benchmark?
 
 Lists every process using >= min-cpu % over a 3 s sample (sudo top), with the herdr pane that owns it
 (first omp ancestor; under a shared omp worker broker, the process's own cwd instead, since the broker's
 parent pane does not own its children; failing both, the deepest agent project dir in its or an ancestor's
 command line, which catches GUI apps an agent started with `open -g`, e.g. Roblox Studio under launchd).
 Exits 0 unless a process that an agent outside --pane started is at or above it.
-Agents' own omp runtimes under 50%, macOS daemons and Tim's apps are listed but do not count. The shepherd uses it to check quiet windows it has negotiated (2026-09-30)."""
+Agents' own omp runtimes under 50%, macOS daemons and Tim's apps are listed but do not count. The shepherd uses it to check quiet windows it has negotiated (2026-09-30).
+With ~/.config/machine-shepherd/easl.json enabled, easl agent tiles count too: a tile's omp (unless a herdr pane owns
+it) and its whole subtree are labelled "<tile name> (easl tile <tile id>)", and --pane accepts the tile name or id."""
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -16,13 +19,55 @@ import sys
 UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--pane", default=None, help="herdr agent name or pane id whose processes are expected (the benchmark's own)")
+ap.add_argument("--pane", default=None, help="herdr agent name or pane id whose processes are expected (the benchmark's own); "
+                                            "an easl tile name too when ~/.config/machine-shepherd/easl.json enables tiles")
 ap.add_argument("--min-cpu", type=float, default=10.0)
 a = ap.parse_args()
 
 
 def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+
+# The easl switch: {"enabled": true, "cli": "<easl path>"}. A missing or unreadable file,
+# or "enabled" not true, keeps quiet-check herdr-only.
+EASL_CONF = os.path.expanduser("~/.config/machine-shepherd/easl.json")
+# Agent field new in easl R1, unconfirmed until it ships: a rename is a change here only.
+TILE_PID = "pid"
+
+
+def easl(*args):
+    """stdout of the easl CLI when the switch is on and the call succeeds, else None (one stderr line
+    on failure). The CLI's launcher execs bun, which launchd's PATH lacks."""
+    try:
+        with open(EASL_CONF) as f:
+            conf = json.load(f)
+        if conf.get("enabled") is not True:
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    env = {**os.environ, "PATH": os.path.expanduser("~/.bun/bin") + ":" + os.environ.get("PATH", "")}
+    try:
+        r = subprocess.run([conf.get("cli"), *args], capture_output=True, text=True, timeout=15, env=env)
+        err = f"exit {r.returncode}: {' '.join(r.stderr.split())[-160:]}" if r.returncode else None
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError) as e:
+        r, err = None, type(e).__name__
+    if err:
+        print(f"quiet-check: easl {args[0]} failed ({err}); no easl tiles this run", file=sys.stderr)
+        return None
+    return r.stdout
+
+
+def easl_tiles():
+    """Every easl agent tile (`agent.list`); [] when the switch is off or the CLI fails."""
+    out = easl("agent.list")
+    if out is None:
+        return []
+    try:
+        return [t for t in json.loads(out)["agents"] if isinstance(t, dict) and t.get("tile")]
+    except (ValueError, KeyError, TypeError):
+        print("quiet-check: easl agent.list printed no agent list; no easl tiles this run", file=sys.stderr)
+        return []
 
 
 procs = {}
@@ -44,6 +89,14 @@ try:
             dirs.setdefault(cwd, []).append(ag["pane_id"])
 except (ValueError, KeyError):
     pass
+# {agent pid: "<name> (easl tile <tile id>)"} for every easl agent tile; herdr keeps the pids it owns (see owner()).
+tiles, pane_tiles = {}, set()
+for t in easl_tiles():
+    label = f"{t.get('name') or t['tile']} (easl tile {t['tile']})"
+    if type(t.get(TILE_PID)) is int:
+        tiles[t[TILE_PID]] = label
+    if a.pane and a.pane in (t.get("name"), t["tile"]):
+        pane_tiles.add(label)  # --pane names this tile by name or tile id; a herdr name was resolved above
 
 
 def session_uuid(pid, cmd):
@@ -70,8 +123,19 @@ def owner(pid):
             return owner_by_cwd(start) or "omp shared service (owner unknown)"
         if re.match(r"(\S*/)?omp(\s|$)", cmd) and "__omp_worker" not in cmd:
             u = session_uuid(pid, cmd)
-            return panes.get(u, f"omp {pid}") if u else f"omp {pid}"
+            return panes[u] if u in panes else (tile_of(pid) or f"omp {pid}")
         pid = ppid
+    return None
+
+
+def tile_of(pid):
+    """The tile's label when pid or an ancestor is an easl tile's agent process, else None."""
+    for _ in range(30 if tiles else 0):
+        if pid in tiles:
+            return tiles[pid]
+        if pid not in procs or pid <= 1:
+            return None
+        pid = procs[pid][0]
     return None
 
 
@@ -118,7 +182,7 @@ for cpu, pid in sorted(busy, reverse=True):
     if who is None and not system:
         who = owner_by_path(pid)
     label = who or ("macOS" if system else "app")
-    mine = a.pane is not None and who is not None and a.pane in who.split()[0].split("|")
+    mine = a.pane is not None and who is not None and (a.pane in who.split()[0].split("|") or who in pane_tiles)
     # An agent's own omp runtime (thinking, streaming, tool dispatch) is allowed during a hold; what a hold
     # stops is the work agents start (builds, servers, renders). Tim's apps are listed but never held.
     runtime = who is not None and re.match(r"(\S*/)?omp(\s|$)", cmd) is not None and cpu < 50

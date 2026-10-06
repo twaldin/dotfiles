@@ -20,14 +20,18 @@ fresh when its pane died or its session passed 100 MB (gates and logic live ther
 and tells the shepherd about each restart or failure. It never kills
 anything: diagnosis and reclaiming stay with the shepherd, and kills that are
 not already automated need Tim's approval.
+With ~/.config/machine-shepherd/easl.json enabled, a shepherd name that names an omp easl
+tile with an easl protocol gets alerts through `easl agent.prompt` instead of agent-msg.
 
 usage: machine-watch [--dry-run] [--no-alert]
 """
 import argparse
+import functools
 import json
 import os
 import re
 import subprocess
+import sys
 import time
 
 HOME = os.path.expanduser("~")
@@ -44,6 +48,12 @@ COS_EVERY_S = 300
 ALERTS = os.path.join(STATE_DIR, "machine-watch.alerts")
 LOG_MAX_BYTES = 20 * 1024 * 1024
 COOLDOWN_S = 60 * 60
+# The easl switch: {"enabled": true, "cli": "<easl path>"}. A missing or unreadable file,
+# or "enabled" not true, keeps delivery on agent-msg.
+EASL_CONF = os.path.join(HOME, ".config/machine-shepherd/easl.json")
+# Fields new in easl R1, unconfirmed until it ships: a rename is a change here only.
+TILE_PROTOCOL = "protocol"  # Agent: present once the tile's easl integration reports
+DELIVERY = "delivery"  # agent.prompt result: "message", or "typed" when easl pasted into the terminal
 
 # Thresholds. "streak" rules must hold for that many consecutive runs.
 RULES = {
@@ -238,8 +248,67 @@ def shepherd_pane():
         return ""
 
 
+def easl(*args):
+    """stdout of the easl CLI when the switch is on and the call succeeds, else None (one stderr line
+    on failure). The CLI's launcher execs bun, which launchd's PATH lacks."""
+    try:
+        with open(EASL_CONF) as f:
+            conf = json.load(f)
+        if conf.get("enabled") is not True:
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    env = {**os.environ, "PATH": os.path.join(HOME, ".bun/bin") + ":" + os.environ.get("PATH", "")}
+    try:
+        r = subprocess.run([conf.get("cli"), *args], capture_output=True, text=True, timeout=15, env=env)
+        err = f"exit {r.returncode}: {' '.join(r.stderr.split())[-160:]}" if r.returncode else None
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError) as e:
+        r, err = None, type(e).__name__
+    if err:
+        print(f"machine-watch: easl {args[0]} failed ({err})", file=sys.stderr)
+        return None
+    return r.stdout
+
+
+@functools.lru_cache(maxsize=None)
+def easl_tiles():
+    """Every easl agent tile (`agent.list`, once per run); () when the switch is off or the CLI fails."""
+    out = easl("agent.list")
+    if out is None:
+        return ()
+    try:
+        return tuple(t for t in json.loads(out)["agents"] if isinstance(t, dict) and t.get("tile"))
+    except (ValueError, KeyError, TypeError):
+        print("machine-watch: easl agent.list printed no agent list; no easl tiles this run", file=sys.stderr)
+        return ()
+
+
+def shepherd_tile(name):
+    """The easl tile with this tile id, else the first with this agent name; None when there is none."""
+    tiles = easl_tiles()
+    return next((t for t in tiles if t["tile"] == name), None) or next((t for t in tiles if t.get("name") == name), None)
+
+
+def tile_prompt(t, text):
+    """`agent.prompt` to tile t at its next turn, addressed by tile id (a bare name can match several tiles).
+    True when sent; a "typed" delivery means easl pasted into the terminal, which counts as a failure."""
+    out = easl("agent.prompt", "--target", t["tile"], "--text", text, "--from", "machine-watch", "--when", "next-turn")
+    if out is None:
+        return False
+    try:
+        delivery = str(json.loads(out)[DELIVERY])
+    except (ValueError, KeyError, TypeError):
+        delivery = "unknown"
+    if delivery == "typed":
+        print(f"machine-watch: WARNING: easl TYPED the alert into tile {t['tile']} instead of messaging it", file=sys.stderr)
+        return False
+    print(f"machine-watch: alert to easl tile {t['tile']}: delivery {delivery}", file=sys.stderr)
+    return True
+
+
 def deliver(text, reasons, urgent, dry):
-    """Prompt the shepherd pane; on a machine without one, queue for the relay."""
+    """Prompt the shepherd pane; on a machine without one, queue for the relay. An omp easl tile with a
+    protocol (easl switch on) gets it through `easl agent.prompt`; any other tile is never prompted."""
     pane = shepherd_pane()
     if dry:
         print("ALERT ->", pane or "(queue)", ":", text)
@@ -248,11 +317,19 @@ def deliver(text, reasons, urgent, dry):
         with open(ALERTS, "a") as f:
             f.write(json.dumps({"ts": int(time.time()), "text": text}) + "\n")
         return
-    msg = os.path.join(BIN, "agent-msg")
-    cmd = [msg, "--from", "machine-watch", pane, text] if os.path.exists(msg) \
-        else [os.path.join(BIN, "herdr"), "agent", "prompt", pane, text]
-    # agent-msg never types into the pane; it refuses (75) a blocked/focused pane that has no inbox yet.
-    delivered = subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0
+    tile = shepherd_tile(pane)
+    if tile is not None and tile.get("kind") == "omp" and type(tile.get(TILE_PROTOCOL)) is int:
+        delivered = tile_prompt(tile, text)
+    else:
+        if tile is not None:
+            # agent.prompt would be typed into this tile's terminal; agent-msg reaches herdr panes only.
+            print(f"machine-watch: skipped easl tile {tile['tile']} ({pane}): kind {tile.get('kind')!r}, "
+                  f"protocol {tile.get(TILE_PROTOCOL)!r}; trying agent-msg", file=sys.stderr)
+        msg = os.path.join(BIN, "agent-msg")
+        cmd = [msg, "--from", "machine-watch", pane, text] if os.path.exists(msg) \
+            else [os.path.join(BIN, "herdr"), "agent", "prompt", pane, text]
+        # agent-msg never types into the pane; it refuses (75) a blocked/focused pane that has no inbox yet.
+        delivered = subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0
     if not delivered or urgent:
         subprocess.run(["osascript", "-e", f"display notification {json.dumps(reasons)} with title \"machine-watch\""],
                        capture_output=True, timeout=10)

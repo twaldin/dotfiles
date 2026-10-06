@@ -3,6 +3,7 @@
 HOME is a temp dir, so the book, state and log live there. `tick` finds herdr, agent-msg and
 quiet-check under $HOME/.local/bin: those are stand-ins that record what they were asked, and
 the quiet-check stand-in prints canned output. Windows are booked relative to the real clock.
+easl is a stand-in CLI too, outside PATH: only a test that writes the switch file into HOME reaches it.
 """
 import datetime as dt
 import json
@@ -42,7 +43,31 @@ if os.path.exists('@QC_OUT@'):
     sys.stdout.write(open('@QC_OUT@').read())
 '''
 
+# The easl CLI: logs each call (argv, first PATH entry) and prints the scripted agent.list. The mode file
+# makes every call fail (exit 1), agent.list print bad JSON, or agent.prompt report that it typed.
+FAKE_EASL = '''#!@PY@
+import json, os, sys
+args = sys.argv[1:]
+open('@EASL_CALLS@', 'a').write(json.dumps({'argv': args, 'path0': os.environ['PATH'].split(':')[0]}) + '\\n')
+mode = open('@EASL_MODE@').read().strip() if os.path.exists('@EASL_MODE@') else 'ok'
+if mode == 'fail':
+    sys.exit('easl: cannot reach easld')
+if args[:1] == ['agent.list']:
+    sys.stdout.write('{"agents": [' if mode == 'badjson' else open('@EASL_AGENTS@').read())
+elif args[:1] == ['agent.prompt']:
+    sys.stdout.write(json.dumps({'delivery': 'typed' if mode == 'typed' else 'message', 'id': 'msg_1'}))
+'''
+
 AGENTS = [('w1:p1', 'bench-judge'), ('w1:p2', 'canvas'), ('w1:p3', 'shepherd'), ('w1:p4', 'sky')]
+# easl agent tiles: two omp tiles with an easl protocol, one omp tile without, and a shell tile.
+TILES = [
+    {'tile': 'obj_render', 'board': 'brd_1', 'name': 'render', 'kind': 'omp', 'lifecycle': {'state': 'idle'},
+     'pid': 4100, 'protocol': 1},
+    {'tile': 'obj_sim', 'board': 'brd_1', 'name': 'sim', 'kind': 'omp', 'lifecycle': {'state': 'working'},
+     'pid': 4200, 'protocol': 1},
+    {'tile': 'obj_old', 'board': 'brd_1', 'name': 'old-omp', 'kind': 'omp', 'lifecycle': {'state': 'idle'}, 'pid': 4300},
+    {'tile': 'obj_term', 'board': 'brd_1', 'name': 'term', 'kind': 'shell', 'lifecycle': {'state': 'idle'}, 'protocol': 1},
+]
 
 
 def stamp(minutes):
@@ -65,12 +90,14 @@ class QuietWindow(unittest.TestCase):
         self.fake = {'@PY@': sys.executable, '@AGENTS@': str(self.root / 'agents.json'),
                      '@HERDR_PROMPTS@': str(self.root / 'herdr-prompts.jsonl'), '@MSGS@': str(self.msgs_path),
                      '@REFUSE@': str(self.root / 'refuse'), '@QC_ARGS@': str(self.root / 'qc-args.jsonl'),
-                     '@QC_OUT@': str(self.root / 'qc-out.txt')}
-        for name, body in (('herdr', FAKE_HERDR), ('agent-msg', FAKE_AGENT_MSG), ('quiet-check', FAKE_QUIET_CHECK)):
+                     '@QC_OUT@': str(self.root / 'qc-out.txt'), '@EASL_CALLS@': str(self.root / 'easl-calls.jsonl'),
+                     '@EASL_MODE@': str(self.root / 'easl-mode'), '@EASL_AGENTS@': str(self.root / 'easl-agents.json')}
+        for path, body in ((self.bin / 'herdr', FAKE_HERDR), (self.bin / 'agent-msg', FAKE_AGENT_MSG),
+                           (self.bin / 'quiet-check', FAKE_QUIET_CHECK), (self.root / 'easl', FAKE_EASL)):
             for key, value in self.fake.items():
                 body = body.replace(key, value)
-            (self.bin / name).write_text(body)
-            (self.bin / name).chmod(0o755)
+            path.write_text(body)
+            path.chmod(0o755)
         self.set_agents(AGENTS)
         self.env = {**os.environ, 'HOME': str(self.root), 'TZ': 'UTC'}
 
@@ -109,6 +136,37 @@ class QuietWindow(unittest.TestCase):
 
     def stops(self):
         return [(p, t) for p, t in self.msgs() if 'STOP NOW' in t]
+
+    def set_easl(self, enabled=True, mode=None, tiles=TILES):
+        """The easl switch naming the stand-in (enabled None: no switch file), its tiles and failure mode."""
+        if enabled is not None:
+            (self.root / '.config/machine-shepherd/easl.json').write_text(
+                json.dumps({'enabled': enabled, 'cli': str(self.root / 'easl')}))
+        (self.root / 'easl-agents.json').write_text(json.dumps({'agents': tiles}))
+        if mode:
+            (self.root / 'easl-mode').write_text(mode)
+
+    def easl_calls(self):
+        return [c['argv'] for c in self.log_of('easl-calls.jsonl')]
+
+    def tile_prompts(self):
+        """[(tile id, text)] of every easl agent.prompt; each comes from the shepherd at the tile's next turn."""
+        out = []
+        for argv in self.easl_calls():
+            if argv[0] == 'agent.prompt':
+                self.assertEqual([argv[1], argv[3]], ['--target', '--text'])
+                self.assertEqual(argv[5:], ['--from', 'shepherd', '--when', 'next-turn'])
+                out.append((argv[2], argv[4]))
+        return out
+
+    def qw_log(self):
+        path = self.root / '.local/state/machine-shepherd/quiet-window.log'
+        return path.read_text() if path.exists() else ''
+
+    def fresh(self):
+        """Forget every window, its state and what was sent (for subtests)."""
+        for path in (self.book_path, self.state_path, self.msgs_path, self.root / 'easl-calls.jsonl'):
+            path.unlink(missing_ok=True)
 
     # -- book
 
@@ -291,6 +349,90 @@ class QuietWindow(unittest.TestCase):
         typed = self.log_of('herdr-prompts.jsonl')
         self.assertEqual(sorted(p for p, _ in typed), ['w1:p2', 'w1:p4'])
         self.assertIn('QUIET WINDOW', typed[0][1])
+
+    # -- easl tiles
+
+    def test_with_the_switch_off_easl_is_never_called(self):
+        for enabled in (None, False):
+            with self.subTest(enabled=enabled):
+                self.fresh()
+                self.set_easl(enabled)
+                self.book_window(5, 35)
+                self.qw('tick')
+                self.assertEqual(sorted(p for p, _ in self.msgs()), ['w1:p2', 'w1:p4'])
+                self.assertEqual(self.easl_calls(), [])
+
+    def test_the_hold_notice_reaches_omp_tiles_with_a_protocol_and_skips_every_other_tile(self):
+        self.set_easl()
+        self.book_window(5, 35)
+        self.qw('tick')
+        self.assertEqual(sorted(p for p, _ in self.msgs()), ['w1:p2', 'w1:p4'])  # herdr panes as before
+        notices = self.tile_prompts()
+        self.assertEqual(sorted(t for t, _ in notices), ['obj_render', 'obj_sim'])  # by tile id, never a bare name
+        for part in ('QUIET WINDOW', 'latency run', '(bench-judge)', 'Hold during it'):
+            self.assertIn(part, notices[0][1])
+        log = self.qw_log()
+        self.assertIn('easl msg obj_render (render) delivery=message', log)
+        self.assertIn("skip easl tile obj_old (old-omp): kind 'omp', protocol None", log)
+        self.assertIn("skip easl tile obj_term (term): kind 'shell', protocol 1", log)
+        self.assertEqual(self.log_of('easl-calls.jsonl')[0]['path0'], str(self.root / '.bun/bin'))  # launcher execs bun
+        self.qw('tick')
+        self.assertEqual(len(self.tile_prompts()), 2, 'each tile is told once')
+        self.assertEqual(self.qw_log().count('skip easl tile obj_old'), 1, 'a skipped tile is not retried')
+
+    def test_a_tile_can_own_a_window_and_offending_tiles_are_told_to_stop(self):
+        self.set_easl()
+        wid = self.book_window(-2, 30, 'render')
+        (self.root / 'qc-out.txt').write_text(
+            '  95.0%   12345  ffmpeg                       w1:p2 canvas  <-- not quiet\n'
+            '  80.0%    4444  cargo                        render (easl tile obj_render)\n'  # the owner's own load
+            '  70.0%    5555  node                         sim (easl tile obj_sim)  <-- not quiet\n'
+            '  60.0%    6666  make                         old-omp (easl tile obj_old)  <-- not quiet\n'
+            'quiet-check: 3 process(es) outside obj_render at >= 10% CPU\n')
+        self.qw('tick')
+        self.assertEqual(self.log_of('qc-args.jsonl'), [['--pane', 'obj_render']])  # owner resolved to its tile id
+        self.assertEqual([t for _, t in self.msgs() if 'no herdr agent' in t], [])  # so it is not reported missing
+        self.assertEqual([p for p, _ in self.stops()], ['w1:p2'])  # a herdr offender, through agent-msg
+        tile_stops = [(t, x) for t, x in self.tile_prompts() if 'STOP NOW' in x]
+        self.assertEqual([t for t, _ in tile_stops], ['obj_sim'])
+        self.assertIn('node pid 5555 70.0%', tile_stops[0][1])
+        prompted = {t for t, _ in self.tile_prompts()}
+        self.assertNotIn('obj_old', prompted)  # no protocol: never prompted
+        self.assertNotIn('obj_render', prompted)  # the owner gets no hold notice
+        self.assertIn('skip easl tile obj_old (old-omp)', self.qw_log())
+        before = len(self.tile_prompts())
+        self.qw('remove', wid)
+        self.qw('tick')
+        summaries = self.tile_prompts()[before:]
+        self.assertEqual([t for t, _ in summaries], ['obj_render'])
+        self.assertIn('ended', summaries[0][1])
+        self.assertIn('w1:p2 x1, sim x1, old-omp x1', summaries[0][1])
+        self.assertEqual([p for p, t in self.msgs() if 'ended' in t], ['shepherd'])
+
+    def test_a_typed_delivery_is_a_loud_failure_and_that_tile_is_not_prompted_again(self):
+        self.set_easl(mode='typed', tiles=TILES[:1])
+        wid = self.book_window(5, 35)
+        r = self.qw('tick')
+        self.assertEqual([t for t, _ in self.tile_prompts()], ['obj_render'])
+        self.assertIn('WARNING: easl TYPED into tile obj_render (render)', r.stderr)
+        self.assertIn('WARNING: easl TYPED into tile obj_render (render)', self.qw_log())
+        self.assertEqual(json.loads(self.state_path.read_text())[wid]['notice_pending'], ['obj_render'])
+        self.qw('tick')
+        self.assertEqual(len(self.tile_prompts()), 1, 'never typed into again')
+        self.assertIn('skip easl tile obj_render (render): easl typed into it earlier in this window', self.qw_log())
+
+    def test_a_failing_easl_cli_leaves_herdr_delivery_intact(self):
+        for mode, err in (('fail', 'quiet-window: easl agent.list failed (exit 1: easl: cannot reach easld)'),
+                          ('badjson', 'quiet-window: easl agent.list printed no agent list')):
+            with self.subTest(mode=mode):
+                self.fresh()
+                self.set_easl(mode=mode)
+                self.book_window(5, 35)
+                r = self.qw('tick')
+                self.assertEqual(sorted(p for p, _ in self.msgs()), ['w1:p2', 'w1:p4'])
+                self.assertEqual(self.easl_calls(), [['agent.list']])
+                self.assertEqual(len(r.stderr.splitlines()), 1, r.stderr)
+                self.assertTrue(r.stderr.startswith(err), r.stderr)
 
 
 if __name__ == '__main__':

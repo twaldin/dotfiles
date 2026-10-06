@@ -5,6 +5,8 @@ Memory is phys_footprint (top's MEM column), the metric Activity Monitor shows
 and the one that drives memory pressure. RSS under-reports compressed and
 swapped memory, so it is never used here. Runs `ps`/`top` under `sudo -n` when
 available, because unprivileged `ps` inside a herdr pane hides processes.
+With ~/.config/machine-shepherd/easl.json enabled, an omp no herdr pane owns
+that runs in an easl agent tile is listed under the tile's name and board.
 
 usage: machine-census [--json] [--sample SECONDS] [--rows N]
 """
@@ -21,6 +23,11 @@ from collections import defaultdict
 
 HOME = os.path.expanduser("~")
 SESSIONS = os.path.join(HOME, ".omp/agent/sessions")
+# The easl switch: {"enabled": true, "cli": "<easl path>"}. A missing or unreadable file,
+# or "enabled" not true, keeps the census herdr-only.
+EASL_CONF = os.path.join(HOME, ".config/machine-shepherd/easl.json")
+# Agent field new in easl R1, unconfirmed until it ships: a rename is a change here only.
+TILE_PID = "pid"
 
 
 def run(cmd, timeout=30):
@@ -226,6 +233,45 @@ def pane_map():
     return {a.get("agent_session", {}).get("value"): a.get("pane_id") for a in agents if a.get("agent_session")}
 
 
+def easl(*args):
+    """stdout of the easl CLI when the switch is on and the call succeeds, else None (one stderr line
+    on failure). The CLI's launcher execs bun, which launchd's PATH lacks."""
+    try:
+        with open(EASL_CONF) as f:
+            conf = json.load(f)
+        if conf.get("enabled") is not True:
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    env = {**os.environ, "PATH": os.path.join(HOME, ".bun/bin") + ":" + os.environ.get("PATH", "")}
+    try:
+        r = subprocess.run([conf.get("cli"), *args], capture_output=True, text=True, timeout=15, env=env)
+        err = f"exit {r.returncode}: {' '.join(r.stderr.split())[-160:]}" if r.returncode else None
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError) as e:
+        r, err = None, type(e).__name__
+    if err:
+        print(f"machine-census: easl {args[0]} failed ({err}); no easl tiles this run", file=sys.stderr)
+        return None
+    return r.stdout
+
+
+def easl_tiles():
+    """Every easl agent tile (`agent.list`); [] when the switch is off or the CLI fails."""
+    out = easl("agent.list")
+    if out is None:
+        return []
+    try:
+        return [t for t in json.loads(out)["agents"] if isinstance(t, dict) and t.get("tile")]
+    except (ValueError, KeyError, TypeError):
+        print("machine-census: easl agent.list printed no agent list; no easl tiles this run", file=sys.stderr)
+        return []
+
+
+def tile_name(t):
+    """A tile's display name: its agent name, else its tile id."""
+    return t.get("name") or t["tile"]
+
+
 def session_of(pid, cmd, sudo):
     """Session JSONL for an omp process: sessions/<project>/<file>.jsonl, never an artifact."""
     m = re.search(r"--resume[= ](\S+)", cmd)
@@ -258,6 +304,7 @@ def descendants(procs, root):
 
 def agent_rows(procs, sudo):
     panes = pane_map()
+    tiles = {t[TILE_PID]: t for t in easl_tiles() if type(t.get(TILE_PID)) is int}
     rows = []
     for p in procs.values():
         if p["class"] != "omp agents":
@@ -269,8 +316,11 @@ def agent_rows(procs, sudo):
             q = procs.get(q["ppid"])
             if q:
                 chain.append(q)
-        where = panes.get(sess) or ("canvas" if any("canvas." in c["cmd"] for c in chain) else "?")
-        rows.append({
+        where = panes.get(sess)
+        # Union with easl tiles: a pid herdr owns stays the pane's; a tile owns its agent pid and that pid's subtree.
+        tile = None if where else next((tiles[q["pid"]] for q in [p] + chain if q["pid"] in tiles), None)
+        where = where or (tile_name(tile) if tile else "canvas" if any("canvas." in c["cmd"] for c in chain) else "?")
+        row = {
             "pid": p["pid"],
             "pane": where,
             "uptime": p["etime"],
@@ -280,7 +330,10 @@ def agent_rows(procs, sudo):
             "project": os.path.basename(os.path.dirname(sess)).strip("-") if sess else None,
             "sub_mem_mb": round(sum(s["mem"] for s in sub)),
             "sub_top": sorted(((round(s["mem"]), exe_name(s["cmd"])) for s in sub), reverse=True)[:2],
-        })
+        }
+        if tile:
+            row["board"] = tile.get("board")
+        rows.append(row)
     return sorted(rows, key=lambda r: -(r["mem_mb"] + r["sub_mem_mb"]))
 
 

@@ -26,6 +26,13 @@ Policy (Tim, 2026-10-05, via the meta pane):
   state lives in ~/cos, so a fresh session loses nothing).
 - launchd omp services (home: auth broker + gateway) restart through launchctl
   kickstart when their omp is older than the installed one.
+- easl tiles (home, behind ~/.config/machine-shepherd/easl.json {"enabled": true, "cli":
+  ".../bin/easl"}; off or missing = herdr panes only): omp agents in easl terminal tiles
+  get the same triggers and the same idle_gate, plus two tile rules: a lifecycle easl only
+  restored after an app restart is not trusted, and a `done` Tim hasn't seen is left
+  alone (a restart would clear his needs-you marker). A tile restarts through
+  `easl agent.restart --mode resume` (same tile, name, model, thinking and session).
+  `omp-update migrate <name>` moves a herdr pane's session into a tile of that name.
 
 Logs: every action -> ~/.local/state/omp-update/actions.jsonl; the last run ->
 last-run.json; real runs also put one summary line in the shepherd checkpoint.
@@ -34,6 +41,7 @@ Usage:
   omp-update run [--dry-run] [--hosts home,work,deckbox] [--only-pane w2:pXX] [--no-wait]
   omp-update roll [--hosts home,deckbox] [--include cos] [--hours 24] [--dry-run]
   omp-update cos [--dry-run]  # restart the chief of staff if dead or its session is too big
+  omp-update migrate <herdr agent> [--board ~/dotfiles] [--model M] [--dry-run]
   omp-update ext-ack --since <UTC> --note <why>  # an extension change needs no restart
   omp-update target          # print the release the policy picks right now
 """
@@ -60,6 +68,7 @@ HERDR = os.path.join(HOME, ".local", "bin", "herdr")
 STATE = os.path.join(HOME, ".local", "state", "omp-update")
 CONFIG = os.path.join(HOME, ".config", "omp-update", "config.json")
 CHECKPOINT = os.path.join(HOME, ".local", "state", "machine-shepherd", "checkpoint.md")
+EASL_SWITCH = os.path.join(HOME, ".config", "machine-shepherd", "easl.json")
 ENV = dict(os.environ, PATH=os.pathsep.join([
     BUN_BIN, os.path.join(HOME, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin",
     "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
@@ -380,6 +389,61 @@ def agent_session(pane):
     return (a.get("agent_session") or {}).get("value"), a.get("agent_status")
 
 
+# ---------------------------------------------------------------- easl tiles
+
+def easl_switch():
+    """The easl switch, or None when it is off, missing or unreadable."""
+    try:
+        with open(EASL_SWITCH) as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return s if isinstance(s, dict) and s.get("enabled") is True and s.get("cli") else None
+
+
+def easl(cli, *args, timeout=60):
+    """Run the easl CLI (a bun launcher; ENV puts ~/.bun/bin first): its JSON, or {"error"}."""
+    try:
+        r = sh([cli, *args], timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"error": str(e)[:300]}
+    try:
+        out = json.loads(r.stdout)
+    except ValueError:
+        return {"error": (r.stderr or r.stdout).strip()[:300] or f"exit {r.returncode}"}
+    if r.returncode != 0 or not isinstance(out, dict):
+        return {"error": ((r.stderr or "").strip() or json.dumps(out))[:300]}
+    return out
+
+
+def tile_agents(cli):
+    """(omp agents in easl tiles on every board, open or closed, or None; error). Shaped like
+    herdr agents for idle_gate: pane_id = tile id, agent_status = lifecycle state."""
+    out = easl(cli, "agent.list")
+    if "error" in out:
+        return None, out["error"]
+    tiles = []
+    for t in out.get("agents") or []:
+        if t.get("kind") != "omp":
+            continue
+        lc = t.get("lifecycle") or {}
+        tiles.append({"tile": True, "pane_id": t["tile"], "name": t.get("name"), "board": t.get("board"),
+                      "agent_status": lc.get("state"), "lifecycle": lc, "focused": t.get("focused"),
+                      "draft": t.get("draft"), "pid": t.get("pid"), "protocol": t.get("protocol"), "cli": cli})
+    return tiles, None
+
+
+def tile_get(cli, tile):
+    tiles, _err = tile_agents(cli)
+    return next((t for t in tiles or [] if t["pane_id"] == tile), None)
+
+
+def tile_session(cli, tile):
+    """The session file the tile's omp reported (agent.report_session), or None."""
+    o = easl(cli, "object.get", "--id", tile)
+    return (((o.get("object") or {}).get("props") or {}).get("agent") or {}).get("sessionPath")
+
+
 def restart_pane(row, argv):
     pane, name, session, old = row["pane"], row["name"], row["session"], row["pid"]
     keep, dropped = resume_args(argv)
@@ -435,6 +499,40 @@ def restart_pane(row, argv):
     row["memory_dropped"] = (row["mem_after_mb"] or 0) < (row["mem_before_mb"] or 0)
     if not row["session_unchanged"]:
         return f"restarted, but herdr reports session {now_session}"
+    return "restarted"
+
+
+def restart_tile(row, a):
+    """`easl agent.restart --mode resume`: same tile, name, model, thinking and session; easl
+    refuses (`conflict`) while the tile is working, blocked, focused or has a draft.
+    Verified like a pane restart: a new omp pid and the same session file."""
+    cli, tile, old = a["cli"], row["pane"], row["pid"]
+    row.update(mem_before_mb=mem_mb(old), mechanism="easl agent.restart")
+    out = easl(cli, "agent.restart", "--target", tile, "--mode", "resume", timeout=120)
+    if "error" in out:
+        return f"failed: agent.restart: {out['error'][:200]}"
+    new = None
+    for _ in range(120):
+        now = tile_get(cli, tile)
+        new = now.get("pid") if now else None
+        if new and new != old:
+            break
+        time.sleep(1)
+    if not new or new == old:
+        return "failed: the tile's omp did not come back with a new pid"
+    row["new_pid"] = new
+    time.sleep(20)
+    row["mem_after_mb"] = mem_mb(new)
+    now_session = None
+    for _ in range(30):
+        now_session = tile_session(cli, tile)
+        if now_session:
+            break
+        time.sleep(2)
+    row["session_unchanged"] = now_session == row["session"]
+    row["memory_dropped"] = (row["mem_after_mb"] or 0) < (row["mem_before_mb"] or 0)
+    if not row["session_unchanged"]:
+        return f"restarted, but easl reports session {now_session}"
     return "restarted"
 
 
@@ -514,28 +612,46 @@ def restart_services(services, installed, dry, blocked, pending, errors):
 
 
 def idle_gate(a, pid, procs, mine, blocked, recheck=True):
-    """(skip reason or None, live children) for restarting the omp `pid` in herdr agent `a`.
-    Every restart (daily run, roll, cos) passes the same gates: no quiet window now or
-    within the guard, the pane idle/done, not focused by Tim (he may start typing; /exit
-    would race his draft), not running this job, no live child work (herdr shows
-    background jobs as idle and /exit would kill them), nothing typed in its editor; then
-    the status is read once more right before acting."""
-    pane, status = a["pane_id"], a.get("agent_status")
+    """(skip reason or None, live children) for restarting the omp `pid` in herdr agent or
+    easl tile `a` (a["tile"]). Every restart (daily run, roll, cos, migrate) passes the same
+    gates: no quiet window now or within the guard, idle/done, not focused by Tim (he may
+    start typing; /exit would race his draft), not running this job, no live child work
+    (background jobs show as idle and /exit would kill them), nothing typed in its editor;
+    then the status is read once more right before acting. Tiles also: a lifecycle easl
+    only restored after an app restart is unconfirmed, a `done` Tim hasn't seen keeps its
+    needs-you marker, and an unreported focus or draft counts as present."""
+    pane, status, tile = a["pane_id"], a.get("agent_status"), a.get("tile")
+    lc = a.get("lifecycle") or {}
     if blocked:
         return f"skip: {blocked}", None
+    if tile and lc.get("restored"):
+        return "skip: lifecycle restored after an app restart, unconfirmed", None
     if status not in ("idle", "done"):
         return f"skip: {status}", None
+    if tile and status == "done" and lc.get("seen") is False:
+        return "skip: done, answer not seen by Tim", None
     if a.get("focused"):
         return "skip: focused by Tim", None
+    if tile and a.get("focused") is None:
+        return "skip: focus unknown (easl reports none)", None
     if pid in mine:
         return "skip: runs this job", None
     busy = live_children(pid, procs)
     if busy:
         return "skip: live child work", busy[:4]
-    if not editor_empty(pane):
+    if tile:
+        if a.get("draft") is None:
+            return "skip: draft unknown (easl reports none)", None
+        if a.get("draft"):
+            return "skip: text waiting in the editor", None
+    elif not editor_empty(pane):
         return "skip: text waiting in the editor", None
     if recheck:
-        _s, status_now = agent_session(pane)
+        if tile:
+            now = tile_get(a["cli"], pane)
+            status_now = (now or {}).get("agent_status") or "gone"
+        else:
+            _s, status_now = agent_session(pane)
         if status_now not in ("idle", "done"):
             return f"skip: {status_now}", None
     return None, None
@@ -594,16 +710,29 @@ def host_main(params):
     agents = []
     if params.get("manage_panes", True) and os.path.exists(HERDR):
         agents = herdr("agent", "list").get("result", {}).get("agents", [])
-    for a in agents:
-        if a.get("agent") != "omp":
+    tiles = []
+    if params.get("easl") and params.get("manage_panes", True):
+        tiles, err = tile_agents(params["easl"]["cli"])
+        if err:
+            res["errors"].append(f"easl agent.list: {err[:200]}")
+            tiles = []
+    for a in agents + tiles:
+        tile = a.get("tile")
+        if not tile and a.get("agent") != "omp":
             continue
         pane, name, status = a["pane_id"], a.get("name"), a.get("agent_status")
-        session = (a.get("agent_session") or {}).get("value")
-        pid, argv = pane_omp(pane)
+        if tile:
+            pid, argv = a.get("pid"), None
+            session = tile_session(a["cli"], pane) if pid else None
+        else:
+            session = (a.get("agent_session") or {}).get("value")
+            pid, argv = pane_omp(pane)
         row = {"pane": pane, "name": name, "status": status, "session": session, "pid": pid}
+        if tile:
+            row.update(tile=True, board=a.get("board"))
         res["panes"].append(row)
         if not pid:
-            row["action"] = "none: no omp in the pane's foreground"
+            row["action"] = "none: easl reports no omp pid" if tile else "none: no omp in the pane's foreground"
             continue
         managed.add(pid)
         age = procs.get(pid, {}).get("age_s", 0)
@@ -644,7 +773,7 @@ def host_main(params):
                 row["action"] = "would restart"
             else:
                 try:
-                    row["action"] = restart_pane(row, argv)
+                    row["action"] = restart_tile(row, a) if tile else restart_pane(row, argv)
                 except Exception as e:
                     row["action"] = f"failed: {str(e)[:200]}"
                 if row["action"].startswith("failed"):
@@ -875,7 +1004,8 @@ def main_roll(args):
                 blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"]) if hc.get("quiet_book") else None
                 r = run_host(name, hc, {"host": name, "target": "0", "dry_run": args.dry_run, "policy": policy,
                                         "blocked": blocked, "roll": True,
-                                        "manage_panes": hc.get("manage_panes", True)})
+                                        "manage_panes": hc.get("manage_panes", True),
+                                        "easl": easl_switch() if name == "home" else None})
                 left[name] = []
                 for p in r["panes"]:
                     act = p.get("action", "")
@@ -1056,6 +1186,108 @@ def main_cos(args):
     return done("restart failed", rc=r.returncode, out=(r.stderr or r.stdout).strip()[-300:])
 
 
+def drop_model(flags):
+    out, skip = [], False
+    for x in flags:
+        if skip:
+            skip = False
+        elif x in ("--model", "-m"):
+            skip = True
+        elif not x.startswith("--model="):
+            out.append(x)
+    return out
+
+
+def main_migrate(args):
+    """`omp-update migrate <herdr agent>`: move that pane's omp session into an easl tile of
+    the same name on the board for --board, through idle_gate like any restart. /exit the
+    pane's omp, create a terminal tile running `omp <its flags> --resume=<session>` (plus
+    --model), and verify the tile's omp pid, lifecycle and session; then close the empty
+    herdr pane, so the name lives only in easl. If the tile never gets an omp, the tile is
+    deleted and the session resumes in the herdr pane again. Never two omp on one session."""
+    ez = easl_switch()
+    if not ez:
+        sys.exit(f"migrate: easl is off ({EASL_SWITCH})")
+    cli, name, dry = ez["cli"], args.name, args.dry_run
+    lock = take_lock(60)
+    if not lock:
+        sys.exit("migrate: run.lock held (daily run or roll pass)")
+    a = herdr("agent", "get", name).get("result", {}).get("agent")
+    if not a or a.get("agent") != "omp":
+        sys.exit(f"migrate: no herdr omp agent named {name}")
+    pane, session = a["pane_id"], (a.get("agent_session") or {}).get("value")
+    pid, argv = pane_omp(pane)
+    if not pid or not session:
+        sys.exit(f"migrate: {name} has no omp ({pid}) or no session ({session}) in pane {pane}")
+    tiles, err = tile_agents(cli)
+    if err:
+        sys.exit(f"migrate: easl agent.list: {err}")
+    if any(t.get("name") == name for t in tiles):
+        sys.exit(f"migrate: a tile named {name} already exists")
+    cfg = load_config()
+    hc = cfg["hosts"]["home"]
+    blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"]) if hc.get("quiet_book") else None
+    procs = ps_table()
+    skip, busy = idle_gate(a, pid, procs, ancestors(procs), blocked, recheck=not dry)
+    if skip:
+        sys.exit(f"migrate: {name}: {skip}" + (f" {busy}" if busy else ""))
+    keep, dropped = resume_args(argv)
+    if args.model:
+        keep = drop_model(keep) + ["--model", args.model]
+    root = os.path.expanduser(args.board)
+    command = ["/bin/zsh", "-l", "-c", " ".join(shlex.quote(x) for x in [OMP, *keep, f"--resume={session}"])]
+    res = {"name": name, "pane": pane, "pid": pid, "session": session, "root": root, "command": command,
+           "args_dropped": dropped, "dry_run": dry}
+
+    def done(action, **kw):
+        res.update(action=action, **kw)
+        with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
+            f.write(json.dumps({"ts": stamp(), "host": "home", "kind": "migrate", **res}) + "\n")
+        print("MIGRATE " + json.dumps(res))
+        if action.startswith("failed"):
+            sys.exit(1)
+
+    if dry:
+        return done("would migrate")
+    b = easl(cli, "board.open", "--root", root)
+    if "error" in b:
+        return done(f"failed: board.open {root}: {b['error'][:200]}")
+    res["board"] = b.get("board")
+    herdr("agent", "prompt", pane, "/exit")
+    for _ in range(45):
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+        time.sleep(1)
+    else:
+        return done("failed: the pane's omp did not exit after /exit; left alone")
+    time.sleep(3)
+    out = easl(cli, "object.create", "--json", json.dumps(
+        {"board": res["board"], "type": "terminal", "props": {"name": name, "cwd": root, "command": command}}))
+    tile = (out.get("object") or {}).get("id") or out.get("id")
+    res["tile"] = tile
+    t = None
+    for _ in range(120 if tile else 0):
+        t = tile_get(cli, tile)
+        if t and t.get("pid") and t.get("agent_status") not in (None, "unknown"):
+            break
+        time.sleep(1)
+    now_session = tile_session(cli, tile) if t and t.get("pid") else None
+    if t and t.get("pid") and now_session == session:
+        herdr("pane", "close", pane)
+        return done("migrated", new_pid=t["pid"], status=t.get("agent_status"))
+    if t and t.get("pid"):
+        return done(f"failed: tile {tile} runs omp {t['pid']} (status {t.get('agent_status')}, session "
+                    f"{now_session}); herdr pane {pane} left empty, check by hand")
+    if tile:
+        easl(cli, "object.delete", "--id", tile)
+    r = sh([HERDR, "agent", "start", name, "--kind", "omp", "--pane", pane, "--timeout", "240000",
+            "--", *keep, f"--resume={session}"], timeout=270)
+    return done(f"failed: no omp came up in the tile ({(out.get('error') or 'no lifecycle')[:120]}); "
+                f"resumed in herdr pane {pane} again (rc {r.returncode})")
+
+
 def main_run(args):
     lock = take_lock(1800)
     if not lock:
@@ -1079,7 +1311,7 @@ def main_run(args):
                 blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"])
         params = {"host": name, "target": tinfo["target"], "dry_run": args.dry_run, "policy": policy,
                   "only_pane": args.only_pane, "blocked": blocked, "manage_panes": hc.get("manage_panes", True),
-                  "services": hc.get("services", [])}
+                  "services": hc.get("services", []), "easl": easl_switch() if name == "home" else None}
         note(f"{name}: running")
         results.append(run_host(name, hc, params))
     ended = utcnow()
@@ -1116,6 +1348,11 @@ def main():
     ea.add_argument("--hosts", default="home,deckbox")
     cp = sub.add_parser("cos", help="restart the chief of staff fresh if its pane died or its session is too big")
     cp.add_argument("--dry-run", action="store_true")
+    mp = sub.add_parser("migrate", help="move a herdr pane's omp session into an easl tile of the same name")
+    mp.add_argument("name")
+    mp.add_argument("--board", default="~/dotfiles", help="a directory; inside a git repo it opens the repo's board")
+    mp.add_argument("--model")
+    mp.add_argument("--dry-run", action="store_true")
     rp = sub.add_parser("roll")
     rp.add_argument("--hosts", default="home,deckbox")
     rp.add_argument("--include", help="report-only names to restart anyway, comma-separated")
@@ -1128,6 +1365,8 @@ def main():
         host_main(json.loads(a.params))
     elif a.cmd == "cos":
         main_cos(a)
+    elif a.cmd == "migrate":
+        main_migrate(a)
     elif a.cmd == "roll":
         main_roll(a)
     elif a.cmd == "ext-fp":

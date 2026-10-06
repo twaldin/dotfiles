@@ -70,8 +70,9 @@ class FseventsTop(unittest.TestCase):
 
     def test_files_created_during_the_window_are_counted_under_their_own_paths(self):
         watched = Path(os.path.realpath(tempfile.mkdtemp(dir=self.root)))  # FSEvents reports real paths
-        # Depth 40 keeps every path whole and 1000 rows keeps the table from cutting any off.
-        proc = self.start(3, 40, 1000)
+        # Depth 40 keeps every path whole, and a row cap far above any real event count keeps the
+        # table from cutting a path off however busy the machine is (agents' builds touch thousands).
+        proc = self.start(3, 40, 10_000_000)
         time.sleep(1.2)
         names = [f'file{i}.txt' for i in range(4)]
         for name in names:
@@ -93,8 +94,7 @@ class FseventsTop(unittest.TestCase):
         self.assertGreaterEqual(int(counters.group(2)), 1)
         total, _, unique, _ = SUMMARY.search(out).groups()
         self.assertGreaterEqual(int(unique), 4)
-        if len(rows) < 1000:
-            self.assertEqual(sum(events for events, _ in rows.values()), int(total))
+        self.assertEqual(sum(events for events, _ in rows.values()), int(total))
 
 
 if __name__ == '__main__':
