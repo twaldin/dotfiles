@@ -99,6 +99,8 @@ class QuietWindow(unittest.TestCase):
             path.write_text(body)
             path.chmod(0o755)
         self.set_agents(AGENTS)
+        # Agents that run heavy work have an effort brief; only they are ever told to hold or stop.
+        self.brief('bench-judge', 'canvas', 'sky', *(t['name'] for t in TILES))
         self.env = {**os.environ, 'HOME': str(self.root), 'TZ': 'UTC'}
 
     # -- plumbing
@@ -106,6 +108,11 @@ class QuietWindow(unittest.TestCase):
     def set_agents(self, agents):
         (self.root / 'agents.json').write_text(json.dumps(
             {'result': {'agents': [{'pane_id': p, 'name': n} for p, n in agents]}}))
+
+    def brief(self, *names):
+        for name in names:
+            (self.root / 'cos' / 'efforts' / name).mkdir(parents=True, exist_ok=True)
+            (self.root / 'cos' / 'efforts' / name / 'brief.md').write_text('# brief\n')
 
     def qw(self, *args, ok=True):
         r = subprocess.run([sys.executable, str(QUIET_WINDOW), *args], env=self.env,
@@ -246,6 +253,32 @@ class QuietWindow(unittest.TestCase):
         self.assertEqual(self.log_of('qc-args.jsonl'), [])  # not started: nothing to measure yet
         self.qw('tick')
         self.assertEqual(len(self.msgs()), 2, 'each pane is told once')
+
+    def test_an_agent_without_an_effort_brief_is_never_messaged_but_its_load_is_counted(self):
+        # Tim's own session (2026-10-06: a hold notice landed in his fresh `terms` session).
+        self.set_agents(AGENTS + [('w1:p5', 'terms')])
+        wid = self.book_window(5, 35)
+        self.qw('tick')
+        self.assertEqual(sorted(p for p, _ in self.msgs()), ['w1:p2', 'w1:p4'])
+        state = json.loads(self.state_path.read_text())
+        book = self.book()
+        book[0]['start'], book[0]['end'] = stamp(-2), stamp(30)
+        self.book_path.write_text(json.dumps(book))
+        state[wid]['noticed'] = True
+        self.state_path.write_text(json.dumps(state))
+        (self.root / 'qc-out.txt').write_text(
+            '  90.0%   23456  bun                          w1:p5 terms  <-- not quiet\n'
+            '  95.0%   12345  ffmpeg                       w1:p2 canvas  <-- not quiet\n')
+        self.qw('tick')
+        self.qw('tick')
+        self.assertEqual([p for p, _ in self.stops()], ['w1:p2'])
+        log = (self.root / '.local/state/machine-shepherd/quiet-window.log').read_text()
+        self.assertEqual(log.count('not prompting terms: no effort brief'), 1)
+        self.qw('remove', wid)
+        self.qw('tick')
+        summary = [t for p, t in self.msgs() if p == 'shepherd'][-1]
+        self.assertIn('w1:p5 x2', summary)
+        self.assertIn('w1:p2 x2', summary)
 
     def test_a_window_further_off_than_the_notice_lead_is_silent(self):
         self.book_window(15, 45)

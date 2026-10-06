@@ -7,9 +7,11 @@
   quiet-window mute ID                     end summary to the shepherd only (owner busy with Tim)
   quiet-window tick                        run every minute by launchd (net.waldin.quiet-window)
 
-tick: 10 minutes before a window, every other herdr pane gets the hold notice. During the window,
-quiet-check --pane OWNER names processes of other agents at 10%+ CPU; each such pane gets a "stop
-now" prompt (at most every 4 minutes). At the end, the owner and the shepherd get a summary.
+tick: 10 minutes before a window, every other agent with an effort brief (~/cos/efforts/<name>/brief.md)
+gets the hold notice. During the window, quiet-check --pane OWNER names processes of other agents at
+10%+ CPU; each such briefed agent gets a "stop now" prompt (at most every 4 minutes). At the end, the
+owner and the shepherd get a summary. An agent without a brief (Tim's own sessions, e.g. `terms`) is
+never messaged; its load still shows in the summary.
 With ~/.config/machine-shepherd/easl.json enabled, easl agent tiles take part too: a tile may own a window,
 and omp tiles with an easl protocol get the notice, "stop now" and summary through `easl agent.prompt`
 (any other tile is skipped, never typed into).
@@ -30,11 +32,15 @@ SHEPHERD = open(os.path.expanduser("~/.config/machine-shepherd/pane")).read().st
     if os.path.exists(os.path.expanduser("~/.config/machine-shepherd/pane")) else "shepherd"
 HERDR = os.path.expanduser("~/.local/bin/herdr")
 NOTICE_MIN, REPEAT_MIN = 10, 4
-HOLD = ("no builds, renders, encodes, benchmarks, game clients or screen captures; "
+HOLD = ("no builds, renders, encodes, benchmarks, game clients or screen captures, and no new lanes or "
+        "subagents of any kind, read-only reviewers included (they run inside your omp process and count); "
         "editing, reading, git and idle agents are fine")
 # The easl switch: {"enabled": true, "cli": "<easl path>"}. A missing or unreadable file,
 # or "enabled" not true, keeps quiet-window herdr-only.
 EASL_CONF = os.path.expanduser("~/.config/machine-shepherd/easl.json")
+# Agents that run heavy work have an effort brief; Tim's own sessions have none and are never messaged
+# (2026-10-06: a hold notice landed in his fresh `terms` session).
+EFFORTS = os.path.expanduser("~/cos/efforts")
 # Fields new in easl R1, unconfirmed until it ships: a rename is a change here only.
 TILE_PROTOCOL = "protocol"  # Agent: present once the tile's easl integration reports
 DELIVERY = "delivery"  # agent.prompt result: "message", or "typed" when easl pasted into the terminal
@@ -130,6 +136,11 @@ def tile_name(t):
     return t.get("name") or t["tile"]
 
 
+def briefed(name):
+    """True when agent `name` has an effort brief, so it may be told to hold or stop."""
+    return bool(name) and "/" not in name and os.path.isfile(os.path.join(EFFORTS, name, "brief.md"))
+
+
 def promptable(t):
     """Only an omp tile whose easl integration reports a protocol takes agent.prompt as a message;
     any other tile would get it pasted into its terminal."""
@@ -206,8 +217,10 @@ def tick():
                               f"matches (moved pane? use agent names); its own processes will count as offenders.")
             s["owner_missing"] = True
         if start - dt.timedelta(minutes=NOTICE_MIN) <= now < end and (not s["noticed"] or s.get("notice_pending")):
-            targets = s["notice_pending"] if s["noticed"] else [p for p in ags if p not in (owner, me)] + [
-                i for i, t in tls.items() if i not in (owner, me) and t.get("name") not in (w["owner"], SHEPHERD)]
+            targets = s["notice_pending"] if s["noticed"] else [
+                p for p, n in ags.items() if p not in (owner, me) and briefed(n)] + [
+                i for i, t in tls.items() if i not in (owner, me) and t.get("name") not in (w["owner"], SHEPHERD)
+                and briefed(t.get("name"))]
             s["notice_pending"] = [
                 p for p in targets if (p in ags or p in tls) and not send(
                     s, p, f"shepherd: QUIET WINDOW {span} for {w['label']} ({w['owner']}). "
@@ -243,6 +256,12 @@ def tick():
             for pane, procs in offenders.items():
                 s["hits"][pane] = s["hits"].get(pane, 0) + 1
                 last = s["last"].get(pane)
+                name = tls[pane].get("name") if pane in tls else ags.get(pane)
+                if pane != me and not briefed(name):
+                    if last is None:
+                        log(f"not prompting {name or pane}: no effort brief (Tim's own session?); {', '.join(procs)}")
+                        s["last"][pane] = now.isoformat()
+                    continue
                 if last is None or now - dt.datetime.fromisoformat(last) >= dt.timedelta(minutes=REPEAT_MIN):
                     if send(s, pane, f"shepherd: STOP NOW. Quiet window {span} for {w['label']} is running, and "
                                      f"your processes are loading the machine: {', '.join(procs)}. Stop or pause "
