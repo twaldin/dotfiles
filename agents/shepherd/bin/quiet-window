@@ -19,9 +19,10 @@ never messaged; its load still shows in the summary.
 With ~/.config/machine-shepherd/easl.json enabled, easl agent tiles take part too: a tile may own a window,
 and omp tiles with an easl protocol get the notice, "stop now" and summary through `easl agent.prompt`
 (any other tile is skipped, never typed into).
-While a booking or hold runs, mediaanalysisd above 50% CPU is stopped (SIGSTOP), and it is resumed
-(SIGCONT) once nothing runs or starts within 15 minutes; every stop and resume is logged (Tim approved
-this 2026-10-06: spotlightknowledged had driven it to ~160% during a measured run).
+From 3 minutes before a booking or hold until it ends (bench samples for its ARM check just before the
+start), mediaanalysisd above 50% CPU is stopped (SIGSTOP), and it is resumed (SIGCONT) once nothing runs
+or starts within 15 minutes; every stop and resume is logged (Tim approved this 2026-10-06:
+spotlightknowledged had driven it to ~160% just before a measured run).
 Why (2026-10-01): sky-lead's quiet notices reached only its own panes, so canvas's encode and
 build cancelled bench-judge's measured sitting 24 of 48 legs in."""
 import datetime as dt
@@ -37,7 +38,7 @@ HOLDS = os.path.expanduser("~/.config/machine-shepherd/quiet-holds.json")
 STATE = os.path.expanduser("~/.local/state/machine-shepherd/quiet-window-state.json")
 LOG = os.path.expanduser("~/.local/state/machine-shepherd/quiet-window.log")
 MAD_LOG = os.path.expanduser("~/.local/state/machine-shepherd/mediaanalysisd-stopcont.log")
-MAD_NAME, MAD_STOP_CPU, MAD_RESUME_MIN = "mediaanalysisd", 50.0, 15
+MAD_NAME, MAD_STOP_CPU, MAD_LEAD_MIN, MAD_RESUME_MIN = "mediaanalysisd", 50.0, 3, 15
 # Agent name or pane id; names survive herdr pane moves (pane ids change on every move). An easl tile name works too.
 SHEPHERD = open(os.path.expanduser("~/.config/machine-shepherd/pane")).read().strip() \
     if os.path.exists(os.path.expanduser("~/.config/machine-shepherd/pane")) else "shepherd"
@@ -197,10 +198,11 @@ def mad_log(msg):
 
 
 def mediaanalysisd(state, windows, now):
-    """Stop mediaanalysisd above MAD_STOP_CPU while a window runs; resume what this stopped once no window
-    runs or starts within MAD_RESUME_MIN. state["_mad"] holds the pids it stopped."""
+    """Stop mediaanalysisd above MAD_STOP_CPU from MAD_LEAD_MIN before a window until its end; resume what
+    this stopped once no window runs or starts within MAD_RESUME_MIN. state["_mad"] holds the pids it stopped."""
     stopped = state.setdefault("_mad", {})
-    running = [w for w in windows if utc(w["start"]) <= now < utc(w["end"])]
+    lead = dt.timedelta(minutes=MAD_LEAD_MIN)
+    running = [w for w in windows if utc(w["start"]) - lead <= now < utc(w["end"])]
     if running:
         for pid, (cpu, cmd) in interval_cpu().items():
             if cmd == MAD_NAME and cpu > MAD_STOP_CPU and str(pid) not in stopped:

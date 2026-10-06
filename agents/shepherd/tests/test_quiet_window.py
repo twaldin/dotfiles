@@ -205,7 +205,7 @@ class QuietWindow(unittest.TestCase):
         self.assertIn(self.stat(pid), ('S', 'R'))
         self.assertIn(f'CONT pid {pid}', self.mad_log.read_text())
 
-    def test_mediaanalysisd_at_or_below_50_percent_or_outside_a_window_is_left_alone(self):
+    def test_mediaanalysisd_at_or_below_50_percent_or_outside_a_window_and_its_lead_is_left_alone(self):
         pid = self.mad(50.0)
         wid = self.book_window(-2, 30)
         self.qw('tick')
@@ -214,8 +214,15 @@ class QuietWindow(unittest.TestCase):
         self.qw('tick')
         pid2 = self.mad(160.0)
         self.qw('tick')  # no window running
+        self.book_window(5, 30, owner='swarm')  # starts in 5 min: outside the 3-min lead
+        self.qw('tick')
         self.assertIn(self.stat(pid2), ('S', 'R'))
         self.assertFalse(self.mad_log.exists())
+        # bench's ARM check samples just before the start, so the stop comes 3 min ahead.
+        wid2 = self.book_window(2, 30, owner='canvas')
+        self.qw('tick')
+        self.assertEqual(self.stat(pid2), 'T')
+        self.assertIn(f'STOP pid {pid2} at 160% CPU during {wid2}', self.mad_log.read_text())
 
     def qw(self, *args, ok=True):
         r = subprocess.run([sys.executable, str(QUIET_WINDOW), *args], env=self.env,
