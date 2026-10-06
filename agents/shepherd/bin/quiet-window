@@ -3,7 +3,11 @@
 
   quiet-window add START END OWNER LABEL   START/END in UTC, e.g. 2026-10-01T08:30Z; OWNER = herdr agent
                                            name (preferred: survives pane moves) or pane id, or easl tile name
-  quiet-window list | remove ID            remove ends a running window now (it still gets its summary)
+  quiet-window hold START END OWNER LABEL  the same, for a run whose driver refuses any registry row
+                                           (its own included): kept in quiet-holds.json, which such
+                                           drivers never read, and enforced exactly like a booking
+  quiet-window list | remove ID            list shows bookings and holds; remove ends a running one now
+                                           (it still gets its summary)
   quiet-window mute ID                     end summary to the shepherd only (owner busy with Tim)
   quiet-window tick                        run every minute by launchd (net.waldin.quiet-window)
 
@@ -15,18 +19,25 @@ never messaged; its load still shows in the summary.
 With ~/.config/machine-shepherd/easl.json enabled, easl agent tiles take part too: a tile may own a window,
 and omp tiles with an easl protocol get the notice, "stop now" and summary through `easl agent.prompt`
 (any other tile is skipped, never typed into).
+While a booking or hold runs, mediaanalysisd above 50% CPU is stopped (SIGSTOP), and it is resumed
+(SIGCONT) once nothing runs or starts within 15 minutes; every stop and resume is logged (Tim approved
+this 2026-10-06: spotlightknowledged had driven it to ~160% during a measured run).
 Why (2026-10-01): sky-lead's quiet notices reached only its own panes, so canvas's encode and
 build cancelled bench-judge's measured sitting 24 of 48 legs in."""
 import datetime as dt
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 
 BOOK = os.path.expanduser("~/.config/machine-shepherd/quiet-windows.json")
+HOLDS = os.path.expanduser("~/.config/machine-shepherd/quiet-holds.json")
 STATE = os.path.expanduser("~/.local/state/machine-shepherd/quiet-window-state.json")
 LOG = os.path.expanduser("~/.local/state/machine-shepherd/quiet-window.log")
+MAD_LOG = os.path.expanduser("~/.local/state/machine-shepherd/mediaanalysisd-stopcont.log")
+MAD_NAME, MAD_STOP_CPU, MAD_RESUME_MIN = "mediaanalysisd", 50.0, 15
 # Agent name or pane id; names survive herdr pane moves (pane ids change on every move). An easl tile name works too.
 SHEPHERD = open(os.path.expanduser("~/.config/machine-shepherd/pane")).read().strip() \
     if os.path.exists(os.path.expanduser("~/.config/machine-shepherd/pane")) else "shepherd"
@@ -164,8 +175,57 @@ def find(book, wid):
     return next((w for w in book if w["id"] == wid or wid in w.get("former_ids", [])), None)
 
 
+def interval_cpu():
+    """{pid: (cpu %, command)} from a 1 s root interval sample (sudo top's second sample: its first
+    reports lifetime averages)."""
+    try:
+        out = subprocess.run(["sudo", "-n", "top", "-l", "2", "-s", "1", "-stats", "pid,cpu,command"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    rows = {}
+    for line in out.split("Processes:")[-1].splitlines():
+        m = re.match(r"\s*(\d+)\s+([\d.]+)\s+(.+?)\s*$", line)
+        if m:
+            rows[int(m.group(1))] = (float(m.group(2)), m.group(3))
+    return rows
+
+
+def mad_log(msg):
+    with open(MAD_LOG, "a") as f:
+        f.write(f"{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} {msg}\n")
+
+
+def mediaanalysisd(state, windows, now):
+    """Stop mediaanalysisd above MAD_STOP_CPU while a window runs; resume what this stopped once no window
+    runs or starts within MAD_RESUME_MIN. state["_mad"] holds the pids it stopped."""
+    stopped = state.setdefault("_mad", {})
+    running = [w for w in windows if utc(w["start"]) <= now < utc(w["end"])]
+    if running:
+        for pid, (cpu, cmd) in interval_cpu().items():
+            if cmd == MAD_NAME and cpu > MAD_STOP_CPU and str(pid) not in stopped:
+                try:
+                    os.kill(pid, signal.SIGSTOP)
+                except OSError as e:
+                    mad_log(f"STOP pid {pid} failed ({e}) at {cpu:.0f}% during {running[0]['id']}")
+                    continue
+                stopped[str(pid)] = now.isoformat()
+                mad_log(f"STOP pid {pid} at {cpu:.0f}% CPU during {running[0]['id']} ({running[0]['label']})")
+        return
+    soon = any(utc(w["start"]) - dt.timedelta(minutes=MAD_RESUME_MIN) <= now < utc(w["end"]) for w in windows)
+    if soon:
+        return
+    for pid in list(stopped):
+        try:
+            os.kill(int(pid), signal.SIGCONT)
+            mad_log(f"CONT pid {pid} (no window running or starting within {MAD_RESUME_MIN} min)")
+        except OSError as e:
+            mad_log(f"CONT pid {pid}: {e} (gone)")
+        del stopped[pid]
+
+
 def tick():
-    book, state = load(BOOK, []), load(STATE, {})
+    book, holds, state = load(BOOK, []), load(HOLDS, []), load(STATE, {})
     now = dt.datetime.now(dt.timezone.utc)
     ags = tls = None
 
@@ -204,7 +264,7 @@ def tick():
             return False
         return delivery is not None
 
-    for w in book:
+    for w in book + holds:
         s = state.setdefault(w["id"], {"noticed": False, "started": False, "ended": False, "last": {}, "hits": {}})
         start, end = utc(w["start"]), utc(w["end"])
         span = f"{w['start'][11:16]}-{w['end'][11:16]}Z ({local(w['start'])}-{local(w['end'])} local)"
@@ -223,7 +283,8 @@ def tick():
                 and briefed(t.get("name"))]
             s["notice_pending"] = [
                 p for p in targets if (p in ags or p in tls) and not send(
-                    s, p, f"shepherd: QUIET WINDOW {span} for {w['label']} ({w['owner']}). "
+                    s, p, f"shepherd: QUIET WINDOW {span} for {w['label']} ({w['owner']})"
+                          f"{' (unbooked hold: its driver refuses registry rows)' if w in holds else ''}. "
                           f"Hold during it: {HOLD}. Finish or park heavy work before {local(w['start'])}.")]
             s["noticed"] = True
         if start <= now < end:
@@ -277,48 +338,51 @@ def tick():
                       f"Panes caught loading the machine (minute samples): {hits}.")]
             # Retried each tick while a recipient refuses (blocked/focused, no inbox yet), for up to 30 min.
             s["ended"] = not s["summary_pending"] or now - end > dt.timedelta(minutes=30)
-    keep = [w for w in book if utc(w["end"]) > now - dt.timedelta(hours=12)]
-    save(STATE, {w["id"]: state[w["id"]] for w in keep if w["id"] in state})
+    mediaanalysisd(state, book + holds, now)
+    old = now - dt.timedelta(hours=12)
+    keep, keep_holds = [w for w in book if utc(w["end"]) > old], [w for w in holds if utc(w["end"]) > old]
+    save(STATE, {**{w["id"]: state[w["id"]] for w in keep + keep_holds if w["id"] in state}, "_mad": state["_mad"]})
     if len(keep) != len(book):
         save(BOOK, keep)
+    if len(keep_holds) != len(holds):
+        save(HOLDS, keep_holds)
 
 
 def main():
     cmd = sys.argv[1:] or ["list"]
-    book = load(BOOK, [])
-    if cmd[0] == "add" and len(cmd) == 5:
+    book, holds = load(BOOK, []), load(HOLDS, [])
+    if cmd[0] in ("add", "hold") and len(cmd) == 5:
         start, end = utc(cmd[1]), utc(cmd[2])
         if end <= start:
             sys.exit("end must be after start")
-        wid = f"{cmd[1]}-{cmd[3]}"
-        book = [w for w in book if w["id"] != wid] + [
+        path, rows = (BOOK, book) if cmd[0] == "add" else (HOLDS, holds)
+        wid = f"{cmd[1]}-{cmd[3]}" + ("" if cmd[0] == "add" else "-hold")
+        rows = [w for w in rows if w["id"] != wid] + [
             {"id": wid, "start": cmd[1], "end": cmd[2], "owner": cmd[3], "label": cmd[4]}]
-        save(BOOK, sorted(book, key=lambda w: w["start"]))
-        print(f"booked {wid}")
-    elif cmd[0] == "remove" and len(cmd) == 2:
-        now = dt.datetime.now(dt.timezone.utc)
-        w = find(book, cmd[1])
+        save(path, sorted(rows, key=lambda w: w["start"]))
+        print(f"{'booked' if cmd[0] == 'add' else 'held (not in the registry)'} {wid}")
+    elif cmd[0] in ("remove", "mute") and len(cmd) == 2:
+        path, rows = (BOOK, book) if find(book, cmd[1]) else (HOLDS, holds)
+        w = find(rows, cmd[1])
         if w is None:
-            sys.exit(f"no window {cmd[1]}; booked: {', '.join(x['id'] for x in book) or 'none'}")
-        if w and utc(w["start"]) <= now < utc(w["end"]):
+            sys.exit(f"no window {cmd[1]}; booked: {', '.join(x['id'] for x in book + holds) or 'none'}")
+        now = dt.datetime.now(dt.timezone.utc)
+        if cmd[0] == "mute":
+            w["mute_owner"] = True
+            save(path, rows)
+            print(f"end summary of {w['id']} goes to the shepherd only")
+        elif utc(w["start"]) <= now < utc(w["end"]):
             # Deleting a running window would drop its catch history before the end summary.
             w["end"] = now.strftime("%Y-%m-%dT%H:%MZ")
-            save(BOOK, book)
+            save(path, rows)
             print(f"ended {cmd[1]} at {w['end']}; the summary follows within a minute")
         else:
-            save(BOOK, [x for x in book if x is not w])
+            save(path, [x for x in rows if x is not w])
             print(f"removed {w['id']}")
-    elif cmd[0] == "mute" and len(cmd) == 2:
-        w = find(book, cmd[1])
-        if w is None:
-            sys.exit(f"no window {cmd[1]}; booked: {', '.join(x['id'] for x in book) or 'none'}")
-        w["mute_owner"] = True
-        save(BOOK, book)
-        print(f"end summary of {w['id']} goes to the shepherd only")
     elif cmd[0] == "list":
-        for w in book:
+        for w in sorted(book + holds, key=lambda x: x["start"]):
             print(f"{w['id']}  {w['start']} -> {w['end']}  ({local(w['start'])}-{local(w['end'])} local)  "
-                  f"{w['owner']}  {w['label']}")
+                  f"{w['owner']}  {w['label']}{'  [HOLD: unbooked, not in the registry]' if w in holds else ''}")
     elif cmd[0] == "tick":
         tick()
     else:

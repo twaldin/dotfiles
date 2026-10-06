@@ -1,13 +1,16 @@
-"""Smoke test for bin/quiet-window: the book (add/list/remove/mute) and the minute `tick`.
+"""Smoke test for bin/quiet-window: the book and holds (add/hold/list/remove/mute) and the minute `tick`.
 
-HOME is a temp dir, so the book, state and log live there. `tick` finds herdr, agent-msg and
+HOME is a temp dir, so the book, holds, state and logs live there. `tick` finds herdr, agent-msg and
 quiet-check under $HOME/.local/bin: those are stand-ins that record what they were asked, and
-the quiet-check stand-in prints canned output. Windows are booked relative to the real clock.
+the quiet-check stand-in prints canned output. A `sudo` stand-in first on PATH answers the
+mediaanalysisd probe (`sudo -n top`) from a canned file, so no test ever samples or signals a real
+process. Windows are booked relative to the real clock.
 easl is a stand-in CLI too, outside PATH: only a test that writes the switch file into HOME reaches it.
 """
 import datetime as dt
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -41,6 +44,16 @@ import json, os, sys
 open('@QC_ARGS@', 'a').write(json.dumps(sys.argv[1:]) + '\\n')
 if os.path.exists('@QC_OUT@'):
     sys.stdout.write(open('@QC_OUT@').read())
+'''
+
+# sudo -n top -l 2 -s 1 -stats pid,cpu,command: prints the canned top file (empty: no rows).
+FAKE_SUDO = '''#!@PY@
+import os, sys
+if sys.argv[1:4] != ['-n', 'top', '-l']:
+    sys.exit(1)
+sys.stdout.write('Processes: 1 total\\nPID  %CPU COMMAND\\nProcesses: 1 total\\nPID  %CPU COMMAND\\n')
+if os.path.exists('@TOP_OUT@'):
+    sys.stdout.write(open('@TOP_OUT@').read())
 '''
 
 # The easl CLI: logs each call (argv, first PATH entry) and prints the scripted agent.list. The mode file
@@ -91,9 +104,13 @@ class QuietWindow(unittest.TestCase):
                      '@HERDR_PROMPTS@': str(self.root / 'herdr-prompts.jsonl'), '@MSGS@': str(self.msgs_path),
                      '@REFUSE@': str(self.root / 'refuse'), '@QC_ARGS@': str(self.root / 'qc-args.jsonl'),
                      '@QC_OUT@': str(self.root / 'qc-out.txt'), '@EASL_CALLS@': str(self.root / 'easl-calls.jsonl'),
-                     '@EASL_MODE@': str(self.root / 'easl-mode'), '@EASL_AGENTS@': str(self.root / 'easl-agents.json')}
+                     '@EASL_MODE@': str(self.root / 'easl-mode'), '@EASL_AGENTS@': str(self.root / 'easl-agents.json'),
+                     '@TOP_OUT@': str(self.root / 'top-out.txt')}
+        stubs = self.root / 'stubs'
+        stubs.mkdir()
         for path, body in ((self.bin / 'herdr', FAKE_HERDR), (self.bin / 'agent-msg', FAKE_AGENT_MSG),
-                           (self.bin / 'quiet-check', FAKE_QUIET_CHECK), (self.root / 'easl', FAKE_EASL)):
+                           (self.bin / 'quiet-check', FAKE_QUIET_CHECK), (self.root / 'easl', FAKE_EASL),
+                           (stubs / 'sudo', FAKE_SUDO)):
             for key, value in self.fake.items():
                 body = body.replace(key, value)
             path.write_text(body)
@@ -101,7 +118,9 @@ class QuietWindow(unittest.TestCase):
         self.set_agents(AGENTS)
         # Agents that run heavy work have an effort brief; only they are ever told to hold or stop.
         self.brief('bench-judge', 'canvas', 'sky', *(t['name'] for t in TILES))
-        self.env = {**os.environ, 'HOME': str(self.root), 'TZ': 'UTC'}
+        self.env = {**os.environ, 'HOME': str(self.root), 'TZ': 'UTC', 'PATH': f'{stubs}:{os.environ["PATH"]}'}
+        self.holds_path = self.root / '.config' / 'machine-shepherd' / 'quiet-holds.json'
+        self.mad_log = self.root / '.local' / 'state' / 'machine-shepherd' / 'mediaanalysisd-stopcont.log'
 
     # -- plumbing
 
@@ -113,6 +132,80 @@ class QuietWindow(unittest.TestCase):
         for name in names:
             (self.root / 'cos' / 'efforts' / name).mkdir(parents=True, exist_ok=True)
             (self.root / 'cos' / 'efforts' / name / 'brief.md').write_text('# brief\n')
+
+    # -- holds: windows for runs whose driver refuses any registry row
+
+    def test_a_hold_is_kept_out_of_the_registry_listed_beside_bookings_and_enforced_like_one(self):
+        self.book_window(30, 60, owner='swarm', label='chunk 4')
+        r = self.qw('hold', stamp(5), stamp(35), 'bench-judge', 'r5 native')
+        hid = r.stdout.split()[-1]
+        self.assertTrue(hid.endswith('-bench-judge-hold'), r.stdout)
+        self.assertEqual([w['id'] for w in self.book()], [f"{stamp(30)}-swarm"])  # drivers read only the book
+        self.assertEqual([w['id'] for w in json.loads(self.holds_path.read_text())], [hid])
+        listed = self.qw('list').stdout.splitlines()
+        self.assertEqual(len(listed), 2)
+        self.assertIn('[HOLD: unbooked, not in the registry]', listed[0])
+        self.assertNotIn('[HOLD', listed[1])
+        self.qw('tick')
+        notices = self.msgs()
+        self.assertEqual(sorted(p for p, _ in notices), ['w1:p2', 'w1:p4'])  # not the owner, not the shepherd
+        self.assertIn('unbooked hold', notices[0][1])
+        self.assertIn('r5 native', notices[0][1])
+        self.assertIn(f'removed {hid}', self.qw('remove', hid).stdout)  # not started yet: removed outright
+        self.assertEqual(json.loads(self.holds_path.read_text()), [])
+        self.assertEqual(len(self.book()), 1)
+
+    def test_a_running_hold_tells_offenders_to_stop_and_ends_with_a_summary(self):
+        hid = self.qw('hold', stamp(-2), stamp(30), 'bench-judge', 'r5 native').stdout.split()[-1]
+        (self.root / 'qc-out.txt').write_text('  95.0%   12345  ffmpeg                       w1:p2 canvas  <-- not quiet\n')
+        self.qw('tick')
+        self.assertEqual(self.log_of('qc-args.jsonl'), [['--pane', 'w1:p1']])
+        self.assertEqual([p for p, _ in self.stops()], ['w1:p2'])
+        self.assertIn(f'ended {hid}', self.qw('remove', hid).stdout)
+        self.qw('tick')
+        summary = [t for p, t in self.msgs() if p == 'shepherd'][-1]
+        self.assertIn('w1:p2 x1', summary)
+
+    # -- mediaanalysisd: stopped during a window when above 50% CPU, resumed after (Tim, 2026-10-06)
+
+    def mad(self, cpu):
+        """A real throwaway process standing in for mediaanalysisd at `cpu` percent in the top probe."""
+        p = subprocess.Popen(['sleep', '60'])
+        self.addCleanup(lambda: (os.kill(p.pid, signal.SIGCONT), p.kill(), p.wait()))
+        (self.root / 'top-out.txt').write_text(f'{p.pid} {cpu} mediaanalysisd\n')
+        return p.pid
+
+    def stat(self, pid):
+        return subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()[:1]
+
+    def test_mediaanalysisd_is_stopped_during_a_window_and_resumed_once_none_is_near(self):
+        pid = self.mad(160.2)
+        wid = self.book_window(-2, 30)
+        self.qw('tick')
+        self.assertEqual(self.stat(pid), 'T')
+        self.assertIn(f'STOP pid {pid} at 160% CPU during {wid}', self.mad_log.read_text())
+        self.qw('tick')
+        self.assertEqual(self.mad_log.read_text().count('STOP'), 1, 'stopped once')
+        self.qw('remove', wid)
+        self.qw('hold', stamp(10), stamp(20), 'bench-judge', 'next run')  # another run within 15 min: stay stopped
+        self.qw('tick')
+        self.assertEqual(self.stat(pid), 'T')
+        self.qw('remove', json.loads(self.holds_path.read_text())[0]['id'])
+        self.qw('tick')
+        self.assertIn(self.stat(pid), ('S', 'R'))
+        self.assertIn(f'CONT pid {pid}', self.mad_log.read_text())
+
+    def test_mediaanalysisd_at_or_below_50_percent_or_outside_a_window_is_left_alone(self):
+        pid = self.mad(50.0)
+        wid = self.book_window(-2, 30)
+        self.qw('tick')
+        self.assertIn(self.stat(pid), ('S', 'R'))
+        self.qw('remove', wid)
+        self.qw('tick')
+        pid2 = self.mad(160.0)
+        self.qw('tick')  # no window running
+        self.assertIn(self.stat(pid2), ('S', 'R'))
+        self.assertFalse(self.mad_log.exists())
 
     def qw(self, *args, ok=True):
         r = subprocess.run([sys.executable, str(QUIET_WINDOW), *args], env=self.env,
