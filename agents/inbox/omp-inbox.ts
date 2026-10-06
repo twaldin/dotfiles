@@ -1,11 +1,14 @@
-// Cross-session IRC for omp in herdr panes. omp's own IRC (`write agent://<id>`) only reaches
-// agents in the same process. This extension extends it to every herdr agent, without adding tools:
-// - Outbound: when a native `write agent://<name>` fails with "Unknown agent", deliver to the herdr
-//   agent of that name instead (`<name>@<host>` reaches another machine over ssh) and report success.
-// - Inbound: messages land in this session's inbox and arrive as one agent-attributed aside at the
-//   next step boundary. They never touch the terminal, so they can't land in Tim's half-typed draft,
-//   answer an open question or stop a run.
-// Delete this extension once omp ships cross-session hub messaging (can1357/oh-my-pi#7537).
+// Cross-session IRC for omp in herdr panes, and from easl tiles to herdr panes. omp's own IRC
+// (`write agent://<id>`) only reaches agents in the same process; this extends it to every herdr
+// agent, without adding tools:
+// - Outbound: when a native `write agent://<name>` fails with "Unknown agent", deliver through
+//   agent-msg instead (an easl tile's omp by its name or `name@board`, a herdr agent by name,
+//   `<name>@<host>` on another machine over ssh) and report success. In an easl tile, easl's own
+//   extension handles easl addresses, so this only adds the herdr agents.
+// - Inbound (herdr panes only; tiles get easl's): messages land in this session's inbox and arrive
+//   as one agent-attributed aside at the next step boundary. They never touch the terminal, so they
+//   can't land in Tim's half-typed draft, answer an open question or stop a run.
+// Delete this extension once every agent runs in an easl tile.
 // @ts-nocheck
 
 import { execFile } from "node:child_process";
@@ -42,7 +45,8 @@ function inboxKey(ctx): string | undefined {
 }
 
 export default function (pi) {
-  if (process.env.HERDR_ENV !== "1") return;
+  const inHerdr = process.env.HERDR_ENV === "1";
+  if (!inHerdr && process.env.EASL_ENV !== "1") return;
 
   const wakes = new Map<string, number[]>();
 
@@ -67,7 +71,9 @@ export default function (pi) {
     if (!native.includes("Unknown agent")) return;
     const [, name, host] = match;
     const target = host !== undefined && host !== HOST ? `${name}@${host}` : name;
-    const sent = await run(SENDER, [target, text, "--from", await selfAddress(ctx)]);
+    // From a tile, agent-msg names this tile by its easl address itself.
+    const args = inHerdr ? [target, text, "--from", await selfAddress(ctx)] : [target, text, "--herdr-only"];
+    const sent = await run(SENDER, args);
     if (/agent-msg: (queued for|typed into)/.test(sent.out)) {
       // The IRC card renders from the native receipts, so mark them delivered too.
       const message = event.details?.message;
@@ -164,6 +170,7 @@ export default function (pi) {
     drain();
   }
 
+  if (!inHerdr) return;
   pi.on("session_start", (_event, ctx) => bind(ctx));
   pi.on("session_switch", (_event, ctx) => bind(ctx));
   pi.on("session_shutdown", () => unbind());

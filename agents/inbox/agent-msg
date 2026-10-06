@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Message a herdr omp agent without typing into its terminal.
+"""Message an omp agent, in a herdr pane or an easl tile, without typing into its terminal.
 
-    agent-msg <agent>[@<host>] <text...> [--from NAME]
+    agent-msg <agent>[@<host or board>] <text...> [--from NAME]
 
 Agents with the omp-inbox extension use `write agent://<name>[@<host>]`, which runs this.
 Shell scripts, and panes started before the extension, call it directly.
 
-The text goes to the agent's omp inbox and arrives as an agent-attributed message at its
-next step boundary; a busy agent's long `wait` is interrupted so it sees it. It never enters
+An omp agent in an easl tile (`name` or `name@board`, as `easl agent.list` shows its address) gets
+the text through `easl tell`, out of band. Called from a tile without --from, the message names
+that tile, so the receiver can reply.
+
+Otherwise the text goes to the herdr agent's omp inbox and arrives as an agent-attributed message
+at its next step boundary; a busy agent's long `wait` is interrupted so it sees it. It never enters
 a half-typed draft or answers an open question. `@<host>` delivers on that host over ssh.
 
 A pane started before the extension was installed has no inbox yet. Then this falls back
@@ -28,6 +32,51 @@ import time
 from pathlib import Path
 
 ROOT = Path.home() / '.local/state/omp-inbox'
+EASL_APP = Path('/Applications/easl.app/Contents/Resources/bin/easl')
+
+
+def easl_agents():
+    """(easl CLI, its agent.list) on a host with easl; (None, []) without it or when it is down."""
+    cli = shutil.which('easl') or (str(EASL_APP) if EASL_APP.is_file() else None)
+    if not cli:
+        return None, []
+    try:
+        r = subprocess.run([cli, 'agent.list'], capture_output=True, text=True, timeout=10)
+        return cli, json.loads(r.stdout)['agents'] if r.returncode == 0 else []
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError):
+        return cli, []
+
+
+def easl_address(agents, name, board):
+    """The address of the easl tile whose omp takes out-of-band messages, or None."""
+    # Only omp tiles with an integration (protocol >= 1): `easl tell` would type into anything else.
+    found = sorted({a['address'] for a in agents
+                    if a.get('open') and (a.get('protocol') or 0) >= 1 and a.get('address')
+                    and (a['address'] == f'{name}@{board}' if board else a.get('name') == name)})
+    if len(found) > 1:
+        sys.exit(f'agent-msg: {name!r} is on several easl boards ({", ".join(found)}); say <name>@<board>')
+    return found[0] if found else None
+
+
+def tell(cli, address, text, origin):
+    command = [cli, 'tell', address, text]
+    if origin:
+        command += ['--from', origin]
+    r = subprocess.run(command, capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f'agent-msg: easl tell {address} failed: {(r.stderr or r.stdout).strip()}')
+    try:
+        delivery = json.loads(r.stdout).get('delivery')
+    except ValueError:
+        delivery = None
+    print(f'agent-msg: typed into {address}' if delivery == 'typed' else f'agent-msg: queued for {address}')
+    sys.exit(0)
+
+
+def tile_address(agents):
+    """This tile's easl address (`name@board`) when called from an easl tile, else None."""
+    tile = os.environ.get('EASL_TILE_ID')
+    return next((a.get('address') for a in agents if tile and a.get('tile') == tile), None)
 
 
 def herdr():
@@ -97,13 +146,23 @@ def main():
     parser.add_argument('agent')
     parser.add_argument('text', nargs='+')
     parser.add_argument('--from', dest='sender')
+    # omp-inbox in an easl tile passes this: easl's own extension already tried easl for the same write.
+    parser.add_argument('--herdr-only', action='store_true')
     args = parser.parse_args()
     text = ' '.join(args.text).strip()
     if not text:
         sys.exit('agent-msg: empty message')
     name, _, host = args.agent.partition('@')
-    origin = args.sender or sender()
-    if host and host != socket.gethostname().split('.')[0]:
+    local = socket.gethostname().split('.')[0]
+    cli, agents = easl_agents()
+    # `name@<this host>` is how herdr agents address everyone here, tiles included.
+    address = None if args.herdr_only else easl_address(agents, name, '' if host == local else host)
+    if address:
+        # From a tile, easl names the calling tile itself, with a reply address.
+        from_tile = args.sender is None and tile_address(agents)
+        tell(cli, address, text, None if from_tile else args.sender or sender())
+    origin = args.sender or tile_address(agents) or sender()
+    if host and host != local:
         remote(host, name, text, origin)
     info = agent(name)
     inbox = live_inbox(info)

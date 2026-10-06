@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,20 @@ else:
     sys.exit(1)
 '''
 
+# Stands in for easl: `agent.list` answers from $FAKE_EASL_AGENTS, `tell` records its argv.
+FAKE_EASL = '''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if args[:1] == ['agent.list']:
+    print(json.dumps({'agents': json.loads(os.environ.get('FAKE_EASL_AGENTS', '[]'))}))
+elif args[:1] == ['tell']:
+    with open(os.environ['FAKE_TOLD'], 'a') as f:
+        f.write(json.dumps(args[1:]) + '\\n')
+    print(json.dumps({'delivery': 'message'}))
+else:
+    sys.exit(1)
+'''
+
 
 class AgentMsg(unittest.TestCase):
     def setUp(self):
@@ -30,19 +45,31 @@ class AgentMsg(unittest.TestCase):
         self.root = Path(self.tmp.name)
         bin_dir = self.root / 'bin'
         bin_dir.mkdir()
-        (bin_dir / 'herdr').write_text(FAKE_HERDR)
-        (bin_dir / 'herdr').chmod(0o755)
+        for name, script in (('herdr', FAKE_HERDR), ('easl', FAKE_EASL)):
+            (bin_dir / name).write_text(script)
+            (bin_dir / name).chmod(0o755)
         self.typed = self.root / 'typed.jsonl'
-        self.env = {**os.environ, 'HOME': str(self.root), 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
-                    'FAKE_TYPED': str(self.typed)}
+        self.told_log = self.root / 'told.jsonl'
+        # Run as if from a herdr pane, even when the suite itself runs in an easl tile.
+        inherited = {k: v for k, v in os.environ.items() if not k.startswith('EASL_')}
+        self.env = {**inherited, 'HOME': str(self.root), 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                    'FAKE_TYPED': str(self.typed), 'FAKE_TOLD': str(self.told_log)}
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def send(self, agent, text='status?'):
-        env = {**self.env, 'FAKE_AGENT': json.dumps(agent)}
-        return subprocess.run([sys.executable, str(AGENT_MSG), 'target', text, '--from', 'meta@home'],
+    def send(self, agent, text='status?', target='target', tiles=(), sender=('--from', 'meta@home'), **env):
+        env = {**self.env, 'FAKE_AGENT': json.dumps(agent), 'FAKE_EASL_AGENTS': json.dumps(list(tiles)), **env}
+        return subprocess.run([sys.executable, str(AGENT_MSG), target, text, *sender],
                               env=env, capture_output=True, text=True)
+
+    def told(self):
+        return [json.loads(line) for line in self.told_log.read_text().splitlines()] if self.told_log.exists() else []
+
+    @staticmethod
+    def tile(name='target', board='dotfiles', **extra):
+        return {'tile': f'obj_{name}', 'name': name, 'address': f'{name}@{board}', 'open': True,
+                'protocol': 1, 'kind': 'omp', **extra}
 
     def typed_prompts(self):
         return [json.loads(line) for line in self.typed.read_text().splitlines()] if self.typed.exists() else []
@@ -86,6 +113,49 @@ class AgentMsg(unittest.TestCase):
         self.assertEqual(name, 'target')
         self.assertIn("agent-msg meta@home '<text>'", typed)
         self.assertTrue(typed.endswith('ship it'))
+
+    def test_tile_agent_is_told_through_easl_by_board_or_this_host(self):
+        local = socket.gethostname().split('.')[0]
+        for target in ('target@dotfiles', f'target@{local}', 'target'):
+            with self.subTest(target=target):
+                self.told_log.unlink(missing_ok=True)
+                result = self.send(self.omp_agent(), target=target, tiles=[self.tile()])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.told(), [['target@dotfiles', 'status?', '--from', 'meta@home']])
+                self.assertEqual(self.typed_prompts(), [])
+
+    def test_tile_without_an_integration_is_never_told(self):
+        # A shell or an omp without easl's extension would get the text typed into it.
+        result = self.send(self.omp_agent(), tiles=[self.tile(protocol=None)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.told(), [])
+        self.assertEqual(len(self.typed_prompts()), 1)
+
+    def test_a_name_on_two_boards_is_refused_not_guessed(self):
+        result = self.send(self.omp_agent(), tiles=[self.tile(board='a'), self.tile(board='b')])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('target@a, target@b', result.stderr)
+        self.assertEqual((self.told(), self.typed_prompts()), ([], []))
+
+    def test_from_a_tile_easl_names_the_sender_and_herdr_gets_its_address(self):
+        me = self.tile('meta')
+        result = self.send(self.omp_agent(), target='peer', tiles=[me, self.tile('peer', board='sky')],
+                           sender=(), EASL_TILE_ID='obj_meta')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.told(), [['peer@sky', 'status?']])
+        self.told_log.unlink()
+        # A herdr agent gets the tile's address to reply to, not "shell@host".
+        result = self.send(self.omp_agent(), target='herdr-peer', tiles=[me], sender=(), EASL_TILE_ID='obj_meta')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [[_, typed]] = self.typed_prompts()
+        self.assertIn("agent-msg meta@dotfiles '<text>'", typed)
+
+    def test_herdr_only_never_delivers_through_easl_twice(self):
+        # omp-inbox in a tile runs after easl's extension handled the same write.
+        result = self.send(self.omp_agent(), tiles=[self.tile()], sender=('--herdr-only',))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.told(), [])
+        self.assertEqual(len(self.typed_prompts()), 1)
 
 
 if __name__ == '__main__':
