@@ -1879,6 +1879,23 @@ class Guard(unittest.TestCase):
         self.assertIsNone(self.rig_start['activationPolicy'])
         self.end_rig(process, lines, root)
 
+    def test_an_objective_c_exception_ends_the_guard_at_once_as_a_failure(self):
+        # GR1-F1: AppKit's loop would log an Objective-C exception it catches and go on, unless the
+        # NSApplicationCrashOnExceptions default, which a preference or an argument can set, says crash. The live guard
+        # ends at once on every exception: its own app (GuardApplication) on those AppKit's loop hands to
+        # reportException, the uncaught-exception handler on every other, both through exceptionEnds. The rig has no
+        # AppKit loop (it runs without a GUI session), so this shows the handler and the end exceptionEnds makes (an
+        # error event, nothing after, no summary, exit 2) for an exception raised on main that nothing catches. It
+        # does not show that AppKit's loop hands what it catches to GuardApplication: that needs a GUI session.
+        process, lines, root = self.rig()
+        self.send(process, 'raise')
+        seen = lines.until(lambda row: row.get('event') == 'error', 10)
+        self.assertEqual(seen[-1]['message'], 'an Objective-C exception that nothing caught (GuiLaunchRigException: raised by the rig) '
+                                              'ended the guard at once: its records are incomplete')
+        self.assertEqual(process.wait(10), 2)
+        self.assertIsNone(lines.rows.get(timeout=5), 'nothing is printed after the error')
+        self.assertFalse((root / 'summary.json').exists())
+
     def test_a_tree_window_whose_owner_yabai_does_not_name_stays_unknown_and_fails_the_check(self):
         # GP2: windows 9003 (on Space 6) and 9004 (no Space) are the tree's in yabai's list, but its answer about each
         # is {}: no owner, which is not an owner outside the tree.

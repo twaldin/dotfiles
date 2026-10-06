@@ -16,7 +16,8 @@
 // yabai's Spaces by SkyLight id. A yabai call there that fails, misses its deadline or answers unreadably (a window
 // row that does not say whether it has focus, a focused row without its id, pid or Space, a Space without its id
 // and index) is an error (exit 2): nothing launches; so is a direct read of his display (below) that fails or does
-// not show the Space yabai says it shows, and an AppKit app (Threads, below) whose policy will not be .prohibited.
+// not show the Space yabai says it shows, and an AppKit app (Threads, below) that is not of the guard's own class or
+// whose policy will not be .prohibited.
 // Until the guard ends it
 //   - attributes: a theft window runs from a tree activation until focus is back with Tim's app (or, with no app
 //     to give it back to, with any app outside the tree) and 2 s after. Inside it no activation and no Space
@@ -70,12 +71,14 @@
 // a problem); work in flight, including reverts still queued, gets 3 s to settle; the end's own work (the final
 // scan, sweep and focus read) gets its own 3 s; then every yabai helper still running is killed with its process
 // group (SIGTERM, then SIGKILL) and reaped. Work that has not finished by then is a problem for the check; nothing
-// is printed after guard-end. It never quits what it launched.
+// is printed after guard-end. It never quits what it launched. An Objective-C exception, whether AppKit's loop caught
+// it or nothing did, ends the guard at once instead, whatever the defaults say: an error event, no summary, exit 2.
 // Events go to stdout as JSON lines; the summary gui-launch checks goes to --summary.
 // Threads: main runs NSApplication's own loop (except in the rig), the event loop macOS delivers Space
-// notifications through: the guard is an AppKit app whose activation policy is .prohibited, so it has no Dock icon,
-// no menu bar and no windows and is never activated; AppKit opens nothing for it, and a quit Apple Event ends it as
-// SIGTERM does. Main handles workspace notifications, signals and gui-launch's exit, and never waits on a child
+// notifications through: the guard is an AppKit app of its own class (GuardApplication) whose activation policy is
+// .prohibited, so it has no Dock icon, no menu bar and no windows and is never activated; AppKit opens nothing for
+// it, and a quit Apple Event ends it as SIGTERM does. Main handles workspace notifications, signals and
+// gui-launch's exit, and never waits on a child
 // process (a yabai call there is refused, and is a problem); reverts run on restoreQueue, Accessibility calls on
 // axQueue (observer callbacks on their own run loop thread), window moves on yabaiQueue, Tim's restore target
 // and Space restores on timQueue, the theft-window reads of his display on watchQueue, yabai's Space map on
@@ -891,6 +894,28 @@ func fail(_ message: String) -> Never {
     complain(message)
     _ = helpers.shutdown()
     exit(2)
+}
+
+/// GR1-F1: an Objective-C exception ends the guard at once, as a failure: the `error` event (if stdout is free within
+/// 0.2 s and nothing ended the output) and the message on stderr, then exit 2, which gui-launch fails. Nothing else
+/// runs: the exception may have left any lock held and any record half made (Swift code does not unwind it), so no
+/// summary is written and the yabai helpers are left to end on their own, as on a crash. `inAppKit`: AppKit's loop
+/// caught it (GuardApplication); else nothing caught it (the uncaught-exception handler).
+func exceptionEnds(_ exception: NSException, inAppKit: Bool) -> Never {
+    let message = "an Objective-C exception \(inAppKit ? "in AppKit's loop" : "that nothing caught") (\(exception.name.rawValue): " +
+        "\(exception.reason ?? "no reason given")) ended the guard at once: its records are incomplete"
+    if outLock.lock(before: Date(timeIntervalSinceNow: 0.2)) {
+        if !outputClosed, var line = try? JSONSerialization.data(withJSONObject: ["event": "error", "message": message, "at": iso()],
+                                                                 options: [.sortedKeys, .withoutEscapingSlashes]) {
+            line.append(10)
+            line.withUnsafeBytes { _ = write(1, $0.baseAddress, $0.count) }
+            outputClosed = true
+        }
+        outLock.unlock()
+    }
+    let text = Array(("gui-launch-guard: " + message + "\n").utf8)
+    _ = write(2, text, text.count)
+    _exit(2)
 }
 
 func describe(_ app: NSRunningApplication?) -> Any {
@@ -3022,6 +3047,16 @@ func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  //
 
 // MARK: - AppKit (GR1; not in the rig)
 
+/// The guard's AppKit app (GR1-F1). AppKit's loop catches an Objective-C exception raised in it (an event, a timer, a
+/// notification, a main-queue block) and hands it to reportException, whose own way with it (log it and go on, or
+/// crash) hangs on the NSApplicationCrashOnExceptions default, which a preference or an argument can set. Here it
+/// ends the guard at once whatever the defaults say (exceptionEnds).
+final class GuardApplication: NSApplication {
+    override func reportException(_ exception: NSException) {
+        exceptionEnds(exception, inAppKit: true)
+    }
+}
+
 /// The guard's AppKit app keeps AppKit from acting for it: what AppKit would open (it takes the arguments it does not
 /// know, such as the launch's executable, for files to open) is ignored, and a quit Apple Event ends the guard as
 /// SIGTERM does, with its check.
@@ -3048,23 +3083,28 @@ var appNapHold: NSObjectProtocol?
 /// NSApplication; its workspace observers (src/workspace.m:157-165, from src/yabai.c:295); then [NSApp run]
 /// (src/yabai.c:350), which replaced a bare CFRunLoopRunInMode loop when its Space notifications stopped on macOS 26
 /// (3861367, yabai #2680). [INFERENCE] The notifications then reach the guard too; NoticeFeed fails the check when
-/// they do not. The app is never activated: its policy is .prohibited (no Dock icon, no menu bar, no windows, never
-/// frontmost), set before it runs, and a policy that does not take is an error before anything launches. AppKit
-/// opens nothing for it (NSTreatUnknownArgumentsAsOpen, AppDelegate). As before AppKit's loop ran, an Objective-C
-/// exception ends the process (that loop would log it and go on; gui-launch fails a guard that dies), and App Nap
-/// does not slow its reads and reverts. false: the policy did not take.
-@MainActor func startAppKit() -> Bool {
-    UserDefaults.standard.register(defaults: ["NSTreatUnknownArgumentsAsOpen": "NO", "NSApplicationCrashOnExceptions": true])
-    let app = NSApplication.shared
+/// they do not. The shared app is the guard's own (GuardApplication), made before anything else asks AppKit for one,
+/// so an Objective-C exception in its loop ends the guard at once; an app of another class is an error before
+/// anything launches. The app is never activated: its policy is .prohibited (no Dock icon, no menu bar, no windows,
+/// never frontmost), set before it runs, and a policy that does not take is an error before anything launches too.
+/// AppKit opens nothing for it (NSTreatUnknownArgumentsAsOpen, and AppDelegate whatever that default says), and App
+/// Nap does not slow its reads and reverts. Returns why the guard cannot run as that app; nil: it runs as one.
+@MainActor func startAppKit() -> String? {
+    UserDefaults.standard.register(defaults: ["NSTreatUnknownArgumentsAsOpen": "NO"])
+    guard let app = GuardApplication.shared as? GuardApplication else {
+        return "AppKit's app is not the guard's own, so an Objective-C exception in its loop could be logged and passed over: nothing was launched"
+    }
     _ = app.setActivationPolicy(.prohibited)
-    guard app.activationPolicy() == .prohibited else { return false }
+    guard app.activationPolicy() == .prohibited else {
+        return "AppKit would not make this process an app that can never be activated, so nothing was launched"
+    }
     let delegate = AppDelegate()
     app.delegate = delegate
     appDelegate = delegate
     appKitPolicy = "prohibited"
     appNapHold = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
                                                        reason: "gui-launch-guard times its reads and reverts in milliseconds")
-    return true
+    return nil
 }
 
 // MARK: - Start
@@ -3201,7 +3241,6 @@ guard let baseline = awaitOffMain("the baseline", { takeBaseline(front: launchFr
 if let error = baseline.error { fail("no baseline, so nothing was launched: \(error)") }
 frontAtLaunch = launchFront
 focusAtLaunch = baseline.focused
-focusAtLaunch["mainScreen"] = NSScreen.main?.localizedName ?? NSNull()
 timSpaceAtLaunch = baseline.timSpace
 policy = RestorePolicy(userFront: baseline.frontIsTims ? launchFront?.processIdentifier : nil, guardUntil: guardSeconds)
 restoreTarget.update { $0 = baseline.target }
@@ -3221,11 +3260,14 @@ if !rigTest {
           sessionBits.contains(.sessionHasGraphicAccess) else {
         fail("this process is not in a GUI session, where activations are reported: start it through gui-launch")
     }
-    // GR1: an AppKit app macOS never activates, before SkyLight's first read and the observers (startAppKit).
-    guard MainActor.assumeIsolated({ startAppKit() }) else {
-        fail("AppKit would not make this process an app that can never be activated, so nothing was launched")
-    }
+    // GR1: the guard's own AppKit app, never activated, before SkyLight's first read and the observers (startAppKit),
+    // and before anything else here (such as NSScreen) uses AppKit.
+    if let why = MainActor.assumeIsolated({ startAppKit() }) { fail(why) }
 }
+focusAtLaunch["mainScreen"] = NSScreen.main?.localizedName ?? NSNull()
+// GR1-F1: an Objective-C exception that nothing catches (on any thread, or on main outside AppKit's loop; in the rig,
+// any) ends the guard at once as well (exceptionEnds); AppKit's loop hands the ones it catches to GuardApplication.
+NSSetUncaughtExceptionHandler { exceptionEnds($0, inAppKit: false) }
 
 // Tim's display, read directly from here on (the rig reads its stand-in file): the first read must show the Space
 // yabai says it shows, or nothing launches.
@@ -3349,7 +3391,8 @@ var rigRoot: pid_t?  // main
 /// are: `root <pid>` (a process joins the tree, as --exec's does), `theft` and `back` (an activation of the root, or
 /// of pid 1 standing in for an app outside the tree: the restore policy's decision and theft windows, without a
 /// revert), `notify` (an active-Space change), `window <id>` (Accessibility reports a window created), `sweep` (as
-/// at a tree activation), `stall <s>` (watchQueue busy that long) and `end` (SIGTERM). main.
+/// at a tree activation), `stall <s>` (watchQueue busy that long), `raise` (an Objective-C exception on main, which
+/// in the rig, with no AppKit loop, nothing catches) and `end` (SIGTERM). main.
 func rigCommand(_ words: [String]) {
     switch (words.first ?? "", words.count) {
     case ("root", 2):
@@ -3373,6 +3416,8 @@ func rigCommand(_ words: [String]) {
     case ("stall", 2):
         guard let seconds = Double(words[1]) else { return }
         watchQueue.async { usleep(UInt32(seconds * 1_000_000)) }
+    case ("raise", 1):
+        NSException(name: NSExceptionName("GuiLaunchRigException"), reason: "raised by the rig", userInfo: nil).raise()
     case ("end", 1):
         finish("signal")
     default:

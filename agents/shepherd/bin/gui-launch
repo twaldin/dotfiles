@@ -26,8 +26,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   (from yabai's window list), the Space his display shows, and yabai's Spaces by SkyLight id. A yabai query there
   that fails, misses its 2 s deadline or answers unreadably (a window row that does not say whether it has focus,
   a focused row without its id, pid or Space, a Space without its id), a direct read of his display (SkyLight)
-  that does not show the Space yabai says it shows, or an AppKit app (below) whose activation policy will not be
-  .prohibited, launches nothing: exit 2.
+  that does not show the Space yabai says it shows, or an AppKit app (below) that is not the guard's own or whose
+  activation policy will not be .prohibited, launches nothing: exit 2.
 - Guard, until --guard-seconds pass, the launched tree exits (without attach), or SIGTERM/SIGINT:
   gui-launch-guard (src/gui-launch-guard.swift) adopts processes as they activate or launch and in a scan
   of all processes every 150 ms. A theft window runs from a tree activation until focus is back with Tim's app,
@@ -61,6 +61,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   ("Space notifications are not arriving", once per run). macOS delivers them through an app's AppKit event loop,
   so the guard runs as an AppKit app that is never activated (activation policy .prohibited: no Dock icon, no menu
   bar, no windows, never frontmost; AppKit opens nothing for it, and a quit Apple Event ends it as SIGTERM does).
+  An Objective-C exception, whether AppKit's loop caught it or nothing did, ends the guard at once whatever the
+  defaults say: an `error` event, no summary, and the guard exits 2, so gui-launch exits 2.
   The residual: a change no read finds is still unchecked, so missing notifications show only once a read finds a
   change; and [INFERENCE] a notification that comes more than 0.5 s after the change SkyLight shows fails the
   check. In a theft window, reads more than 100 ms apart, or a read that fails, are a problem. That is all it does
