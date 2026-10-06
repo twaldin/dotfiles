@@ -10,9 +10,9 @@ environment and then runs the command after its `--`, or fails. The machine: Tim
 pid 100.
 
 The guard's decisions are tested on the real Swift source, built into a temp dir: synthetic processes,
-activations, Tim's input and Spaces through --decide, live processes (a compiled probe) through --resolve, its
-yabai calls and its end through --helpers, its startup with stand-in yabais that never answer. None of these
-touches a window.
+activations, reverts and Spaces through --decide, live processes (a compiled probe) through --resolve, its yabai
+calls, the drain and its end through --helpers, its startup with stand-in yabais that fail or never answer. None
+of these touches a window.
 """
 import hashlib
 import json
@@ -147,24 +147,33 @@ int main(int argc, char **argv) {
 '''
 
 # Stand-in yabais (sh); %(pids)s is where they record their pids. For --helpers the word after -m picks the
-# behaviour: answer at once, answer after 0.4 s, never answer (it and its child ignore SIGTERM), or exit at once
-# leaving a child that holds its output open.
+# behaviour: answer at once, after 0.4 s or after 1.2 s; never answer (it and its child ignore SIGTERM); exit at
+# once leaving a child that holds its output open; answer and exit leaving a child that let go of its output;
+# or write without end.
 HELPER_YABAI = '''#!/bin/sh
 case "$2" in
   quick) echo '{"ok": 1}' ;;
   slow) sleep 0.4; echo '{"slow": 1}' ;;
+  slow12) sleep 1.2; echo '{"slow12": 1}' ;;
   stuck) trap '' TERM; echo $$ >> '%(pids)s'; sleep 30 & echo $! >> '%(pids)s'; wait ;;
   leaky) sleep 30 & echo $! >> '%(pids)s'; exit 0 ;;
+  orphan) sleep 30 >/dev/null 2>&1 & echo $! >> '%(pids)s'; echo '{"orphan": 1}' ;;
+  flood) echo $$ >> '%(pids)s'; exec yes '{"flood": 1}' ;;
 esac
 '''
 STUCK_YABAI = "trap '' TERM; echo $$ >> '%(pids)s'; sleep 30 & echo $! >> '%(pids)s'; wait\n"
 LEAKY_YABAI = "sleep 30 & echo $! >> '%(pids)s'; exit 0\n"
+TIMS_SPACES = '[{"index": 1, "display": 1, "is-visible": false}, {"index": 2, "display": 1, "is-visible": true}]'
 # Answers the guard's baseline: no window has focus, Tim's display (display 1) shows Space 2.
 ANSWERING_YABAI = '''case "$3" in
-  --spaces) echo '[{"index": 1, "display": 1, "is-visible": false}, {"index": 2, "display": 1, "is-visible": true}]' ;;
+  --windows) echo '[]' ;;
+  --spaces) echo '%s' ;;
   *) exit 1 ;;
 esac
-'''
+''' % TIMS_SPACES
+# The window list fails (yabai's own error), or answers what is no JSON; the Spaces answer.
+FAILING_WINDOWS_YABAI = ANSWERING_YABAI.replace("--windows) echo '[]'", '--windows) exit 1')
+UNREADABLE_WINDOWS_YABAI = ANSWERING_YABAI.replace("--windows) echo '[]'", "--windows) echo 'no json'")
 
 
 def build_c(source, out):
@@ -549,7 +558,9 @@ class GuiLaunch(unittest.TestCase):
             (dict(restored, to=3, ok=False), "the tree moved Tim's display to Space 6 and the guard did not bring Space 2 back (it showed Space 3)"),
             ({'event': 'space-unrestorable', 'from': 6, 'to': 2, 'expected': 2, 'window': None},
              "the tree moved Tim's display to Space 6 and no window of his could bring Space 2 back"),
-            ({'event': 'space-unexplained', 'from': 2, 'to': 5, 'expected': 2}, "Tim's display moved from Space 2 to Space 5 without his input"),
+            ({'event': 'user-space-revoked', 'space': 3, 'expected': 2, 'theftAt': 20.5},
+             "a theft came within 2 s of Tim's display moving to Space 3: Space 2 is expected again"),
+            ({'event': 'space-moved', 'from': 2}, 'the guard recorded an unknown change of Tim\'s display: {"event": "space-moved", "from": 2}'),
         ]
         for record, message in cases:
             with self.subTest(record=record['event'], ok=record.get('ok')):
@@ -595,9 +606,10 @@ class GuiLaunch(unittest.TestCase):
 
 @unittest.skipUnless(SWIFTC and CC and ARM_MAC, 'needs swiftc and cc on an arm64 Mac')
 class Guard(unittest.TestCase):
-    """The real guard. --decide: t is seconds since launch, and so is "input", when Tim's last HID input came
-    (the stubbed input clock); pids 100 (Tim's terminal) and 300/400 (apps he switches to) run outside the tree.
-    --resolve: live probe processes. --helpers: yabai calls and the guard's end, with stand-in yabais."""
+    """The real guard. --decide: t is seconds since launch; pids 100 (Tim's terminal) and 300/400 (apps he switches
+    to) run outside the tree; "input" (the HID table's last input) is passed where the old rule would have taken it
+    as Tim's, to show it decides nothing. --resolve: live probe processes. --helpers: yabai calls and the guard's
+    end, with stand-in yabais."""
 
     @classmethod
     def setUpClass(cls):
@@ -630,12 +642,11 @@ class Guard(unittest.TestCase):
         return events(done.stdout)
 
     def restore(self, front, guard_seconds, activations):
-        """Activations (t, pid, in the tree) of plain processes, each outside the tree with Tim's input at that
-        moment (his click): the restore decisions."""
+        """Activations (t, pid, in the tree) of plain processes: the restore decisions."""
         pids = sorted({pid for _, pid, _ in activations} | {front or 100})
         header = {'front': front, 'guardSeconds': guard_seconds, 'roots': sorted({pid for _, pid, tree in activations if tree}),
                   'procs': [{'pid': pid, 'exe': '/apps/%d' % pid} for pid in pids]}
-        rows = self.decide(header, [dict({'t': t, 'activate': pid}, **({} if tree else {'input': t})) for t, pid, tree in activations])
+        rows = self.decide(header, [{'t': t, 'activate': pid} for t, pid, _ in activations])
         return [(row['decision'], row.get('to'), round(row['latencyMs'], 1) if 'latencyMs' in row else None) for row in rows]
 
     # Restore decisions -------------------------------------------------------------------------------
@@ -652,12 +663,16 @@ class Guard(unittest.TestCase):
         self.assertEqual(self.restore(100, 10, [(2.0, 300, False), (3.0, 500, True), (3.003, 300, False)]),
                          [('user', None, None), ('restore', 300, None), ('restored', None, 3.0)])
 
-    def test_a_user_pick_while_a_restore_is_pending_wins(self):
-        self.assertEqual(self.restore(100, 10, [(1.0, 500, True), (1.001, 300, False), (2.0, 500, True)]),
-                         [('restore', 100, None), ('user', None, None), ('restore', 300, None)])
+    def test_an_app_activated_in_a_theft_window_never_takes_tims_place(self):
+        # While the theft is open, and for 2 s after focus is back, no app outside the tree is Tim's pick.
+        self.assertEqual(self.restore(100, 10, [(1.0, 500, True), (1.001, 300, False), (2.0, 500, True), (2.004, 100, False),
+                                                (3.0, 300, False), (5.0, 300, False)]),
+                         [('restore', 100, None), ('system', None, None), ('restore', 100, None), ('restored', None, 1004.0),
+                          ('system', None, None), ('user', None, None)])
 
     def test_no_frontmost_app_at_launch_is_unrestorable_and_after_the_guard_nothing_is_reverted(self):
-        self.assertEqual(self.restore(None, 10, [(1.0, 500, True)]), [('unrestorable', None, None)])
+        self.assertEqual(self.restore(None, 10, [(1.0, 500, True), (1.5, 300, False), (2.0, 300, False), (4.0, 300, False)]),
+                         [('unrestorable', None, None), ('system', None, None), ('system', None, None), ('user', None, None)])
         self.assertEqual(self.restore(100, 10, [(10.5, 500, True)]), [('after-guard', None, None)])
 
     def test_the_restore_target_follows_tims_switches_and_never_a_tree_activation(self):
@@ -666,18 +681,18 @@ class Guard(unittest.TestCase):
         rows = self.decide(header, [
             {'t': 1.0, 'activate': 500, 'focused': {'id': 77, 'pid': 500}},  # yabai sees the thief's window: not taken
             {'t': 1.003, 'activate': 100},
-            {'t': 2.0, 'activate': 300, 'input': 1.98, 'focused': {'id': 55, 'pid': 300}},  # Tim switches to 300: its window is taken
-            {'t': 3.0, 'activate': 500},
-            {'t': 3.002, 'activate': 300},
-            {'t': 4.0, 'activate': 400, 'input': 3.98, 'focused': {'id': 55, 'pid': 300}},  # yabai still shows 300's window: not taken
-            {'t': 5.0, 'activate': 500, 'focused': {'id': 77, 'pid': 500}},
+            {'t': 5.0, 'activate': 300, 'focused': {'id': 55, 'pid': 300}},  # Tim switches to 300: its window is taken
+            {'t': 6.0, 'activate': 500},
+            {'t': 6.002, 'activate': 300},
+            {'t': 9.0, 'activate': 400, 'focused': {'id': 55, 'pid': 300}},  # yabai still shows 300's window: not taken
+            {'t': 10.0, 'activate': 500, 'focused': {'id': 77, 'pid': 500}},
         ])
         self.assertEqual([(r['decision'], r.get('to'), r.get('window'), r['target']) for r in rows], [
             ('restore', 100, 42, 42), ('restored', None, None, 42), ('user', None, None, 55),
             ('restore', 300, 55, 55), ('restored', None, None, 55), ('user', None, None, None),
             ('restore', 400, None, None)])  # no window known for 400: re-activate the app
 
-    def test_a_space_jump_after_a_theft_is_restored_and_only_tims_own_input_moves_his_space(self):
+    def test_a_space_jump_in_a_theft_window_is_restored_and_any_other_is_tims(self):
         header = {'front': 100, 'frontWindow': 42, 'frontWindowSpace': 2, 'guardSeconds': 60, 'roots': [500], 'timSpace': 2,
                   'procs': [{'pid': p, 'exe': '/apps/%d' % p} for p in (100, 300, 500)]}
         rows = self.decide(header, [
@@ -685,23 +700,23 @@ class Guard(unittest.TestCase):
             {'t': 1.002, 'activate': 100},
             {'t': 1.3, 'space': 6},                        # macOS followed Studio to Space 6: restore
             {'t': 1.4, 'space': 2},
-            {'t': 10.0, 'space': 3, 'input': 9.7},         # Tim's own switch: his input, nowhere near a theft
+            {'t': 2.5, 'space': 3, 'input': 2.45},         # within 2 s of the return: the tree's, whatever the input
+            {'t': 2.6, 'space': 2},
+            {'t': 10.0, 'space': 3},                       # outside every theft window: Tim's own switch
             {'t': 20.0, 'activate': 500},
+            {'t': 20.05, 'activate': 100},
             {'t': 20.1, 'space': 6, 'windowSpace': None},  # his window is gone: cannot restore
             {'t': 40.0, 'space': 6},                       # still the thief's Space, long after: not his choice
-            {'t': 40.5, 'space': 4, 'input': 40.4},        # his input, but no app switch of his since the theft
-            {'t': 41.0, 'activate': 300, 'input': 40.95},  # he switches apps himself
-            {'t': 41.2, 'space': 4, 'input': 41.1},
-            {'t': 50.0, 'space': 1},                       # no input, no theft: not his, nothing to restore
+            {'t': 41.0, 'space': 4},                       # he leaves it himself
         ])
         spaces = [(r['space'], r.get('from'), r.get('to'), r.get('window'), r.get('expected')) for r in rows if 'space' in r]
         self.assertEqual(spaces, [('restore', 6, 2, 42, None), ('unchanged', None, None, None, None),
+                                  ('restore', 3, 2, 42, None), ('unchanged', None, None, None, None),
                                   ('user', None, None, None, 3), ('unrestorable', 6, 3, None, None),
-                                  ('unrestorable', 6, 3, None, None), ('unrestorable', 4, 3, None, None),
-                                  ('user', None, None, None, 4), ('unexplained', 4, 1, None, None)])
+                                  ('unrestorable', 6, 3, None, None), ('user', None, None, None, 4)])
 
     COUNTER_BALL = {'front': 100, 'frontWindow': 42, 'frontWindowSpace': 2, 'guardSeconds': 1800, 'roots': [500], 'timSpace': 2,
-                    'input': -600.0, 'procs': [{'pid': p, 'exe': '/apps/%d' % p} for p in (100, 500, 600)]}
+                    'procs': [{'pid': p, 'exe': '/apps/%d' % p} for p in (100, 500, 600)]}
 
     def test_after_a_theft_an_app_macos_activates_and_the_space_it_shows_are_never_tims(self):
         # The counter-ball run (receipt 20261006T040054Z, Tim idle): Superwhisper (100) frontmost, its window 42 on
@@ -717,25 +732,93 @@ class Guard(unittest.TestCase):
             {'t': 6.1, 'space': 3},
             {'t': 30.0, 'space': 3},
         ])
-        self.assertEqual([(r.get('decision'), r.get('to'), r.get('window'), r.get('target')) for r in rows if 'activate' in r or 'pid' in r], [
+        self.assertEqual([(r.get('decision'), r.get('to'), r.get('window'), r.get('target')) for r in rows if 'pid' in r], [
             ('restore', 100, 42, 42), ('system', None, None, 42), ('restored', None, None, 42), ('system', None, None, 42),
             ('restore', 100, 42, 42)])
         self.assertEqual([(r['space'], r.get('from'), r.get('to'), r.get('window')) for r in rows if 'space' in r], [
             ('restore', 3, 2, 42), ('restore', 3, 2, 42), ('restore', 3, 2, 42)])
 
-    def test_tims_input_counts_only_after_the_last_theft_and_within_a_second(self):
+    def test_hid_input_never_makes_a_change_tims_and_outside_theft_windows_none_is_needed(self):
+        # "input" is when the HID table last saw input: any process can feed that table, so it decides nothing.
         rows = self.decide(self.COUNTER_BALL, [
-            {'t': 2.0, 'activate': 600, 'input': 0.5},                   # input 1.5 s before: not his
-            {'t': 3.0, 'activate': 600, 'input': 2.2, 'focused': {'id': 59, 'pid': 600, 'space': 3}},  # his click
-            {'t': 3.3, 'space': 3, 'input': 3.25},
-            {'t': 10.0, 'activate': 500, 'input': 9.95},                 # a theft right after his input
-            {'t': 10.2, 'activate': 100, 'input': 9.95},                 # that input came before the theft: not his
-            {'t': 10.3, 'space': 2, 'input': 9.95},
+            {'t': 1.0, 'activate': 500},
+            {'t': 1.2, 'activate': 600, 'input': 1.19, 'focused': {'id': 59, 'pid': 600, 'space': 3}},  # a "click" 10 ms before
+            {'t': 1.25, 'space': 3, 'input': 1.24},
+            {'t': 1.4, 'activate': 100, 'input': 1.39},
+            {'t': 3.0, 'activate': 600, 'input': 2.99},     # within 2 s of the return
+            {'t': 3.1, 'space': 3, 'input': 3.05},
+            {'t': 3.2, 'space': 2},
+            {'t': 6.0, 'activate': 600, 'focused': {'id': 59, 'pid': 600, 'space': 3}},  # outside every window, no input
+            {'t': 6.1, 'space': 3},
         ])
         self.assertEqual([(r.get('decision') or r.get('space'), r.get('target'), r.get('expected')) for r in rows], [
-            ('system', 42, None), ('user', 59, None), ('user', None, 3), ('restore', 59, None), ('system', 59, None),
-            ('restore', None, None)])
-        self.assertEqual((rows[5]['from'], rows[5]['to'], rows[5]['window']), (2, 3, 59))
+            ('restore', 42, None), ('system', 42, None), ('restore', None, None), ('restored', 42, None), ('system', 42, None),
+            ('restore', None, None), ('unchanged', None, None), ('user', 59, None), ('user', None, 3)])
+
+    def test_a_space_answer_is_judged_on_the_theft_windows_as_they_stand_when_it_comes(self):
+        # The change was reported at 10.0, outside any theft window; Studio stole focus at 10.1 while yabai took its
+        # time to answer, so the answer, Space 3, is the tree's.
+        rows = self.decide(self.COUNTER_BALL, [{'t': 10.3, 'since': 10.0, 'space': 3, 'duringQuery': [{'t': 10.1, 'activate': 500}]}])
+        self.assertEqual((rows[0]['space'], rows[0]['from'], rows[0]['to'], rows[0]['window']), ('restore', 3, 2, 42))
+        self.assertEqual(rows[0]['duringQuery'][0]['decision'], 'restore')
+        # A theft window that was still open at any moment since the change counts, though it ended before the answer.
+        rows = self.decide(self.COUNTER_BALL, [{'t': 5.0, 'activate': 500}, {'t': 5.5, 'activate': 100},  # it ends at 7.5
+                                               {'t': 8.3, 'since': 7.4, 'space': 3, 'input': 8.25}])
+        self.assertEqual((rows[2]['space'], rows[2]['from'], rows[2]['to']), ('restore', 3, 2))
+
+    def test_a_switch_taken_for_tims_is_revoked_when_a_theft_comes_within_two_seconds_of_it(self):
+        rows = self.decide(self.COUNTER_BALL, [
+            {'t': 20.0, 'space': 3, 'input': 19.95},  # macOS reported the change before the theft that caused it
+            {'t': 20.5, 'activate': 500},
+            {'t': 20.55, 'activate': 100},
+            {'t': 20.6, 'space': 3},
+            {'t': 40.0, 'space': 4},                  # long after: his
+        ])
+        self.assertEqual((rows[0]['space'], rows[0]['expected']), ('user', 3))
+        self.assertEqual((rows[3]['revoked'], rows[3]['space'], rows[3]['from'], rows[3]['to'], rows[3]['window']), (3, 'restore', 3, 2, 42))
+        self.assertEqual((rows[4]['space'], rows[4]['expected'], 'revoked' in rows[4]), ('user', 4, False))
+
+    # Reverts -----------------------------------------------------------------------------------------
+
+    REVERT = {'front': 100, 'frontWindow': 42, 'frontWindowSpace': 2, 'guardSeconds': 60, 'roots': [500], 'timSpace': 2,
+              'procs': [{'pid': p, 'exe': '/apps/%d' % p} for p in (100, 300, 500)]}
+
+    def test_a_revert_focuses_tims_window_only_once_its_owner_is_vouched_for(self):
+        # Verified at launch, and no Space change or app switch since: focused with no query.
+        rows = self.decide(self.REVERT, [{'t': 1.0, 'activate': 500, 'revert': {}}])
+        self.assertEqual(rows[0]['revert'], {'method': 'window', 'ok': True, 'window': 42, 'windowError': None, 'reason': None,
+                                             'queried': False, 'activated': None})
+        # After a Space change, or an app switch of Tim's (here back to his own app), the verification no longer
+        # counts: yabai's answer now decides.
+        cases = [
+            ({'verify': {'pid': 100, 'space': 2}}, 'window', None, 42),
+            ({'verify': {'pid': 300, 'space': 2}}, 'activate', "window 42 belongs to pid 300, not to the restore target's app", None),
+            ({'verify': {'pid': 500, 'space': 2}}, 'activate', "window 42 belongs to pid 500, in the tree, not to the restore target's app", None),
+            ({}, 'activate', 'yabai did not say in time who owns window 42', 42),
+            ({'verify': 'gone'}, 'activate', 'yabai knows no window 42', 42),
+        ]
+        for before in ({'t': 0.5, 'space': 2}, {'t': 0.5, 'activate': 100}):
+            for spec, method, error, target in cases:
+                with self.subTest(before=before, spec=spec):
+                    rows = self.decide(self.REVERT, [before, {'t': 9.0, 'activate': 500, 'revert': spec}])
+                    revert = rows[1]['revert']
+                    self.assertEqual((revert['queried'], revert['method'], revert['ok'], revert['windowError'], rows[1]['target']),
+                                     (True, method, True, error, target))
+                    self.assertEqual(revert['activated'], None if method == 'window' else rows[1]['to'])
+
+    def test_the_fallback_activation_checks_tims_app_again_after_the_focus(self):
+        cases = [
+            ({}, 'activate', None, 100),  # nothing changed while the focus ran
+            ({'procs': [{'pid': 100, 'start': 900, 'exe': '/apps/other'}]}, 'none', 'pid 100 joined the tree or is another process now', None),
+            ({'procs': [{'pid': 100, 'ppid': 500, 'exe': '/apps/100'}]}, 'none', 'pid 100 joined the tree or is another process now', None),
+            ({'t': 1.3, 'activate': 100}, 'none', 'focus is already back with pid 100', None),
+        ]
+        for during, method, reason, activated in cases:
+            with self.subTest(during=during):
+                rows = self.decide(self.REVERT, [{'t': 1.0, 'activate': 500, 'revert': {'focus': 'fail', 'duringFocus': during}}])
+                revert = rows[0]['revert']
+                self.assertEqual((revert['method'], revert['window'], revert['windowError'], revert['reason'], revert['activated']),
+                                 (method, 42, 'exit 1', reason, activated))
 
     # Tree decisions ----------------------------------------------------------------------------------
 
@@ -755,7 +838,7 @@ class Guard(unittest.TestCase):
 
     def test_an_exe_match_without_the_needle_or_the_needle_under_another_exe_is_not_adopted(self):
         rows = self.decide(self.attach_header(), [
-            {'t': 1.0, 'activate': 701, 'input': 1.0, 'procs': [{'pid': 701, 'exe': '/rt/bin/java', 'argv': ['java', '-Dsky.run=r2']}]},
+            {'t': 1.0, 'activate': 701, 'procs': [{'pid': 701, 'exe': '/rt/bin/java', 'argv': ['java', '-Dsky.run=r2']}]},
             {'t': 1.1, 'launch': 702, 'procs': [{'pid': 702, 'exe': '/usr/bin/python3', 'argv': ['python3', '-Dsky.run=r1']}]},
             {'t': 1.2, 'launch': 703, 'procs': [{'pid': 703, 'exe': '/rt/bin/java', 'argv': ['java'], 'env': ['X=-Dsky.run=r1']}]},
         ])
@@ -765,7 +848,7 @@ class Guard(unittest.TestCase):
     def test_an_app_with_the_same_name_but_another_exe_is_never_adopted(self):
         same_name = {'pid': 704, 'exe': '/Users/x/other-runtime/bin/java', 'argv': ['java', '-Dsky.run=r1'],
                      'name': 'java', 'bundle': 'net.minecraft.java'}
-        rows = self.decide(self.attach_header(), [{'t': 1.0, 'activate': 704, 'input': 1.0, 'procs': [same_name]},
+        rows = self.decide(self.attach_header(), [{'t': 1.0, 'activate': 704, 'procs': [same_name]},
                                                   {'t': 1.1, 'launch': 704}, {'t': 1.2, 'move': 704}])
         self.assertEqual([r['tree'] for r in rows], [False] * 3)
         self.assertEqual(rows[0]['decision'], 'user')
@@ -806,9 +889,9 @@ class Guard(unittest.TestCase):
         studio = '/Applications/RobloxStudio.app/Contents/MacOS/RobloxStudio'
         rows = self.decide(self.token_header(), [
             {'t': 2.0, 'launch': 810, 'procs': [{'pid': 810, 'exe': studio, 'env': ['GUI_LAUNCH_TOKEN=another-launch']}]},
-            {'t': 2.5, 'activate': 810, 'input': 2.5},
-            {'t': 3.0, 'activate': 811, 'input': 3.0, 'procs': [{'pid': 811, 'exe': studio, 'env': [], 'argv': [self.TOKEN]}]},
-            {'t': 4.0, 'activate': 850, 'input': 4.0},  # it carries the token but ran before the launch
+            {'t': 2.5, 'activate': 810},
+            {'t': 3.0, 'activate': 811, 'procs': [{'pid': 811, 'exe': studio, 'env': [], 'argv': [self.TOKEN]}]},
+            {'t': 4.0, 'activate': 850},  # it carries the token but ran before the launch
         ])
         self.assertEqual([(r['tree'], r.get('decision')) for r in rows], [(False, None), (False, 'user'), (False, 'user'), (False, 'user')])
 
@@ -826,7 +909,7 @@ class Guard(unittest.TestCase):
         rows = self.decide(header, [
             {'t': 1.0, 'move': 510, 'procs': [{'pid': 510, 'ppid': 500, 'start': 1100, 'exe': '/apps/helper'}]},
             {'t': 2.0, 'procs': [{'pid': 500, 'start': 2000, 'exe': '/bin/zsh'}]},  # 500 exits; the pid is reused
-            {'t': 2.1, 'activate': 500, 'input': 2.1},
+            {'t': 2.1, 'activate': 500},
             {'t': 3.0, 'procs': [{'pid': 510, 'ppid': 1, 'start': 3000, 'exe': '/bin/ls'}]},
             {'t': 3.1, 'move': 510},
             {'t': 3.2, 'move': 510},
@@ -842,11 +925,11 @@ class Guard(unittest.TestCase):
             # 300 ran before the launch and exited; its pid now names the launch, started at another time.
             {'t': 5.0, 'launch': 300, 'procs': [{'pid': 300, 'start': 5000, 'exe': studio, 'env': [self.TOKEN]}]},
             {'t': 5.1, 'activate': 300},
-            {'t': 5.2, 'activate': 850, 'input': 5.2},  # the snapshot's own process (same start) still is not
+            {'t': 5.2, 'activate': 850},  # the snapshot's own process (same start) still is not
         ])
         self.assertEqual((rows[0]['tree'], rows[0]['attached']), (True, {'pid': 300, 'rule': 'launch-token'}))
         self.assertEqual((rows[1]['decision'], rows[1]['to']), ('restore', 100))
-        self.assertEqual((rows[2]['tree'], rows[2]['decision']), (False, 'user'))
+        self.assertEqual((rows[2]['tree'], rows[2]['decision']), (False, 'system'))  # outside the tree, in the theft's window
 
     # The restore target --------------------------------------------------------------------------------
 
@@ -862,7 +945,7 @@ class Guard(unittest.TestCase):
         studio = {'pid': 820, 'exe': '/x/Studio'}
         rows = self.decide(dict(self.token_header(), frontWindow=None, timSpace=2), [
             # Its environment is not readable yet: an app outside the tree, which Tim switches to.
-            {'t': 2.0, 'activate': 820, 'input': 1.95, 'focused': {'id': 88, 'pid': 820, 'space': 2}, 'procs': [dict(studio, unreadable=True)]},
+            {'t': 2.0, 'activate': 820, 'focused': {'id': 88, 'pid': 820, 'space': 2}, 'procs': [dict(studio, unreadable=True)]},
             {'t': 3.0, 'launch': 820, 'procs': [dict(studio, env=[self.TOKEN])]},  # the scan reads its token
             {'t': 4.0, 'activate': 820},
             {'t': 4.2, 'space': 6},
@@ -1038,6 +1121,60 @@ class Guard(unittest.TestCase):
         self.assertEqual(lines.until(lambda row: row.get('call') == 'off-main', 10)[-1],
                          {'call': 'off-main', 'reply': 'exit', 'code': 0, 'out': '{"ok": 1}\n'})
 
+    def test_a_helper_s_group_ends_with_it_even_when_what_it_left_behind_let_go_of_its_output(self):
+        process, lines, pids = self.helpers()
+        self.send(process, 'call orphan 2 orphan')  # it answers and exits; its child closed its output and lives on
+        seen = lines.until(lambda row: row.get('call') == 'orphan', 10)
+        self.assertEqual(seen[-1], {'call': 'orphan', 'reply': 'exit', 'code': 0, 'out': '{"orphan": 1}\n'})
+        self.assert_gone(self.recorded(pids, 1))
+        self.send(process, 'end')
+        self.assertEqual(lines.until(lambda row: 'end' in row, 10)[-1]['end']['problems'], [])
+
+    def test_a_helper_that_writes_without_end_is_held_to_its_deadline(self):
+        process, lines, pids = self.helpers()
+        began = time.monotonic()
+        self.send(process, 'call flood 1 flood')
+        seen = lines.until(lambda row: row.get('call') == 'flood', 10)
+        took = time.monotonic() - began
+        self.assertEqual(seen[-1], {'call': 'flood', 'reply': 'timeout'})
+        self.assertTrue(took < 2.5, took)
+        self.assert_gone(self.recorded(pids, 1))
+
+    def test_the_drain_stops_at_its_deadline_or_its_cap_however_fast_the_output_comes(self):
+        # A source that is never dry, on a clock that ticks 1 ms per look.
+        process, lines, _ = self.helpers()
+        self.send(process, 'drain 0.05 16777216', 'drain 1000 100000')
+        rows = lines.until(lambda row: row.get('drain') == 'full', 10)
+        self.assertEqual([r for r in rows if 'drain' in r], [{'drain': 'deadline', 'bytes': 50000, 'reads': 50},
+                                                            {'drain': 'full', 'bytes': 100000, 'reads': 100}])
+
+    def test_reverts_queued_before_the_end_are_settled_and_none_starts_after_it_began(self):
+        # Reverts wait behind each other on one queue; the end waits for those queued before it, and refuses, as a
+        # problem, one that comes after it began.
+        process, lines, _ = self.helpers()
+        self.send(process, 'queued a 2 slow', 'queued b 2 slow', 'end', 'queued c 2 quick')
+        seen = lines.until(lambda row: 'end' in row, 15)
+        replies = {row['call']: row for row in seen if 'call' in row}
+        self.assertEqual(replies, {'a': {'call': 'a', 'reply': 'exit', 'code': 0, 'out': '{"slow": 1}\n'},
+                                   'b': {'call': 'b', 'reply': 'exit', 'code': 0, 'out': '{"slow": 1}\n'},
+                                   'c': {'call': 'c', 'reply': 'not started'}})
+        end = seen[-1]['end']
+        self.assertEqual((end['unsettled'], end['killed']), ([], []))
+        self.assertEqual(end['problems'], ["call c came after the guard's end began: not run"])
+
+    def test_the_end_s_own_stage_gets_its_own_three_seconds(self):
+        process, lines, _ = self.helpers()
+        began = time.monotonic()
+        self.send(process, *['final 2 slow12'] * 4 + ['end'])  # 1.2 s each, and nothing else in flight
+        seen = lines.until(lambda row: 'end' in row, 15)
+        took = time.monotonic() - began
+        finals = [row for row in seen if 'final' in row]
+        self.assertEqual([r['final'] for r in finals], [1, 2, 3, 4])
+        self.assertEqual(finals[:2], [{'final': n, 'reply': 'exit', 'code': 0, 'out': '{"slow12": 1}\n'} for n in (1, 2)])
+        self.assertIn(finals[2]['reply'], ('timeout', 'refused'))
+        self.assertEqual(finals[3], {'final': 4, 'reply': 'refused', 'why': 'the guard is ending: yabai -m slow12 not run'})
+        self.assertTrue(took < 3.9, took)  # not the 4.8 s the four calls would take
+
     # Failing closed ----------------------------------------------------------------------------------
 
     def test_the_attach_flags_come_as_a_pair_for_the_guard_too(self):
@@ -1062,18 +1199,24 @@ class Guard(unittest.TestCase):
                               capture_output=True, text=True, timeout=20)
         return done, time.monotonic() - began, marker, pids
 
-    def test_a_yabai_that_does_not_answer_before_the_launch_launches_nothing(self):
-        for name, body, count in (('stuck', STUCK_YABAI, 2), ('leaky', LEAKY_YABAI, 1)):
+    def test_a_yabai_that_fails_or_does_not_answer_before_the_launch_launches_nothing(self):
+        cases = [
+            ('stuck', STUCK_YABAI, 2, 'yabai -m query --windows did not answer within 2.0 s'),
+            ('leaky', LEAKY_YABAI, 1, 'yabai -m query --windows did not answer within 2.0 s'),
+            ('failing', FAILING_WINDOWS_YABAI, 0, 'yabai -m query --windows exited 1'),
+            ('unreadable', UNREADABLE_WINDOWS_YABAI, 0, "yabai's window list is unreadable"),
+        ]
+        for name, body, count, why in cases:
             with self.subTest(yabai=name):
                 done, took, marker, pids = self.launch_with(body)
                 self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
                 seen = events(done.stdout)
-                self.assertEqual([e['event'] for e in seen], ['guard', 'yabai-timeout', 'error'])
-                self.assertEqual(seen[-1]['message'],
-                                 'no baseline, so nothing was launched: yabai -m query --windows --window did not answer within 2.0 s')
+                self.assertEqual([e['event'] for e in seen], ['guard'] + ['yabai-timeout'] * bool(count) + ['error'])
+                self.assertEqual(seen[-1]['message'], 'no baseline, so nothing was launched: ' + why)
                 self.assertTrue(took < 6, took)
                 self.assertFalse(marker.exists())
-                self.assert_gone(self.recorded(pids, count))
+                if count:
+                    self.assert_gone(self.recorded(pids, count))
 
     def test_outside_a_gui_session_the_guard_refuses_and_launches_nothing(self):
         if subprocess.run(['/bin/launchctl', 'managername'], capture_output=True, text=True).stdout.strip() == 'Aqua':

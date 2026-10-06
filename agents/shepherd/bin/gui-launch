@@ -22,39 +22,43 @@ and/or guards one that something else starts, then checks that nothing took it.
     Processes it matches that already run are adopted before anything else, so the app Tim is in at launch is
     never one of them. Without `--` and a launch, gui-launch only guards: until --guard-seconds pass or
     SIGTERM/SIGINT.
-- Before it launches anything the guard takes its baseline: Tim's front app, his focused window and its Space,
-  and the Space his display shows. A yabai query there that fails or misses its 2 s deadline launches
-  nothing: exit 2.
+- Before it launches anything the guard takes its baseline: Tim's front app, his focused window and its Space
+  (from yabai's window list), and the Space his display shows. A yabai query there that fails, misses its 2 s
+  deadline or answers unreadably launches nothing: exit 2.
 - Guard, until --guard-seconds pass, the launched tree exits (without attach), or SIGTERM/SIGINT:
   gui-launch-guard (src/gui-launch-guard.swift) adopts processes as they activate or launch and in a scan
-  of all processes every 150 ms. An activation or a Space change is Tim's own only with his HID input
-  (keyboard, mouse) after the last theft and within 1 s before it: an app macOS activates on its own never
-  becomes his, and his expected Space never moves without him. When a tree process becomes frontmost, the
-  guard gives focus back by focusing Tim's restore-target window by its cached id through yabai (the one he
-  had focused at launch or after his last own app switch; never a window of the tree, and its app is checked
-  again before every focus), or by re-activating his app if there is none or the focus fails (1 s). If his
-  display shows another Space while the theft is open or within 2 s after, focusing that window brings his
-  Space back. That is all it does to his windows. It moves every tree window to the target Space by id as
-  Accessibility reports it created or focused (and again whenever the tree activates or the active Space
-  changes). macOS still lets an app activate itself and opens its new windows on the Space Tim is viewing:
-  the guard undoes both within milliseconds, it cannot prevent them. The guard exits when gui-launch does,
-  even by SIGKILL. It bounds every yabai call over its exit and its output (2 s; a timeout fails the check)
-  and runs none on its main thread. At its end, work in flight gets 3 s to finish (what does not fails the
-  check), then any yabai helper still running is killed, with what it started.
+  of all processes every 150 ms. A theft window runs from a tree activation until focus is back with Tim's app,
+  and 2 s after: inside it no activation and no Space change is ever taken for his, so an app macOS activates
+  then never becomes the one focus goes back to and his expected Space stays the one before the theft. Outside
+  it, every app switch and Space change is his. His HID input is only logged (sinceInputMs). When a tree
+  process becomes frontmost, the guard gives focus back by focusing Tim's restore-target window by id through
+  yabai (the one he had focused at launch or after his last own app switch, never a window of the tree), or by
+  re-activating his app if there is none or the focus fails (1 s). Before the focus his app is checked again,
+  and so is the window's owner (from its last verification if no Space change or app switch came since, else
+  by a 1 s query): a window it cannot vouch for is not focused. His app is checked again before the
+  re-activation. If his display shows another Space at any moment of a theft window, focusing that window
+  brings his Space back. That is all it does to his windows. It moves every tree window to the target Space by
+  id as Accessibility reports it created or focused (and again whenever the tree activates or the active Space
+  changes). macOS still lets an app activate itself and opens its new windows on the Space Tim is viewing: the
+  guard undoes both within milliseconds, it cannot prevent them. The guard exits when gui-launch does, even by
+  SIGKILL. It bounds every yabai call over its exit and its output (2 s; a timeout fails the check), runs none
+  on its main thread, and ends each with its process group. At its end, work in flight (reverts included)
+  gets 3 s to finish and its own final checks 3 s more (what does not finish fails the check, and so does a
+  theft it can no longer revert), then any yabai helper still running is killed, with what it started.
 - Check: no tree window on Spaces 1-4; Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
-  himself); no Space change of his display caused by the tree (a breach even when the guard brought his
-  Space back: the check shows both) or without his input; the active display unchanged, by both yabai's
-  focused display and AppKit's main screen; no fault, no yabai timeout, no unsettled or killed work. The
-  guard gives focus back without moving the active display, so a theft from another display can leave it
-  there (yabai still reported it after Superwhisper got focus back): that fails the check, and a click on his
-  display clears it. A reverted activation alone does not fail it: the check lists the revert latencies by
-  method (window focus, re-activation).
+  himself); no Space change of his display in a theft window (a breach even when the guard brought his Space
+  back: the check shows both), and no switch of his that a theft came within 2 s of; the active display
+  unchanged, by both yabai's focused display and AppKit's main screen; no fault, no yabai timeout, no unsettled
+  or killed work. The guard gives focus back without moving the active display, so a theft from another
+  display can leave it there (yabai still reported it after Superwhisper got focus back): that fails the check,
+  and a click on his display clears it. A reverted activation alone does not fail it: the check lists the
+  revert latencies by method (window focus, re-activation).
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
-launched or guarding, attached, dropped, activation, restore-call, reverted, restore-target, user-space,
-space-restored, space-unrestorable, space-unexplained, window, yabai-timeout, problem, fault, guard-end), then
-`check`; `error` before exit 2. The launched program's own output goes to stderr. gui-launch never quits
-what it launched: the caller tears it down.
+launched or guarding, attached, dropped, activation, restore-call, reverted, restore-target,
+restore-target-dropped, user-space, user-space-revoked, space-restored, space-unrestorable, window,
+yabai-timeout, problem, fault, guard-end), then `check`; `error` before exit 2. The launched program's own output
+goes to stderr. gui-launch never quits what it launched: the caller tears it down.
 Agent shells live in launchd's Background session, where macOS reports no frontmost app and no activations,
 so from there the guard runs in Tim's GUI (Aqua) session through the fixed root step
   /usr/bin/sudo -n -E -- /bin/launchctl asuser <uid> /usr/bin/sudo -n -E -u <user> -- <guard> <guard args>
@@ -250,8 +254,9 @@ def name(app):
 
 
 def space_breaches(summary):
-    """Each change of Tim's display that the guard recorded as not his: one the tree caused (a breach even when
-    the guard brought his Space back) or one without his input."""
+    """Each change of Tim's display that the guard recorded as not his: one in a theft window (a breach even when
+    the guard brought his Space back), or a switch it took for his until a theft came within 2 s of it. Any other
+    record is reported as it is: it fails the check too."""
     found = []
     for e in summary.get('spaceRestores') or []:
         kind, shown, expected = e.get('event'), e.get('from'), e.get('expected', e.get('to'))
@@ -263,8 +268,10 @@ def space_breaches(summary):
                          % (shown, expected, e.get('to')))
         elif kind == 'space-unrestorable':
             found.append('the tree moved Tim\'s display to Space %s and no window of his could bring Space %s back' % (shown, expected))
+        elif kind == 'user-space-revoked':
+            found.append('a theft came within 2 s of Tim\'s display moving to Space %s: Space %s is expected again' % (e.get('space'), expected))
         else:
-            found.append('Tim\'s display moved from Space %s to Space %s without his input' % (e.get('from'), e.get('to')))
+            found.append('the guard recorded an unknown change of Tim\'s display: %s' % json.dumps(e, sort_keys=True))
     return found
 
 
