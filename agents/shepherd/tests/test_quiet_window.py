@@ -135,6 +135,16 @@ class QuietWindow(unittest.TestCase):
 
     # -- holds: windows for runs whose driver refuses any registry row
 
+    def test_tick_creates_both_registries_as_empty_lists_and_leaves_a_malformed_one_as_found(self):
+        # astra's quiet check refuses a missing or malformed registry rather than read it as "no rows".
+        self.assertFalse(self.book_path.exists() or self.holds_path.exists())
+        self.qw('tick')
+        self.assertEqual(json.loads(self.book_path.read_text()), [])
+        self.assertEqual(json.loads(self.holds_path.read_text()), [])
+        self.holds_path.write_text('[{"id": ')
+        self.qw('tick')
+        self.assertEqual(self.holds_path.read_text(), '[{"id": ')
+
     def test_a_hold_is_kept_out_of_the_registry_listed_beside_bookings_and_enforced_like_one(self):
         self.book_window(30, 60, owner='swarm', label='chunk 4')
         r = self.qw('hold', stamp(5), stamp(35), 'bench-judge', 'r5 native')

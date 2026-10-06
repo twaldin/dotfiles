@@ -225,6 +225,12 @@ def mediaanalysisd(state, windows, now):
 
 
 def tick():
+    # Both registries always exist as JSON lists (written atomically, never deleted), so a reader such as
+    # astra's quiet check can refuse a missing or malformed file instead of reading it as "no rows". A
+    # malformed file is left as found: rewriting it would hide the corruption.
+    for path in (BOOK, HOLDS):
+        if not os.path.exists(path):
+            save(path, [])
     book, holds, state = load(BOOK, []), load(HOLDS, []), load(STATE, {})
     now = dt.datetime.now(dt.timezone.utc)
     ags = tls = None
