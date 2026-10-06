@@ -1824,13 +1824,13 @@ class Guard(unittest.TestCase):
                 self.assertEqual(self.not_arriving(result['problems']), [message])
 
     def test_a_space_notification_within_half_a_second_of_a_change_a_read_found_is_no_problem(self):
-        # GR1: the poll reads the change to Space 6 at once and macOS's notification comes 0.3 s later; the change back
-        # comes with its notification.
+        # GR1: the poll reads the change to Space 6 at once and macOS's notification comes 0.2 s later (a sleep here can
+        # run 0.1 s long or more); the change back comes with its notification.
         process, lines, root = self.rig()
         self.send(process, 'theft')
         time.sleep(0.15)
         show(root, 106)
-        time.sleep(0.3)
+        time.sleep(0.2)
         self.send(process, 'notify')
         time.sleep(0.15)
         self.send(process, 'back')
@@ -1842,17 +1842,19 @@ class Guard(unittest.TestCase):
         self.assertEqual(result['problems'], [])
 
     def test_the_end_waits_for_a_notification_on_its_way_and_a_change_still_waiting_at_the_seal_fails_closed(self):
-        # GR1 at the guard's end: the poll read the change to Space 6 just before the end, whose notification comes
-        # 0.15 s into the end, while the end waits for it (up to 0.5 s, the poll still running): no problem.
+        # GR1 at the guard's end: the poll reads the change to Space 6, the guard's end begins at once, and the
+        # notification comes 0.15 s into the end, while the end waits for it (up to 0.5 s, the poll still running): no
+        # problem. (The test waits for the poll's read itself, not a sleep: a sleep here can run 0.1 s long or more.)
         process, lines, root = self.rig()
         self.send(process, 'theft')
         time.sleep(0.15)
         show(root, 106)
-        time.sleep(0.1)
+        read = lines.until(lambda row: row.get('event') == 'display-space' and row.get('spaceId') == 106, 5)
+        self.assertEqual(read[-1]['via'], 'poll')
         self.send(process, 'end')
         time.sleep(0.15)
         self.send(process, 'notify')
-        seen = lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        seen = read + lines.until(lambda row: row.get('event') == 'guard-end', 20)
         self.assertEqual(process.wait(10), 0)
         result = json.loads((root / 'summary.json').read_text())
         self.assertEqual(len([e for e in seen if e.get('event') == 'display-space' and e.get('via') == 'notification']), 1, seen)
