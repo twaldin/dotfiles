@@ -1674,11 +1674,11 @@ class Guard(unittest.TestCase):
         self.send(process, 'notify')
         time.sleep(0.3)
         seen, result = self.end_rig(process, lines, root)
-        notices = [e for e in seen if e.get('event') == 'display-space' and e.get('via') == 'notification']
-        self.assertEqual([e['explainedBy'] for e in notices], [None, 'D1', None, 'D2', 'D1'])
         recorded = [r for r in result['spaceRestores'] if r['event'] in ('space-unseen', 'space-breach')]
         self.assertEqual([(r['event'], r.get('spaceId')) for r in recorded], [('space-unseen', None), ('space-breach', 106), ('space-unseen', None)])
         self.assertTrue(all(r['expected'] == 1 and r['sinceTheftMs'] > 0 for r in recorded), recorded)
+        notices = [e for e in seen if e.get('event') == 'display-space' and e.get('via') == 'notification']
+        self.assertEqual([e.get('explainedBy') for e in notices], [None, 'D1', None, 'D2', 'D1'])
         self.assertEqual(result['problems'], [])
 
     def test_the_space_watch_takes_its_last_read_and_closes_before_the_summary(self):
