@@ -928,6 +928,7 @@ func exceptionEnds(_ thrown: Any?, inAppKit: Bool) -> Never {
 
 /// GR1-F2: a thread of its own (no queue, no lock, no output) that exits 2 once 0.5 s have passed, so the guard's
 /// end on an exception never waits on anything for longer. (alarm would end it by SIGALRM, not exit 2.)
+/// GR1-F3: a watchdog that cannot start exits 2 at once, with no diagnostics: they would have no deadline.
 func armExitWatchdog() {
     var thread: pthread_t?
     guard pthread_create(&thread, nil, { _ in
@@ -935,8 +936,8 @@ func armExitWatchdog() {
         var left = timespec()
         while nanosleep(&want, &left) == -1 && errno == EINTR { want = left }
         _exit(2)
-    }, nil) == 0, let thread else { return }
-    pthread_detach(thread)
+    }, nil) == 0 else { _exit(2) }
+    if let thread { pthread_detach(thread) }
 }
 
 /// GR1-F2: one write to `fd` of at most PIPE_BUF bytes, made only if poll shows that `fd` can take it now: a pipe
