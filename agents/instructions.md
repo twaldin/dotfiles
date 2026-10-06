@@ -24,3 +24,4 @@ Many agents share each machine's CPU, RAM and GPU.
 - Cap each tool's own parallelism (`-j`, `--threads`, `--maxWorkers`, `MAGICK_THREAD_LIMIT`) as well as the number of runs. Test runners are the memory trap: a Lindy vitest worker holds about 2 GB.
 - Gate heavy jobs with `machine-ok --wait` (`--memory` for tests and typechecks; `machine-ok --help` explains the checks), not the load average, and test its exit code directly rather than through a pipe.
 - Before you launch, move, capture or show a GUI window on a Mac, read the `mac-gui` skill. Never put test windows on Tim's Spaces, and never move a window without its id.
+- Use twaldin-home's screen whenever a run needs it; Tim is usually at work over ssh. Keep anything you show off his Spaces and brief, and when his activity disturbs a run, note it and rerun. No gate waits for Tim to be idle.
