@@ -4,6 +4,7 @@
 - Ask decisions through the question tool, one question at a time, and keep the conversation open while you wait.
 - Use the machine's existing CLI auth and the project's account. Never print tokens or dump the environment. Keep the configured Git identity and add no agent co-author trailers.
 - Personal-project PRs merge once required checks and reviews pass, unless Tim set a hold. For Lindy, the agent that opens a PR against `main` arms auto-merge when it opens it, unless Tim holds it or it waits on another open PR. Prefer one PR per effort, keep branch protections, and verify the landed result.
+- On personal projects, CodeRabbit reviews are supplemental. A CodeRabbit review-limit notice counts as its approval: review the PR locally with the code-review skill instead, then merge once CI and that review pass, with `gh pr merge --admin` where a required approval is all that remains.
 - In omp, the chief of staff and each effort session run on the default role (Opus 5.5). Inside an effort, the subagent type is the model choice:
   - `task` (Sonnet 5.5) by default.
   - `opus` (Opus 5.5) for hard judgment and integration.
