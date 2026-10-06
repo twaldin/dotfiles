@@ -37,28 +37,39 @@ and/or guards one that something else starts, then checks that nothing took it.
   yabai (the one he had focused at launch or after his last own app switch, never a window of the tree), or by
   re-activating his app if there is none or the focus fails (1 s). Before every focus his app is checked again,
   and so is the window's owner, by a 1 s query made for that focus whose answer counts only if no activation,
-  Space change or new restore target came while it ran: a window it cannot vouch for is not focused. The
+  Space change or new restore target came while it ran (it is asked again only while the focus is still wanted): a
+  window it cannot vouch for is not focused, and the focus must still be wanted immediately before it is made. The
   re-activation checks his app again in the same main-queue turn. An owner query that runs out of time is an
   owner-query-timeout event, expected-slow and no problem only when the window was not focused, the re-activation
   ran, and a read after it showed his app frontmost and his display on the expected Space; otherwise a problem.
-  The guard reads his display directly (SkyLight, which yabai reads too) at every Space notification, every 20 ms
-  through each theft window, and around each restore: each Space the tree shows him is a breach the moment it is
-  read, and if his display shows another Space at any moment of a theft window, focusing that window brings his
-  Space back. In a theft window, reads more than 100 ms apart, or a read that fails, are a problem. That is all it
-  does to his windows. It moves every tree window to the target Space by id as Accessibility reports it created
-  or focused (and again whenever the tree activates or the active Space changes); a window yabai will not place, a
-  window list that fails, and a tree window still off the target after its move are recorded as they happen, and
-  the tree's windows the final sweep cannot locate are a problem. macOS still lets an app activate itself and
+  The guard reads every display directly (SkyLight, which yabai reads too) at every Space notification, every 20
+  ms through each theft window, around each restore, and once more as it ends: each Space the tree shows him is a
+  breach the moment it is read, and if his display shows another Space at any moment of a theft window, focusing
+  that window brings his Space back. SkyLight tells only the Space shown now, so a Space shown between two reads
+  (an excursion of under ~20 ms, or longer if reads are late) cannot be named; instead each Space notification must
+  be explained by a change the reads found on some display since the notification before it, and one that is not
+  is a change and back unseen: in a theft window a breach (space-unseen), outside one his own, as his changes are.
+  This rests on an assumption [INFERENCE, not shown]: macOS posts at least one Space notification after each
+  completed Space change (Apple documents only that it is posted "when a Spaces change occurs"); and an unseen
+  excursion whose notification is shared with a change the reads did see passes as explained. In a theft window,
+  reads more than 100 ms apart, or a read that fails, are a problem. That is all it does to his windows. It moves
+  every tree window to the target Space by id as Accessibility reports it created or focused (and again whenever the
+  tree activates or the active Space changes); a window yabai will not place or name the owner of, a window list
+  that fails, and a tree window still off the target after its move are recorded as they happen, and the tree's
+  windows the final sweep cannot locate are a problem. macOS still lets an app activate itself and
   opens its new windows on the Space Tim is viewing: the guard undoes both within milliseconds, it cannot prevent
   them. The guard exits when gui-launch does, even by SIGKILL. It bounds every yabai call over its exit and its
-  output (2 s; a timeout fails the check, but for the owner query above; output past 16 MiB is refused, and fails
-  it), runs none on its main thread, and ends each with its process group. At its end, work in flight (reverts
-  included) gets 3 s to finish and its own final checks 3 s more (what does not finish fails the check, and so does
-  a theft it can no longer revert), then any yabai helper still running is killed, with what it started.
+  output (2 s; a timeout fails the check, but for the owner query above; output that reaches 16 MiB is refused,
+  whether or not the helper exits, and fails it), runs none on its main thread, and ends each with its process
+  group (a member it cannot read counts as alive). At its end, work in flight (reverts included) gets 3 s to finish
+  and its own final checks 3 s more (what does not finish fails the check, and so does a theft it can no longer
+  revert), then any yabai helper still running is killed, with what it started; then its watch of the displays
+  takes its last read and stops, before the summary is written.
 - Check: no tree window on Spaces 1-4; Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
   himself); no Space the tree showed his display in a theft window, each one a breach even when the guard brought
-  his Space back (the check shows both), and no switch of his that a theft came within 2 s of; the active display
+  his Space back (the check shows both), no Space notification in a theft window that no read explains, and no
+  switch of his that a theft came within 2 s of; the active display
   unchanged, by both yabai's focused display and AppKit's main screen; no fault, no yabai timeout but an
   expected-slow owner query, no gap or failed read of his display in a theft window, no tree window the guard could
   not locate at its end, no unsettled or killed work. The guard gives focus back without moving the active display,
@@ -67,7 +78,7 @@ and/or guards one that something else starts, then checks that nothing took it.
   check lists the revert latencies by method (window focus, re-activation, and expected-slow owner queries).
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
-restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-restored,
+restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
 space-unrestorable, window, window-unknown, window-list-failed, window-off-target, yabai-timeout, problem, fault,
 guard-end), then `check`; `error` before exit 2. The launched program's own output
 goes to stderr. gui-launch never quits what it launched: the caller tears it down.
@@ -274,15 +285,21 @@ def space_name(e):
 
 def space_breaches(summary):
     """Each change of Tim's display that the guard recorded as not his: each Space the tree showed him in a theft
-    window (a breach even when the guard brought his Space back), each restore it made or could not make, or a switch
-    it took for his until a theft came within 2 s of it. Any other record is reported as it is: it fails the check
-    too."""
+    window (a breach even when the guard brought his Space back), each Space notification in a theft window that no
+    read of any display explains (a change and back unseen: a breach it cannot name), each restore it made or could
+    not make, or a switch it took for his until a theft came within 2 s of it. Any other record is reported as it
+    is: it fails the check too."""
     found = []
     for e in summary.get('spaceRestores') or []:
         kind, expected = e.get('event'), e.get('expected', e.get('to'))
         if kind == 'space-breach':
             found.append('the tree moved Tim\'s display to %s: a breach (read by %s, %s ms after the theft)'
                          % (space_name(e), e.get('via'), e.get('sinceTheftMs')))
+        elif kind == 'space-unseen':
+            since = e.get('sinceTheftMs')
+            when = ('%s ms %s the theft' % (abs(since), 'before' if since < 0 else 'after')) if isinstance(since, (int, float)) else 'in a theft window'
+            found.append('Tim\'s display changed Space and back unseen: macOS reported a Space change %s that no read of any '
+                         'display explains, so the Space it showed is unknown: a breach' % when)
         elif kind == 'space-restored' and e.get('ok') and e.get('to') == expected:
             found.append('the tree moved Tim\'s display to %s: a breach, although the guard brought Space %s back (%s ms after the theft)'
                          % (space_name(e), expected, e.get('latencyMs')))

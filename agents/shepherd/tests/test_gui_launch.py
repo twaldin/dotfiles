@@ -150,7 +150,7 @@ int main(int argc, char **argv) {
 # Stand-in yabais (sh); %(pids)s is where they record their pids. For --helpers the word after -m picks the
 # behaviour: answer at once, after 0.4 s or after 1.2 s; never answer (it and its child ignore SIGTERM); exit at
 # once leaving a child that holds its output open; answer and exit leaving a child that let go of its output;
-# write without end; or write 10 KiB past the 16 MiB cap and exit.
+# write without end; write 10 KiB past the 16 MiB cap and exit; or write that much and live on, holding its output.
 HELPER_YABAI = '''#!/bin/sh
 case "$2" in
   quick) echo '{"ok": 1}' ;;
@@ -161,6 +161,7 @@ case "$2" in
   orphan) sleep 30 >/dev/null 2>&1 & echo $! >> '%(pids)s'; echo '{"orphan": 1}' ;;
   flood) echo $$ >> '%(pids)s'; exec yes '{"flood": 1}' ;;
   big) head -c 16787456 /dev/zero ;;
+  bigalive) echo $$ >> '%(pids)s'; head -c 16787456 /dev/zero; exec sleep 30 ;;
 esac
 '''
 STUCK_YABAI = "trap '' TERM; echo $$ >> '%(pids)s'; sleep 30 & echo $! >> '%(pids)s'; wait\n"
@@ -255,12 +256,14 @@ def rig_spaces(extra=()):
     return rows + [{'index': 10 + len(extra), 'id': 110, 'display': 2, 'is-visible': True}]
 
 
-def show(root, shown, extra=(), anchor=True):
-    """SkyLight's record of the displays, as the rig reads it: display 1 (ids 101-109, then `extra`) shows the Space
-    with id `shown`. Without `anchor`, no display holds Space 1 (id 101): the read fails."""
+def show(root, shown, extra=(), anchor=True, other=110):
+    """SkyLight's record of the displays, as the rig reads it: display D1 (ids 101-109, then `extra`) shows the Space
+    with id `shown`, display D2 (ids 110 and 111) the one with id `other`. Without `anchor`, no display holds Space 1
+    (id 101): the read fails."""
     spaces = [{'id64': 100 + i} for i in range(1 if anchor else 2, 10)] + [{'id64': sid} for sid in extra]
     put(root / 'displays.json', json.dumps([{'Display Identifier': 'D1', 'Current Space': {'id64': shown}, 'Spaces': spaces},
-                                            {'Display Identifier': 'D2', 'Current Space': {'id64': 110}, 'Spaces': [{'id64': 110}]}]))
+                                            {'Display Identifier': 'D2', 'Current Space': {'id64': other},
+                                             'Spaces': [{'id64': 110}, {'id64': 111}]}]))
 
 
 class Lines:
@@ -657,6 +660,22 @@ class GuiLaunch(unittest.TestCase):
         self.assertEqual(check['timSpace']['breaches'], breaches)
         self.assertEqual(check['spaceHistory'], history)
 
+    def test_a_space_notification_no_read_explains_fails_the_check_as_a_breach_it_cannot_name(self):
+        # GP1: Tim's display went to another Space and back between two reads, so macOS's notification is all that
+        # shows it: in a theft window, or within 2 s before a theft, a breach the guard cannot name.
+        unseen = [{'event': 'space-unseen', 'noticeAt': 3.412, 'expected': 2, 'sinceTheftMs': 312.0, 'theftAt': 3.1},
+                  {'event': 'space-unseen', 'noticeAt': 19.8, 'expected': 2, 'sinceTheftMs': -700.0, 'theftAt': 20.5}]
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app),
+                                     summary=summary(timSpace={'atLaunch': 2, 'expected': 2}, spaceRestores=unseen))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        check = self.check_event(result)
+        self.assertEqual(check['problems'], [
+            "Tim's display changed Space and back unseen: macOS reported a Space change 312.0 ms after the theft that no read "
+            "of any display explains, so the Space it showed is unknown: a breach",
+            "Tim's display changed Space and back unseen: macOS reported a Space change 700.0 ms before the theft that no read "
+            "of any display explains, so the Space it showed is unknown: a breach"])
+        self.assertEqual(check['timSpace']['breaches'], unseen)
+
     def test_owner_query_timeouts_count_in_the_revert_latencies_and_fail_the_check_only_as_the_guard_rules(self):
         # The guard rules on each owner query that ran out of time: expected-slow, or a problem it adds. The check
         # lists them, and their latency with the reverts'.
@@ -903,6 +922,24 @@ class Guard(unittest.TestCase):
         self.assertEqual(sorted({r['from'] for r in rows if r.get('space') in ('restore', 'unrestorable')}), [3, 6])
         self.assertEqual([(r['t'], r['breach']) for r in rows if 'breach' in r], [(2.5, 6), (3.4, 3), (3.7, 6)])
 
+    def test_a_space_notification_no_read_explains_is_judged_as_a_change_is(self):
+        # GP1: a notification that no read explains is a change and back that no read saw (SkyLight tells only the
+        # Space shown now). If any moment since the notification before it lies in a theft window it is the tree's;
+        # otherwise Tim's, until a theft turns out to have come within 2 s of it (GM3, as for his seen changes).
+        rows = self.decide(dict(self.COUNTER_BALL, timSpace=1, frontWindowSpace=1), [
+            {'t': 5.0, 'unseen': 4.0},    # no theft yet: his
+            {'t': 5.5, 'activate': 500},  # the theft, 0.5 s later: the read after it charges the tree
+            {'t': 5.6, 'read': 1},
+            {'t': 5.9, 'unseen': 5.6},    # in the theft window
+            {'t': 5.95, 'activate': 100},  # focus back: the grace window lasts until 7.95
+            {'t': 7.0, 'unseen': 5.9},    # in the grace window
+            {'t': 30.0, 'unseen': 7.0},   # the notification before it was read in the grace window
+            {'t': 40.0, 'unseen': 30.0},  # long after: his
+            {'t': 40.1, 'read': 1},
+        ])
+        self.assertEqual([r['unseen'] for r in rows if 'unseen' in r], ['tim', 'tree', 'tree', 'tree', 'tim'])
+        self.assertEqual([(r['t'], r['unseenCharged']) for r in rows if 'unseenCharged' in r], [(5.6, [5.0])])
+
     # Reverts -----------------------------------------------------------------------------------------
 
     REVERT = {'front': 100, 'frontWindow': 42, 'frontWindowSpace': 2, 'guardSeconds': 60, 'roots': [500], 'timSpace': 2,
@@ -948,6 +985,21 @@ class Guard(unittest.TestCase):
                 revert = self.decide(self.REVERT, [{'t': 1.0, 'activate': 500, 'revert': spec}])[0]['revert']
                 self.assertEqual((revert['queries'], revert['method'], revert['windowError']), (2, method, error))
                 self.assertEqual(revert['duringQuery'][0]['decision'], 'system')
+
+    def test_a_focus_no_longer_wanted_is_never_made_however_the_owner_answers(self):
+        # GP4: Tim's app (100) has focus back while the owner query runs: the answer is stale, and the query is not
+        # made again, nor window 42 focused (it could replace the window he is in now); likewise when focus comes
+        # back once an answer vouched for the window, before the focus.
+        cases = [
+            {'verify': [{'pid': 100, 'space': 2}, {'pid': 100, 'space': 2}], 'duringQuery': [{'t': 1.1, 'activate': 100}]},
+            {'verify': {'pid': 100, 'space': 2}, 'afterVouch': [{'t': 1.1, 'activate': 100}]},
+        ]
+        for spec in cases:
+            with self.subTest(spec=spec):
+                revert = self.decide(self.REVERT, [{'t': 1.0, 'activate': 500, 'revert': spec}])[0]['revert']
+                self.assertEqual((revert['queries'], revert['method'], revert.get('focusTried'), revert['activated'], revert['reason']),
+                                 (1, 'none', False, None, 'focus is already back with pid 100'))
+                self.assertEqual((revert.get('duringQuery') or revert.get('afterVouch'))[0]['decision'], 'restored')
 
     def test_the_fallback_activation_checks_tims_app_again_after_the_focus(self):
         cases = [
@@ -1309,15 +1361,44 @@ class Guard(unittest.TestCase):
         self.send(process, 'end')
         self.assertEqual(lines.until(lambda row: 'end' in row, 10)[-1]['end']['problems'], [])
 
-    def test_a_helper_that_writes_without_end_is_held_to_its_deadline(self):
+    def test_a_helper_that_writes_without_end_is_refused_at_the_cap_within_its_deadline(self):
         process, lines, pids = self.helpers()
         began = time.monotonic()
         self.send(process, 'call flood 1 flood')
         seen = lines.until(lambda row: row.get('call') == 'flood', 10)
         took = time.monotonic() - began
-        self.assertEqual(seen[-1], {'call': 'flood', 'reply': 'timeout'})
+        self.assertEqual(seen[-1], {'call': 'flood', 'reply': 'refused', 'why': 'yabai -m flood wrote more than 16777216 bytes: its answer was refused'})
         self.assertTrue(took < 2.5, took)
         self.assert_gone(self.recorded(pids, 1))
+
+    def test_a_helper_that_reaches_the_cap_and_lives_on_is_refused_as_a_problem_not_timed_out(self):
+        # GP5: it fills the cap and holds its output open. Its answer is refused, at once and as a problem, also for
+        # a caller that owns its timeout (the owner query before a focus): it can never pass for an expected-slow
+        # timeout.
+        process, lines, pids = self.helpers()
+        message = 'yabai -m bigalive wrote more than 16777216 bytes: its answer was refused'
+        for verb in ('call', 'owner'):
+            with self.subTest(verb=verb):
+                began = time.monotonic()
+                self.send(process, '%s %s 5 bigalive' % (verb, verb))
+                seen = lines.until(lambda row: row.get('call') == verb, 15)
+                took = time.monotonic() - began
+                self.assertEqual(seen[-1], {'call': verb, 'reply': 'refused', 'why': message})
+                self.assertEqual([(e['event'], e.get('message')) for e in seen[:-1]], [('problem', message)])
+                self.assertTrue(took < 4, took)  # its deadline is 5 s
+        self.assert_gone(self.recorded(pids, 2))
+        self.send(process, 'end')
+        self.assertEqual(lines.until(lambda row: 'end' in row, 10)[-1]['end']['problems'], [message, message])
+
+    def test_a_helper_group_member_that_cannot_be_read_is_never_taken_for_gone(self):
+        # GN4: a listed member proc_pidinfo cannot read may be alive: no live members can be shown, so the group is
+        # not taken for empty (its leader stays unreaped, a problem); a zombie or a vanished pid is dead.
+        process, lines, _ = self.helpers()
+        self.send(process, 'members live zombie gone', 'members zombie gone', 'members live unreadable', 'members zombie unreadable gone')
+        found = []
+        while len(found) < 4:
+            found.append(lines.until(lambda row: 'members' in row, 10)[-1]['members'])
+        self.assertEqual(found, [[1], [], None, None])
 
     def test_the_drain_stops_at_its_deadline_or_its_cap_however_fast_the_output_comes(self):
         # A source that is never dry, on a clock that ticks 1 ms per look.
@@ -1567,6 +1648,71 @@ class Guard(unittest.TestCase):
                       "yabai -m query --windows --window 9002 did not answer within 2.0 s", result['problems'])
         self.assertEqual([(m['id'], m['from'], m['to'], m['moved']) for m in result['moves']], [(9001, 6, 6, False)])
         self.assertEqual([f['event'] for f in result['windowFaults']], ['window-off-target', 'window-unknown', 'window-list-failed'])
+
+    def test_a_space_change_no_read_saw_is_a_breach_once_its_notification_goes_unexplained(self):
+        # GP1: SkyLight tells only the Space shown now. In a theft window Tim's display goes 1 -> 3 -> 1 between two
+        # polls, macOS's notification reading Space 1; later 6 -> 3 -> 6 the same way. Neither Space 3 can be named,
+        # but neither notification is explained by a change any read found, on any display, since the notification
+        # before it: each is a breach. A notification that another display's change explains is not.
+        process, lines, root = self.rig()
+        self.send(process, 'theft')
+        time.sleep(0.15)
+        self.send(process, 'notify')  # 1 -> 3 -> 1, unseen
+        time.sleep(0.15)
+        show(root, 106)
+        time.sleep(0.15)  # the poll reads Space 6
+        self.send(process, 'notify')  # explained: Tim's display changed
+        time.sleep(0.15)
+        self.send(process, 'notify')  # 6 -> 3 -> 6, unseen
+        time.sleep(0.15)
+        show(root, 106, other=111)
+        time.sleep(0.15)
+        self.send(process, 'notify')  # explained: display D2 changed
+        time.sleep(0.15)
+        self.send(process, 'back')
+        show(root, 101, other=111)
+        self.send(process, 'notify')
+        time.sleep(0.3)
+        seen, result = self.end_rig(process, lines, root)
+        notices = [e for e in seen if e.get('event') == 'display-space' and e.get('via') == 'notification']
+        self.assertEqual([e['explainedBy'] for e in notices], [None, 'D1', None, 'D2', 'D1'])
+        recorded = [r for r in result['spaceRestores'] if r['event'] in ('space-unseen', 'space-breach')]
+        self.assertEqual([(r['event'], r.get('spaceId')) for r in recorded], [('space-unseen', None), ('space-breach', 106), ('space-unseen', None)])
+        self.assertTrue(all(r['expected'] == 1 and r['sinceTheftMs'] > 0 for r in recorded), recorded)
+        self.assertEqual(result['problems'], [])
+
+    def test_the_space_watch_takes_its_last_read_and_closes_before_the_summary(self):
+        # GP3: the poll's queue is held up past the guard's end while Tim's display shows Space 6. The end takes a
+        # last read before the summary, so the breach is in it, and the watch records nothing after.
+        process, lines, root = self.rig()
+        self.send(process, 'theft')
+        time.sleep(0.15)
+        self.send(process, 'stall 1.0')
+        time.sleep(0.2)
+        show(root, 106)
+        seen, result = self.end_rig(process, lines, root)
+        breaches = [r for r in result['spaceRestores'] if r['event'] == 'space-breach']
+        self.assertEqual([(r['from'], r['spaceId'], r['via']) for r in breaches], [(6, 106, 'end')])
+        self.assertEqual(len([e for e in seen if e.get('event') == 'space-breach']), 1)
+        self.assertEqual([(h['spaceId'], h['via']) for h in result['spaceHistory']], [(101, 'baseline'), (106, 'end')])
+        self.assertTrue(any(p.startswith("Tim's display went unread for ") for p in result['problems']), result['problems'])
+
+    def test_a_tree_window_whose_owner_yabai_does_not_name_stays_unknown_and_fails_the_check(self):
+        # GP2: windows 9003 (on Space 6) and 9004 (no Space) are the tree's in yabai's list, but its answer about each
+        # is {}: no owner, which is not an owner outside the tree.
+        probe, _ = self.probe(self.java)
+        rows = [{'id': 9003, 'pid': probe.pid, 'app': 'Probe', 'title': 'probe', 'space': 6, 'has-focus': False},
+                {'id': 9004, 'pid': probe.pid, 'app': 'Probe', 'title': 'probe', 'has-focus': False}]
+        process, lines, root = self.rig(windows=rows)
+        for row in rows:
+            put(root / ('window-%d.json' % row['id']), '{}')
+        self.send(process, 'root %d' % probe.pid, 'sweep')
+        seen, result = self.end_rig(process, lines, root)
+        why = "yabai's answer about window %d does not say whose it is"
+        self.assertEqual(sorted({(e['window'], e['reason']) for e in seen if e.get('event') == 'window-unknown'}),
+                         [(9003, why % 9003), (9004, why % 9004)])
+        for wid in (9003, 9004):
+            self.assertIn("window %d of the tree could not be located at the guard's end: %s" % (wid, why % wid), result['problems'])
 
 
 if __name__ == '__main__':

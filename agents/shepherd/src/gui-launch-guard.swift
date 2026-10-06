@@ -28,23 +28,32 @@
 //     (the same process, by pid and start time, outside the tree, still the one focus goes back to, the theft
 //     still open), and so is the window's owner, by a query made for that focus: its answer counts only if no
 //     activation, Space change or change of the restore target came while it ran (else it is asked again, within
-//     the focus's 1 s). A window that cannot be vouched for is not focused. The fallback activation checks the
+//     the focus's 1 s, while the focus is still wanted). A window that cannot be vouched for is not focused, and
+//     the focus still has to be wanted immediately before it is made. The fallback activation checks the
 //     app again in the same main-queue turn that activates it. An owner query that runs out of time is an
 //     expected-slow event, and no problem, only when the window was not focused, the fallback activation ran, and
 //     a read after it shows his app frontmost and his display on the expected Space;
-//   - reads Tim's display directly (SkyLight, the record yabai itself reads): at every Space notification, at each
+//   - reads every display directly (SkyLight, the record yabai itself reads): at every Space notification, at each
 //     activation, every 20 ms through each theft and grace window (macOS can report two changes in one
-//     notification), and around each Space restore. Each change is in the Space history. Each Space the tree shows
-//     him (a change at any moment of a theft window, or one that stays on the Space the tree took him to) is a
-//     breach the moment it is read, once per excursion from his expected Space, even when restored. In a theft or
-//     grace window, reads more than 100 ms apart, and any read that fails, leave a Space possibly unseen: a problem;
+//     notification), around each Space restore, and once more at the end. Each change of Tim's display is in the
+//     Space history. Each Space the tree shows him (a change at any moment of a theft window, or one that stays on
+//     the Space the tree took him to) is a breach the moment it is read, once per excursion from his expected
+//     Space, even when restored. SkyLight tells only the Space shown now: a Space shown between two reads can go
+//     unnamed. So each notification must be explained by a change the reads found on some display since the
+//     notification before it; one that is not is a change and back that no read saw, in a theft or grace window
+//     a breach that cannot be named (space-unseen), outside them his own, as his changes are. This rests on macOS
+//     posting at least one notification after each completed Space change [INFERENCE: not shown here]. In a theft
+//     or grace window, reads more than 100 ms apart, and any read that fails, leave a Space possibly unseen: a
+//     problem. As the guard ends the watch takes its last read and closes before the summary is taken;
 //   - restores Tim's Space: focusing the restore target, when it was last seen on the expected Space and its owner
-//     checks out, brings that Space back; each restore is recorded too. A change taken for Tim's is undone when a
-//     theft turns out to have come within 2 s of it;
+//     checks out, brings that Space back, if a fresh read still wants it before each owner query and the focus;
+//     each restore is recorded too. A change taken for Tim's is undone when a theft turns out to have come within
+//     2 s of it;
 //   - parks windows: each tree window that Accessibility reports created or focused, and each tree window
 //     yabai lists when the tree activates or the active Space changes, is moved by id to --space. A window whose
-//     location yabai will not give, a window list that fails, and a tree window still off --space after its move
-//     are recorded as they happen; the tree's windows that the final sweep still cannot locate are a problem.
+//     location or owner yabai will not give, a window list that fails, and a tree window still off --space after
+//     its move are recorded as they happen; the tree's windows that the final sweep still cannot locate are a
+//     problem.
 // The guard ends after --guard-seconds; when the launched tree has exited (without attach flags); when
 // --parent-pid (gui-launch) exits, even by SIGKILL; on SIGTERM/SIGINT; or (--open) when no token-bearing
 // process appeared within --adopt-timeout. On every end no new work starts (a theft then is not reverted, and is
@@ -58,10 +67,11 @@
 // axQueue (observer callbacks on their own run loop thread), window moves on yabaiQueue, Tim's restore target
 // and Space restores on timQueue, the theft-window reads of his display on watchQueue, yabai's Space map on
 // mapQueue, the process scan on scanQueue, the baseline on startQueue and the end on endQueue.
-// Every yabai call has one absolute deadline over its exit and the drain of its output, runs in its own process
-// group, and ends with that group: whatever it started is killed, and the leader reaped only once a whole listing
-// of the group shows it alone; the leader is reaped and released in the one locked turn in which the guard's end
-// may signal it, so no released pid is ever signalled.
+// Every yabai call has one absolute deadline over its exit and the drain of its output (an output that reaches
+// 16 MiB is refused, and a problem, whether or not the helper exits), runs in its own process group, and ends with
+// that group: whatever it started is killed, and the leader reaped only once a whole listing of the group, every
+// member of it read (one that cannot be read may be alive), shows it alone; the leader is reaped and released in
+// the one locked turn in which the guard's end may signal it, so no released pid is ever signalled.
 //
 // usage: gui-launch-guard --space N --guard-seconds S --yabai PATH --summary PATH [--parent-pid P]
 //            [--adopt-timeout S] [--attach-exe E --attach-argv N] [(--exec | --open) -- <argv to spawn>]
@@ -414,14 +424,23 @@ func staleOwner(_ id: Int) -> String {
     "yabai's answers about window \(id) were overtaken by an activation, a Space change or a new restore target, and no time was left to ask again"
 }
 
-/// The owner check before every focus of window `id`: `ask` makes one owner query and judges its answer (nil: no
-/// time is left for one); a stale answer is discarded and the query made again. Returns why the window may not be
-/// focused; nil: it may.
-func vouch(_ id: Int, ask: () -> OwnerReply?) -> String? {
-    while let reply = ask() {
-        if case .judged(let why) = reply { return why }
+/// What the owner check before a focus found: the window may be focused; it may not (why); or the focus is no
+/// longer wanted at all (why), so no owner query is made again and nothing is focused or activated for it.
+enum Vouch: Equatable {
+    case vouched
+    case refused(String)
+    case unwanted(String)
+}
+
+/// The owner check before every focus of window `id`: `pending` says why the focus is no longer wanted (nil: it
+/// still is), asked before each owner query; `ask` makes one owner query and judges its answer (nil: no time is
+/// left for one); a stale answer is discarded and the query made again, while the focus is still wanted.
+func vouch(_ id: Int, pending: () -> String?, ask: () -> OwnerReply?) -> Vouch {
+    while true {
+        if let why = pending() { return .unwanted(why) }
+        guard let reply = ask() else { return .refused(staleOwner(id)) }
+        if case .judged(let why) = reply { return why.map(Vouch.refused) ?? .vouched }
     }
-    return staleOwner(id)
 }
 
 /// How a revert gave focus back.
@@ -441,10 +460,11 @@ enum FinalTurn {
 
 /// A revert: only while `unwanted` finds nothing against it (the app is still the process it was taken from,
 /// outside the tree, still the one focus goes back to, focus not back yet). It focuses `window` once `confirm`
-/// vouches that it is still that app's, else, or when the focus fails, `activate` re-activates the app in a turn
-/// that first asks the same again: the focus may have taken a second, and the app may have joined the tree,
-/// exited, or had focus back.
-func performRevert(window: Int?, unwanted: () -> String?, confirm: (Int) -> String?, focus: (Int) -> String?,
+/// vouches that it is still that app's and `unwanted` still finds nothing, asked again after the owner check (which
+/// may have taken a second, and given focus back meanwhile) immediately before the focus. Else, or when the focus
+/// fails, `activate` re-activates the app in a turn that first asks the same again: the focus may have taken a
+/// second, and the app may have joined the tree, exited, or had focus back. A focus no longer wanted ends the revert.
+func performRevert(window: Int?, unwanted: () -> String?, confirm: (Int) -> Vouch, focus: (Int) -> String?,
                    activate: () -> FinalTurn) -> RevertOutcome {
     var outcome = RevertOutcome()
     if let why = unwanted() {
@@ -453,14 +473,24 @@ func performRevert(window: Int?, unwanted: () -> String?, confirm: (Int) -> Stri
     }
     if let window {
         outcome.window = window
-        if let why = confirm(window) {
-            outcome.windowError = why
-        } else if let error = focus(window) {
-            outcome.windowError = error
-        } else {
-            outcome.method = "window"
-            outcome.ok = true
+        switch confirm(window) {
+        case .unwanted(let why):
+            outcome.reason = why
             return outcome
+        case .refused(let why):
+            outcome.windowError = why
+        case .vouched:
+            if let why = unwanted() {
+                outcome.reason = why
+                return outcome
+            }
+            if let error = focus(window) {
+                outcome.windowError = error
+            } else {
+                outcome.method = "window"
+                outcome.ok = true
+                return outcome
+            }
         }
     }
     switch activate() {
@@ -503,8 +533,11 @@ func ownerTimeoutProblem(_ outcome: RevertOutcome, to pid: pid_t, expectedSpace:
 /// last seen on the expected Space. Any other change is his own and becomes the expected Space, until a theft turns
 /// out to have come within `grace` of it (the change may reach the guard before the theft does): then the Space
 /// before it is expected again. Each Space the tree shows him is a breach once per excursion: from leaving the
-/// expected Space until it is shown again (or he switches himself), however often it is read. A Space is its
-/// yabai index, or, for one yabai's map does not know, minus its SkyLight id (spaceKey).
+/// expected Space until it is shown again (or he switches himself), however often it is read. A Space notification
+/// that no read explains (some display changed Space and back unseen: SpaceNotices) is judged as a change is: the
+/// tree's, a breach that cannot be named, if any moment since the notification before it lies in a theft window;
+/// else his, until a theft turns out to have come within `grace` of it. A Space is its yabai index, or, for one
+/// yabai's map does not know, minus its SkyLight id (spaceKey).
 struct SpacePolicy {
     enum Decision: Equatable {
         case unchanged
@@ -524,8 +557,22 @@ struct SpacePolicy {
     private(set) var seen = Set<Int>()
     /// The Space the last `observed` found the tree showing for the first time in this excursion: a breach.
     private(set) var breach: Int?
+    /// The notifications no read explained that were taken for Tim's, by when they were read, kept 2 × `grace`.
+    private(set) var unseenOutside: [Double] = []
+    /// The ones of them the last `observed` charged to the tree: a theft came within `grace` of each.
+    private(set) var unseenCharged: [Double] = []
 
     init(expected: Int?) { self.expected = expected }
+
+    /// A Space notification read at `t` that no read explains: a change and back, unseen, after `since` (when the
+    /// notification before it was read). Returns whether it is the tree's now (a theft window covers any moment since
+    /// `since`); otherwise it is taken for Tim's and kept, for `observed` to charge if a theft comes within `grace`.
+    mutating func unseen(at t: Double, since: Double, theft: TheftWindow) -> Bool {
+        unseenOutside.removeAll { t - $0 > 2 * TheftWindow.grace }
+        if theft.covers(since: since) { return true }
+        unseenOutside.append(t)
+        return false
+    }
 
     /// Tim's display showed `visible` at some moment from `since` (the read, or the event that reported a change)
     /// until now; `theft` is read now, so a theft that came since counts. `window` is his restore target and
@@ -533,6 +580,11 @@ struct SpacePolicy {
     mutating func observed(_ visible: Int, since: Double, theft: TheftWindow, window: Int?, windowSpace: Int?) -> Decision {
         revoked = nil
         breach = nil
+        unseenCharged = []
+        if let lastTheft = theft.lastTheft {
+            unseenCharged = unseenOutside.filter { abs(lastTheft - $0) <= TheftWindow.grace }
+            unseenOutside.removeAll { abs(lastTheft - $0) <= TheftWindow.grace }
+        }
         if let lastTheft = theft.lastTheft, let first = rebases.firstIndex(where: { abs(lastTheft - $0.since) <= TheftWindow.grace }) {
             revoked = expected
             expected = rebases[first].from
@@ -584,17 +636,77 @@ struct SpaceMap: Equatable {
     }
 }
 
-/// The Space the display holding Space `anchor` shows, by SkyLight id, from SkyLight's managed display Spaces:
-/// [{"Display Identifier", "Current Space": {"id64"}, "Spaces": [{"id64"}, …]}, …] ("ManagedSpaceID" where
-/// "id64" is missing). nil: unreadable, or no display holds `anchor`.
-func displayedSpace(_ displays: Any?, anchor: UInt64) -> UInt64? {
-    func id(_ space: Any?) -> UInt64? {
-        guard let space = space as? [String: Any] else { return nil }
-        return ((space["id64"] ?? space["ManagedSpaceID"]) as? NSNumber)?.uint64Value
+/// One read of SkyLight's managed display Spaces, [{"Display Identifier", "Current Space": {"id64"}, "Spaces":
+/// [{"id64"}, …]}, …] ("ManagedSpaceID" where "id64" is missing): the Space each display shows, by SkyLight id,
+/// keyed by its identifier ("display N", by its place in the list, for one without), and which display is Tim's
+/// (the one holding Space `anchor`). A display whose current Space cannot be read is left out: no change of it
+/// is seen. nil: unreadable, or no display holds `anchor`, or his shows no readable Space.
+struct DisplayRead: Equatable {
+    let tim: String
+    let timSpace: UInt64
+    let shown: [String: UInt64]
+
+    init?(_ displays: Any?, anchor: UInt64) {
+        func id(_ space: Any?) -> UInt64? {
+            guard let space = space as? [String: Any] else { return nil }
+            return ((space["id64"] ?? space["ManagedSpaceID"]) as? NSNumber)?.uint64Value
+        }
+        guard let displays = displays as? [[String: Any]] else { return nil }
+        var shown: [String: UInt64] = [:]
+        var tim: String?
+        for (i, display) in displays.enumerated() {
+            let key = display["Display Identifier"] as? String ?? "display \(i + 1)"
+            if let current = id(display["Current Space"]) { shown[key] = current }
+            if tim == nil, (display["Spaces"] as? [Any])?.contains(where: { id($0) == anchor }) == true { tim = key }
+        }
+        guard let tim, let timSpace = shown[tim] else { return nil }
+        self.tim = tim
+        self.timSpace = timSpace
+        self.shown = shown
     }
-    guard let displays = displays as? [[String: Any]],
-          let display = displays.first(where: { ($0["Spaces"] as? [Any])?.contains { id($0) == anchor } == true }) else { return nil }
-    return id(display["Current Space"])
+}
+
+/// Whether each Space notification is explained: by a display whose Space the reads (of every display, at each
+/// notification and poll) found changed since the previous notification's read, Tim's display first. A notification
+/// that none explains means a change and back that no read saw: SkyLight tells only the Space each display shows
+/// now, never the ones it passed through, and keeps no history of them, so such a Space cannot be named.
+/// [INFERENCE] macOS posts at least one activeSpaceDidChange after each completed Space change of any display
+/// (several changes may share one). Apple documents only that it is posted "when a Spaces change occurs", with no
+/// count, no coalescing rule and no userInfo; no source found shows a completed change that posts none, nor proves
+/// that none ever does; and no per-transition source (SkyLight's 1401 and 1329 events included) is documented as
+/// lossless. Under it, an excursion between two reads, however short, leaves a notification no read explains,
+/// unless that notification is shared with a change a read did see (on any display). Neither is checked here: the
+/// guard relies on both. Times: seconds since launch.
+struct SpaceNotices: Equatable {
+    /// Each display's Space at the last read.
+    private(set) var last: [String: UInt64]?
+    /// The displays found changed since the last notification's read, in the order found.
+    private(set) var changed: [String] = []
+    /// When the last notification was read (at first, when the watch began).
+    private(set) var since: Double
+
+    init(since: Double) { self.since = since }
+
+    /// A read of every display.
+    mutating func read(_ shown: [String: UInt64]) {
+        if let last {
+            for key in Set(last.keys).union(shown.keys).sorted() where last[key] != shown[key] && !changed.contains(key) {
+                changed.append(key)
+            }
+        }
+        last = shown
+    }
+
+    /// A notification, read at `t` (after `read`, if the read succeeded; `tim`: nil, it failed). Returns the
+    /// display whose change explains it (nil: none does), and when the notification before it was read.
+    mutating func notified(at t: Double, tim: String?) -> (by: String?, since: Double) {
+        defer {
+            changed.removeAll()
+            since = t
+        }
+        guard let tim else { return (nil, since) }
+        return (changed.contains(tim) ? tim : changed.first, since)
+    }
 }
 
 /// Whether the reads of Tim's display prove that no Space shown to him went unseen. While a theft or grace window
@@ -743,16 +855,41 @@ func drain(_ data: inout Data, cap: Int, deadline: Double, now: () -> Double, re
 /// The first listing's slots for a group's members (--helpers makes it small, to exercise the paging).
 var groupListSlots = 1024
 
-/// The live processes in process group `pgid` (a zombie is dead already: its parent reaps it); nil: the group
-/// could not be listed whole.
+/// What proc_pidinfo says of a listed group member: alive, a zombie (dead already: its parent reaps it), gone (no
+/// such process any more), or unreadable (any other failure: it may be alive).
+enum MemberState: String { case live, zombie, gone, unreadable }
+
+func memberState(_ pid: pid_t) -> MemberState {
+    var info = proc_bsdinfo()
+    let size = Int32(MemoryLayout<proc_bsdinfo>.stride)
+    let got = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
+    if got == size { return info.pbi_status == 5 ? .zombie : .live }  // 5: SZOMB
+    return got == 0 && errno == ESRCH ? .gone : .unreadable
+}
+
+/// The live members among a group's listed `pids`; nil: one could not be read, so the group cannot be shown empty
+/// of live members (a cleanup failure, never an absence).
+func liveMembers(_ pids: [pid_t], _ state: (pid_t) -> MemberState) -> [pid_t]? {
+    var live: [pid_t] = []
+    for pid in pids where pid > 0 {
+        switch state(pid) {
+        case .live: live.append(pid)
+        case .zombie, .gone: continue
+        case .unreadable: return nil
+        }
+    }
+    return live
+}
+
+/// The live processes in process group `pgid`; nil: the group could not be listed whole, or a member could not be
+/// read.
 func groupMembers(_ pgid: pid_t) -> [pid_t]? {
     let stride = MemoryLayout<pid_t>.stride
     guard let pids = listWhole(slots: groupListSlots, maxSlots: 1 << 20, { buffer in
         let bytes = buffer.withUnsafeMutableBytes { proc_listpids(UInt32(PROC_PGRP_ONLY), UInt32(pgid), $0.baseAddress, Int32($0.count)) }
         return bytes < 0 ? -1 : Int(bytes) / stride
     }) else { return nil }
-    let zombie: UInt32 = 5  // SZOMB
-    return pids.filter { pid in pid > 0 && bsdInfo(pid).map { $0.pbi_status != zombie } ?? false }
+    return liveMembers(pids, memberState)
 }
 
 /// posix_spawn attributes for a child: SIGTERM, SIGINT and SIGPIPE at their defaults (the guard ignores them, and
@@ -831,12 +968,13 @@ final class Child {
         }
     }
 
-    /// Until the leader has exited and the output is closed (by it and anything it started) or full, or
-    /// `deadline` (uptime) passes. Returns whether it finished.
+    /// Until the leader has exited and the output is closed (by it and anything it started), the output is full
+    /// (its answer is refused then, whatever the helper does next), or `deadline` (uptime) passes. Returns whether
+    /// it finished.
     func wait(until deadline: Double) -> Bool {
         while true {
             step(until: deadline)
-            if exited && (eof || full) { return true }
+            if full || (exited && eof) { return true }
             let left = deadline - uptime()
             if left <= 0 { return false }
             if eof || full {
@@ -892,9 +1030,10 @@ DispatchQueue.main.setSpecific(key: mainQueueKey, value: true)
 func onMain() -> Bool { Thread.isMainThread || DispatchQueue.getSpecific(key: mainQueueKey) == true }
 
 /// The guard's yabai helpers. Each runs in its own process group under one absolute deadline over its exit and
-/// the drain of its output, and ends with its group (Child.end); one that misses the deadline is reported (a
-/// problem and a yabai-timeout event), unless its caller owns the timeout; one whose output passes the cap is
-/// refused, and that is a problem. None runs on the main thread or queue (refused, and a problem), none starts
+/// the drain of its output, and ends with its group (Child.end); one whose output reaches the cap is refused, and
+/// that is a problem, whether or not it exits (so a caller that owns its timeout never takes it for a timeout); one
+/// that misses the deadline is reported (a problem and a yabai-timeout event), unless its caller owns the timeout.
+/// None runs on the main thread or queue (refused, and a problem), none starts
 /// after shutdown(), and shutdown() ends those still running. `lock` is the helpers' lifecycle lock: a helper is
 /// registered when spawned, and its leader reaped and released in one turn under it (Child.end), and shutdown
 /// signals under it only the groups still registered, whose leaders are therefore unreaped: no released pid is
@@ -973,6 +1112,11 @@ final class Helpers {
         }
         if !groupEnded { problem("\(what) (process group \(pid)) could not be ended and reaped: its group could not be shown empty") }
         if killedAtEnd { return .refused("\(what) was killed at the guard's end") }
+        if child.full {
+            let message = "\(what) wrote more than \(Child.outputCap) bytes: its answer was refused"
+            problem(message)
+            return .refused(message)
+        }
         guard finished else {
             if !ownsTimeout {
                 let seconds = String(format: "%.1f", allowed)
@@ -980,11 +1124,6 @@ final class Helpers {
                 emit(["event": "yabai-timeout", "args": args, "timeoutS": decimal(allowed, 1)])
             }
             return .timedOut(allowed)
-        }
-        if child.full {
-            let message = "\(what) wrote more than \(Child.outputCap) bytes: its answer was refused"
-            problem(message)
-            return .refused(message)
         }
         return .exited(child.code, child.data)
     }
@@ -1327,6 +1466,7 @@ func unknownWindow(_ id: Int) -> String { "yabai knows no window \(id)" }
 ///   window yabai reports focused afterwards; `revert`, the revert a tree activation starts: "verify" is what each
 ///   owner query answers in turn (`{"pid", "space"}`, "gone", or null; a single answer stands for a list of one;
 ///   an answer missing: none in time), "duringQuery" (activation rows) comes while the first owner query runs,
+///   "afterVouch" (activation rows) comes once an owner answer vouched for the window, before the focus,
 ///   "focus": "fail" fails the focus, "duringFocus" (`{"procs", "t", "activate"}`) happens while the focus runs,
 ///   "mainQueue" (rows) is work the main queue serves before the fallback's final turn, and "afterFallback"
 ///   (`{"front": pid, "space": n}`; absent: the read failed) is what the read after a fallback shows;
@@ -1335,7 +1475,10 @@ func unknownWindow(_ id: Int) -> String { "yabai knows no window \(id)" }
 ///   showed Space n at some moment from `since` (default t) until t, the activations came while the query ran,
 ///   and windowSpace is the Space his restore-target window was last seen on (null: gone);
 /// - `{"t", "read": n}` (or `{"t", "read": null, "id": i}`: a Space yabai's map does not know): a direct read of
-///   his display at t; it takes "windowSpace" too.
+///   his display at t; it takes "windowSpace" too. A Space row reports the unexplained notifications it charges to
+///   the tree ("unseenCharged");
+/// - `{"t", "unseen": s}`: a Space notification read at t that no read explains, the one before it read at s:
+///   "tree" or "tim".
 /// Other keys (such as "input") play no part. stdout: one line per row.
 func decide() -> Never {
     var procs: [pid_t: [String: Any]] = [:]
@@ -1392,13 +1535,15 @@ func decide() -> Never {
         var activated: pid_t?
         var during: [String: Any]?
         var duringQuery: [[String: Any]] = []
+        var afterVouch: [[String: Any]] = []
+        var focusTried = false
         var queued: [[String: Any]] = []
         var answers: [Any] = spec["verify"] as? [Any] ?? spec["verify"].map { [$0] } ?? []
         let outcome = performRevert(
             window: target.window(for: to),
             unwanted: { unwanted(to) },
             confirm: { id in
-                vouch(id) {
+                let found = vouch(id, pending: { unwanted(to) }) {
                     queries += 1
                     let began = (epoch: epoch, target: target)
                     if queries == 1 { duringQuery = (spec["duringQuery"] as? [[String: Any]] ?? []).map { activation($0) } }
@@ -1415,8 +1560,11 @@ func decide() -> Never {
                     guard epoch == began.epoch && target == began.target else { return .stale }
                     return .judged(target.confirm(id, fact))
                 }
+                if found == .vouched { afterVouch = (spec["afterVouch"] as? [[String: Any]] ?? []).map { activation($0) } }
+                return found
             },
             focus: { _ in
+                focusTried = true
                 if let happening = spec["duringFocus"] as? [String: Any] {
                     define(happening["procs"])
                     if happening["activate"] != nil { during = activation(happening) }
@@ -1433,9 +1581,11 @@ func decide() -> Never {
             })
         var out: [String: Any] = ["method": outcome.method, "ok": outcome.ok, "window": outcome.window ?? NSNull(),
                                   "windowError": outcome.windowError ?? NSNull(), "reason": outcome.reason ?? NSNull(),
-                                  "queried": queries > 0, "queries": queries, "activated": activated.map { Int($0) } ?? NSNull()]
+                                  "queried": queries > 0, "queries": queries, "activated": activated.map { Int($0) } ?? NSNull(),
+                                  "focusTried": focusTried]
         if let during { out["duringFocus"] = during }
         if !duringQuery.isEmpty { out["duringQuery"] = duringQuery }
+        if !afterVouch.isEmpty { out["afterVouch"] = afterVouch }
         if !queued.isEmpty { out["mainQueue"] = queued }
         if timedOut {
             var read = PostFallbackRead(error: "Tim's display could not be read")
@@ -1532,12 +1682,16 @@ func decide() -> Never {
             let decision = spaces.observed(visible, since: since, theft: policy.window, window: target.window, windowSpace: target.windowSpace)
             if let revoked = spaces.revoked { out["revoked"] = revoked }
             if let breach = spaces.breach { out["breach"] = breach }
+            if !spaces.unseenCharged.isEmpty { out["unseenCharged"] = spaces.unseenCharged }
             switch decision {
             case .unchanged: out["space"] = "unchanged"
             case .user(let space): out["space"] = "user"; out["expected"] = space
             case .restore(let from, let to, let window): out["space"] = "restore"; out["from"] = from; out["to"] = to; out["window"] = window
             case .unrestorable(let from, let to): out["space"] = "unrestorable"; out["from"] = from; out["to"] = to
             }
+        } else if let since = number(row["unseen"])?.doubleValue {
+            epoch += 1
+            out["unseen"] = spaces.unseen(at: t, since: since, theft: policy.window) ? "tree" : "tim"
         } else {
             continue
         }
@@ -1577,6 +1731,7 @@ func describe(_ reply: Helpers.Reply) -> [String: Any] {
 
 /// stdin lines, read on a thread that stands for the main thread:
 /// - `call <id> <timeout> <args…>`: a yabai call on a concurrent queue, scheduled as work in flight;
+/// - `owner <id> <timeout> <args…>`: the same for a caller that owns its timeout (the owner query before a focus);
 /// - `queued <id> <timeout> <args…>`: the same on a serial queue, as reverts are (they wait behind each other);
 /// - `main <id> <args…>`: the call on the main queue;
 /// - `final <timeout> <args…>`: a call for the end's own stage, in order;
@@ -1585,20 +1740,22 @@ func describe(_ reply: Helpers.Reply) -> [String: Any] {
 ///   still registered with the helpers then (the end could still signal it);
 /// - `slots <n>`: the first listing of a helper group's members gets n slots, so a larger group needs paging;
 /// - `list <total> <slots> [fail]`: listWhole over a source of `total` entries (or one that fails);
+/// - `members <state…>`: the live members among listed pids 1, 2, … whose proc_pidinfo reads as each state says
+///   (live, zombie, gone, unreadable);
 /// - `end`: the guard's end, as finish() starts it: work in flight is closed here, endWork runs on another queue.
 /// stdout: `{"ready": true}`, the events, `{"call": id, "reply": …}` per call (written before the call stops
 /// being in flight), `{"final": n, "reply": …}`, `{"drain", "bytes", "reads"}`, `{"released": id, "registered"}`,
-/// `{"slots": n}`, `{"list": count|null, "tries": n}`, and `{"end": {"unsettled", "killed", "problems"}}`. Exits
-/// at the end of stdin, once the end is done.
+/// `{"slots": n}`, `{"list": count|null, "tries": n}`, `{"members": [pid]|null}`, and `{"end": {"unsettled",
+/// "killed", "problems"}}`. Exits at the end of stdin, once the end is done.
 func helpersMode(yabai path: String) -> Never {
     writeLine(["ready": true])
     let calls = DispatchQueue(label: "gui-launch.calls", attributes: .concurrent)
     let serial = DispatchQueue(label: "gui-launch.queued")
     let ender = DispatchQueue(label: "gui-launch.ender")
     let ending = DispatchGroup()
-    func call(_ id: String, _ timeout: Double, _ args: [String], on queue: DispatchQueue) {
+    func call(_ id: String, _ timeout: Double, _ args: [String], on queue: DispatchQueue, ownsTimeout: Bool = false) {
         let scheduled = schedule("call \(id)", on: queue) {
-            writeLine(describe(helpers.run(path, args, timeout: timeout)).merging(["call": id]) { $1 })
+            writeLine(describe(helpers.run(path, args, timeout: timeout, ownsTimeout: ownsTimeout)).merging(["call": id]) { $1 })
         }
         if !scheduled { writeLine(["call": id, "reply": "not started"]) }
     }
@@ -1606,8 +1763,12 @@ func helpersMode(yabai path: String) -> Never {
         var finals: [(timeout: Double, args: [String])] = []
         while let line = readLine() {
             let words = line.split(separator: " ").map(String.init)
-            if words.count >= 3, words[0] == "call" || words[0] == "queued", let timeout = Double(words[2]) {
-                call(words[1], timeout, Array(words[3...]), on: words[0] == "call" ? calls : serial)
+            if words.count >= 3, ["call", "queued", "owner"].contains(words[0]), let timeout = Double(words[2]) {
+                call(words[1], timeout, Array(words[3...]), on: words[0] == "queued" ? serial : calls, ownsTimeout: words[0] == "owner")
+            } else if words.count >= 2, words[0] == "members" {
+                let states = words.dropFirst().map { MemberState(rawValue: $0) ?? .unreadable }
+                let live = liveMembers(Array(1...pid_t(states.count))) { states[Int($0) - 1] }
+                writeLine(["members": live.map { $0.map(Int.init) as Any } ?? NSNull()])
             } else if words.count >= 3, words[0] == "release", let timeout = Double(words[2]) {
                 let id = words[1], args = Array(words[3...])
                 let scheduled = schedule("call \(id)", on: calls) {
@@ -1871,8 +2032,9 @@ func windowFields(_ w: [String: Any]?) -> [String: Any] {
 /// pid, with the start time the tree recorded). `seen` is when the event that reported it arrived; yabai may
 /// learn of a brand-new window a few ms after Accessibility does, so a window yabai does not answer for is asked
 /// about again for up to a second, without holding up the queue. Nothing ends unrecorded: a window yabai will not
-/// place is window-unknown, and a tree window still off the target after its move (or on no Space, which a move
-/// by Space cannot reach) is window-off-target.
+/// place, or whose answer does not say whose it is, is window-unknown (only an answer naming an owner outside the
+/// tree clears it), and a tree window still off the target after its move (or on no Space, which a move by Space
+/// cannot reach) is window-off-target.
 func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
     tracked("park of window \(id) (\(via))", final: final) {
         let (found, why) = windowQuery(id)
@@ -1884,7 +2046,11 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
             }
             return
         }
-        guard let pid = (w["pid"] as? NSNumber)?.int32Value, tree.contains(pid) else {
+        guard let pid = (w["pid"] as? NSNumber)?.int32Value else {
+            windowUnknown(id, via: via, why: "yabai's answer about window \(id) does not say whose it is")
+            return
+        }
+        guard tree.contains(pid) else {
             windowsUnknown.update { $0[id] = nil }
             return
         }
@@ -2043,12 +2209,14 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
 /// Whether window `id` may be focused for the restore target, by an owner query made for this focus (its owner must
 /// be the target's pid with its start time, outside the tree). The answer counts only if no activation, Space
 /// change, app launch or exit, and no change of the restore target came while the query ran: a stale answer is
-/// discarded and the query made again, until `deadline` (uptime). Returns why not (nil: it may) and, if a query ran
-/// out of time, the time it had. A window that turns out to be another process's is dropped from the target.
-/// `ownsTimeout`: the caller records a query that runs out of time (the revert does), not Helpers. Off main.
-@Sendable func confirmWindow(_ id: Int, until deadline: Double, ownsTimeout: Bool = false) -> (why: String?, timedOut: Double?) {
+/// discarded and the query made again, until `deadline` (uptime), but only while `pending` (asked before each
+/// query) finds the focus still wanted. Returns what the check found and, if a query ran out of time, the time it
+/// had. A window that turns out to be another process's is dropped from the target. `ownsTimeout`: the caller
+/// records a query that runs out of time (the revert does), not Helpers. Off main.
+@Sendable func confirmWindow(_ id: Int, until deadline: Double, pending: () -> String?,
+                             ownsTimeout: Bool = false) -> (vouch: Vouch, timedOut: Double?) {
     var timedOut: Double?
-    let why = vouch(id) {
+    let found = vouch(id, pending: pending) {
         let left = deadline - uptime()
         guard left > 0.01 else { return nil }
         let began = (epoch: timEpoch.value, target: restoreTarget.value)
@@ -2072,7 +2240,7 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
             return .judged(target.confirm(id, fact))
         }
     }
-    return (why, timedOut)
+    return (found, timedOut)
 }
 
 /// The fallback's final turn, on the main queue: focus still goes back to `pid` with the theft still open (main's
@@ -2096,9 +2264,9 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
         window: restoreTarget.value.window(for: pid),
         unwanted: { unwanted(pid) },
         confirm: { id in
-            let check = confirmWindow(id, until: uptime() + focusTimeout, ownsTimeout: true)
+            let check = confirmWindow(id, until: uptime() + focusTimeout, pending: { unwanted(pid) }, ownsTimeout: true)
             if let allowed = check.timedOut { ownerTimeout = (["query", "--windows", "--window", String(id)], allowed) }
-            return check.why
+            return check.vouch
         },
         focus: { id in
             lastRestore.update { $0 = ("window", id) }
@@ -2179,18 +2347,29 @@ func refreshTarget(_ pid: pid_t, attempt: Int = 0) {
 }
 
 /// The tree moved Tim's display to `from`: focusing his restore-target window (its app and its owner checked
-/// again first) brings `to`, the expected Space, back. Recorded either way: `ok` only when a direct read shows his
-/// display on `to` again (every 20 ms, for up to 1 s). timQueue.
+/// again first) brings `to`, the expected Space, back. The restore must still be wanted (a fresh read still finds
+/// his display where the tree took it, wanting this window) before each owner query and again immediately before
+/// the focus; once it is not, nothing is focused (`reason`). Recorded either way: `ok` only when a direct read
+/// shows his display on `to` again (every 20 ms, for up to 1 s). timQueue.
 @Sendable func restoreSpace(from: Int, to: Int, window: Int, theftAt: Double?) {
     var focused = false
     var windowError: String?
+    var reason: String?
     if let pid = restoreTarget.value.pid, revalidateTarget(pid), restoreTarget.value.window == window {
-        if let why = confirmWindow(window, until: uptime() + focusTimeout).why {
+        let pending = { spaceWatch.restorePending(window) }
+        switch confirmWindow(window, until: uptime() + focusTimeout, pending: pending).vouch {
+        case .unwanted(let why):
+            reason = why
+        case .refused(let why):
             windowError = why
-        } else if case .exited(0, _) = yabaiReply(["window", "--focus", String(window)], timeout: focusTimeout) {
-            focused = true
-        } else {
-            windowError = "the focus failed"
+        case .vouched:
+            if let why = pending() {
+                reason = why
+            } else if case .exited(0, _) = yabaiReply(["window", "--focus", String(window)], timeout: focusTimeout) {
+                focused = true
+            } else {
+                windowError = "the focus failed"
+            }
         }
     } else {
         windowError = "the restore target's app joined the tree or exited"
@@ -2202,7 +2381,8 @@ func refreshTarget(_ pid: pid_t, attempt: Int = 0) {
         after = spaceWatch.sample(via: "restore")
     }
     var record: [String: Any] = ["event": "space-restored", "from": spaceField(from), "to": after?.index ?? NSNull(), "expected": to,
-                                 "window": window, "focused": focused, "windowError": windowError ?? NSNull(), "ok": after?.index == to]
+                                 "window": window, "focused": focused, "windowError": windowError ?? NSNull(),
+                                 "reason": reason ?? NSNull(), "ok": after?.index == to]
     if from < 0 { record["fromId"] = -from }
     record["latencyMs"] = theftAt.map { ms(uptime() - t0 - $0) } ?? NSNull()
     spaceEvents.update { $0.append(record) }
@@ -2229,20 +2409,25 @@ enum SkyLight {
 
 /// Tim's display, read directly: at every Space notification, at each activation, every SpaceSampling.interval
 /// through each theft and grace window (macOS can report two changes in one notification), around each Space
-/// restore and after a fallback activation. The reads go to SpacePolicy one at a time, in the order taken, so each
-/// Space the tree shows him is a breach (space-breach) the moment it is read; each read that changes what his
-/// display shows is in the Space history (display-space; a notification's read is logged even with no change). A
-/// Space yabai's map does not know is recorded by its id, and the map asked for again (at most once a second). A
-/// read that fails, and, while a theft or grace window lasts, reads more than SpaceSampling.maxGap apart, are
-/// problems: nothing then proves that no Space went unseen. A restore is asked of timQueue for each new breach and
-/// each notification that still finds the tree's Space; it acts on the latest read.
+/// restore, after a fallback activation, and once more as the guard ends. Each read takes every display. The reads
+/// go to SpacePolicy one at a time, in the order taken, so each Space the tree shows him is a breach (space-breach)
+/// the moment it is read; each read that changes what his display shows is in the Space history (display-space; a
+/// notification's read is logged even with no change, with the display whose change explains it). A notification
+/// that no read explains (SpaceNotices) is a change and back that no read saw: in a theft or grace window a breach
+/// that cannot be named (space-unseen). A Space yabai's map does not know is recorded by its id, and the map asked
+/// for again (at most once a second). A read that fails, and, while a theft or grace window lasts, reads more than
+/// SpaceSampling.maxGap apart, are problems: nothing then proves that no Space went unseen. A restore is asked of
+/// timQueue for each new breach and each notification that still finds the tree's Space; it acts on the latest
+/// read. Every read holds the lock throughout, and records nothing once the watch is closed (close).
 final class SpaceWatch {
     private let lock = NSLock()
     private var rows: (() -> Any?)?
     private var map: SpaceMap?
     private var sampling = SpaceSampling()
+    private var notices = SpaceNotices(since: 0)
     private var shown: UInt64?
     private var failing = false
+    private var closed = false
     private var timer: DispatchSourceTimer?
     private var nextRefresh = -Double.infinity
     private var refreshing = false
@@ -2264,21 +2449,26 @@ final class SpaceWatch {
         lock.lock()
         self.rows = rows
         self.map = map
+        notices = SpaceNotices(since: uptime() - t0)
         lock.unlock()
         return sample(via: "baseline")
     }
 
-    /// One read of Tim's display, `via` what prompted it; `input`, the last HID input then (a hint), if known.
-    /// Returns the Space it shows (its SkyLight id, and its index if yabai's map knows it); nil: the read failed.
+    /// One read of every display, `via` what prompted it; `input`, the last HID input then (a hint), if known.
+    /// Returns the Space Tim's display shows (its SkyLight id, and its index if yabai's map knows it); nil: the
+    /// read failed, or the watch is closed.
     @discardableResult
     func sample(via: String, input: Double? = nil) -> (id: UInt64, index: Int?)? {
         lock.lock(); defer { lock.unlock() }
+        guard !closed else { return nil }
         let t = uptime() - t0
+        let notice = via == "notification"
         if let from = sampling.read(at: t) {
             problem(String(format: "Tim's display went unread for %.0f ms in a theft or grace window (%.3f to %.3f s after launch): a Space shown then may be unrecorded",
                            (t - from) * 1000, from, t))
         }
-        guard let map, let id = displayedSpace(rows?(), anchor: map.anchor) else {
+        guard let map, let read = DisplayRead(rows?(), anchor: map.anchor) else {
+            if notice { _ = notices.notified(at: t, tim: nil) }  // no read explains it; the failed read is a problem
             if !failing {
                 failing = true
                 problem(String(format: "Tim's display could not be read directly %.3f s after launch (%@): SkyLight's record shows no display holding Space 1", t, via))
@@ -2287,29 +2477,45 @@ final class SpaceWatch {
             return nil
         }
         failing = false
+        notices.read(read.shown)
+        let id = read.timSpace
         let index = map.indexes[id]
         if index == nil { refreshMap() }
         let changed = id != shown
         shown = id
         if changed { trail.append(["at": decimal(t, 3), "space": index ?? NSNull(), "spaceId": NSNumber(value: id), "via": via]) }
-        if changed || via == "notification" {
+        var unexplainedSince: Double?
+        if notice {
+            let (by, since) = notices.notified(at: t, tim: read.tim)
+            if by == nil { unexplainedSince = since }
+            emit(["event": "display-space", "space": index ?? NSNull(), "spaceId": NSNumber(value: id), "via": via, "changed": changed,
+                  "explainedBy": by ?? NSNull(), "timsDisplay": read.tim])
+        } else if changed {
             emit(["event": "display-space", "space": index ?? NSNull(), "spaceId": NSNumber(value: id), "via": via, "changed": changed])
         }
-        judge(spaceKey(index: index, id: id), id: id, at: t, via: via, input: input)
+        judge(spaceKey(index: index, id: id), id: id, at: t, via: via, input: input, unexplainedSince: unexplainedSince)
         return (id, index)
     }
 
-    /// What SpacePolicy decides for the read, recorded. Lock held.
-    private func judge(_ key: Int, id: UInt64, at t: Double, via: String, input: Double?) {
+    /// What SpacePolicy decides for the read, recorded; `unexplainedSince`: the read is a notification's that no read
+    /// explains, and the notification before it was read then. Lock held.
+    private func judge(_ key: Int, id: UInt64, at t: Double, via: String, input: Double?, unexplainedSince: Double?) {
         let theft = theftState.value
         let target = restoreTarget.value
-        let (decision, revoked, expected, breach) = spacePolicy.update {
-            ($0.observed(key, since: t, theft: theft, window: target.window, windowSpace: target.windowSpace), $0.revoked, $0.expected, $0.breach)
+        let (decision, revoked, expected, breach, unseen) = spacePolicy.update { (policy: inout SpacePolicy) -> (SpacePolicy.Decision, Int?, Int?, Int?, [Double]) in
+            var now = false
+            if let since = unexplainedSince { now = policy.unseen(at: t, since: since, theft: theft) }
+            let decision = policy.observed(key, since: t, theft: theft, window: target.window, windowSpace: target.windowSpace)
+            return (decision, policy.revoked, policy.expected, policy.breach, policy.unseenCharged + (now ? [t] : []))
         }
         func hint() -> Any { input.map { ms(t - $0) } ?? NSNull() }
         func record(_ fields: [String: Any]) {
             spaceEvents.update { $0.append(fields) }
             emit(fields)
+        }
+        for at in unseen {
+            record(["event": "space-unseen", "noticeAt": decimal(at, 3), "expected": expected.map(spaceField) ?? NSNull(),
+                    "sinceTheftMs": theft.lastTheft.map { ms(at - $0) } ?? NSNull(), "theftAt": theft.lastTheft.map { decimal($0, 3) } ?? NSNull()])
         }
         if let revoked {
             record(["event": "user-space-revoked", "space": spaceField(revoked), "expected": expected.map(spaceField) ?? NSNull(),
@@ -2355,12 +2561,24 @@ final class SpaceWatch {
         }
     }
 
+    /// Before a Space restore's owner query, and again immediately before its focus: why focusing `window` would no
+    /// longer restore Tim's Space (a fresh read finds his display back, or wanting another window, or cannot be
+    /// taken, or the watch is closed); nil: it still would. timQueue.
+    func restorePending(_ window: Int) -> String? {
+        let read = sample(via: "restore-check")
+        lock.lock(); defer { lock.unlock() }
+        if closed { return "the guard is ending" }
+        guard read != nil else { return "Tim's display could not be read" }
+        guard let want = restoreWanted else { return "Tim's display no longer shows a Space the tree took it to" }
+        return want.window == window ? nil : "the restore now wants window \(want.window)"
+    }
+
     /// After main published the theft windows (each activation): while one lasts, reads every
     /// SpaceSampling.interval on watchQueue; and reads now. main.
     func follow(via: String) {
         lock.lock()
         let t = uptime() - t0
-        if theftState.value.covers(since: t) {
+        if !closed && theftState.value.covers(since: t) {
             sampling.watch(at: t)
             if timer == nil {
                 let ticker = DispatchSource.makeTimerSource(flags: .strict, queue: watchQueue)
@@ -2374,15 +2592,36 @@ final class SpaceWatch {
         sample(via: via)
     }
 
-    /// One poll; the last once no theft or grace window lasts. watchQueue.
+    /// One poll; the last once no theft or grace window lasts, or the watch is closed. watchQueue.
     private func poll() {
         sample(via: "poll")
         lock.lock(); defer { lock.unlock() }
-        if !theftState.value.covers(since: uptime() - t0) {
+        if closed || !theftState.value.covers(since: uptime() - t0) {
             timer?.cancel()
             timer = nil
             sampling.unwatch()
         }
+    }
+
+    /// The guard's end, before its summary is taken (endQueue, once the end's work is done): one last read of
+    /// every display (a poll held up then, or a change since the last read, is judged now; none if the watch never
+    /// began), then the watch closes: under the lock, which every read holds throughout, so no read is under way
+    /// once it is closed and none records anything after; the poll is cancelled, and watchQueue drained (for up to
+    /// 1 s) so no poll outlives the summary. From here the history, breaches and problems the watch records are final.
+    func close() {
+        lock.lock()
+        let begun = rows != nil
+        lock.unlock()
+        if begun { sample(via: "end") }
+        lock.lock()
+        closed = true
+        timer?.cancel()
+        timer = nil
+        sampling.unwatch()
+        lock.unlock()
+        let drained = DispatchSemaphore(value: 0)
+        watchQueue.async { drained.signal() }
+        _ = drained.wait(timeout: .now() + 1)
     }
 
     /// Asks yabai for its Space map again: for a Space it does not know, or a read that found no display holding
@@ -2477,7 +2716,8 @@ func scanOnce() {
 /// Ends the guard (main): no new work starts; on endQueue, work in flight (reverts still queued included) settles
 /// within its 3 s, then the final scan, sweep and focus read get their own 3 s (unless gui-launch is gone): the
 /// tree's windows that the final sweep cannot locate are a problem. Then the helpers still running are ended; then
-/// the summary and guard-end. The main thread keeps serving events.
+/// the Space watch takes its last read and closes; then, on main, the summary (its records taken in that one turn,
+/// when nothing records any more) and guard-end. The main thread keeps serving events until then.
 func finish(_ reason: String) {  // main
     guard !finishing else { return }
     finishing = true
@@ -2500,12 +2740,20 @@ func finish(_ reason: String) {  // main
             }
             focusAtEnd = windowFields(yabai(["query", "--windows", "--window"]) as? [String: Any])
         }
+        spaceWatch.close()
         DispatchQueue.main.async { conclude(reason, orphaned: orphaned, focusAtEnd: focusAtEnd) }
     }
 }
 
 func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  // main
     finished = true
+    // The records, taken together: the Space watch is closed, the end's work settled (or reported unsettled), and
+    // main, which serves the activations and notifications, records nothing else in this turn.
+    let records: [String: Any] = [
+        "reverted": reverted, "moves": moves.value, "spaceRestores": spaceEvents.value, "problems": problems.value,
+        "spaceHistory": spaceWatch.history, "ownerQueryTimeouts": ownerTimeouts.value, "windowFaults": windowFaults.value,
+        "timSpace": ["atLaunch": timSpaceAtLaunch ?? NSNull(), "expected": spacePolicy.value.expected.map(spaceField) ?? NSNull()] as [String: Any],
+    ]
     if orphaned { unlink(summaryPath) }  // gui-launch is gone: nobody reads it
     guard started else {
         let message = "the guard ended (\(reason)) before it launched anything"
@@ -2534,10 +2782,8 @@ func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  //
             "frontAtLaunch": describe(frontAtLaunch), "frontAtEnd": describe(workspace.frontmostApplication),
             "userFront": describe(policy.userFront.flatMap { NSRunningApplication(processIdentifier: $0) }),
             "restorePending": theft != nil, "focusAtLaunch": focusAtLaunch, "focusAtEnd": end,
-            "timSpace": ["atLaunch": timSpaceAtLaunch ?? NSNull(), "expected": spacePolicy.value.expected.map(spaceField) ?? NSNull()] as [String: Any],
-            "reverted": reverted, "moves": moves.value, "spaceRestores": spaceEvents.value, "problems": problems.value,
-            "spaceHistory": spaceWatch.history, "ownerQueryTimeouts": ownerTimeouts.value, "windowFaults": windowFaults.value,
         ]) { _, new in new }
+        summary.merge(records) { _, new in new }
         let data = try! JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys, .withoutEscapingSlashes])
         FileManager.default.createFile(atPath: summaryPath, contents: data)
     }
