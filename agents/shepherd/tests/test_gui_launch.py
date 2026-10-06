@@ -21,6 +21,7 @@ import os
 import platform
 import pwd
 import queue
+import select
 import shutil
 import signal
 import subprocess
@@ -265,6 +266,40 @@ def show(root, shown, extra=(), anchor=True, other=110):
     if other is not None:
         d2['Current Space'] = {'id64': other}
     put(root / 'displays.json', json.dumps([{'Display Identifier': 'D1', 'Current Space': {'id64': shown}, 'Spaces': spaces}, d2]))
+
+
+def started_event(fd, timeout=15):
+    """Reads a guard's stdout, the pipe `fd`, until its start event (guarding) or an error, and returns which; then
+    stops reading."""
+    data, deadline = b'', time.monotonic() + timeout
+    while True:
+        for line in data.split(b'\n')[:-1]:
+            event = json.loads(line).get('event')
+            if event in ('guarding', 'error'):
+                return event
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([fd], [], [], left)[0]:
+            raise AssertionError('no start within %s s; got %r' % (timeout, data))
+        chunk = os.read(fd, 1 << 16)
+        if not chunk:
+            raise AssertionError('the output ended; got %r' % data)
+        data += chunk
+
+
+def fill_pipe(fd):
+    """Fills the pipe whose write end is `fd` to the brim (nobody reads it), then makes `fd` blocking again: the flag
+    is the open file description's, which a process given this end shares."""
+    os.set_blocking(fd, False)
+    try:
+        for size in (4096, 1):
+            while True:
+                try:
+                    os.write(fd, b' ' * size)
+                except BlockingIOError:
+                    break
+    finally:
+        os.set_blocking(fd, True)
+
 
 
 class Lines:
@@ -951,6 +986,42 @@ class Guard(unittest.TestCase):
         self.assertEqual([r['explainedBy'] for r in rows if 'explainedBy' in r], ['D2', 'tim'])
         self.assertEqual([(r['t'], r['unseenCharged']) for r in rows if 'unseenCharged' in r], [(5.6, [5.0])])
 
+    def test_each_change_a_read_finds_needs_a_space_notification_within_half_a_second(self):
+        # GR1: roblox's receipt 20261006T163321Z read Tim's display change to SkyLight Space 9 and back to 4 at two
+        # activations (3.524 and 3.644 s), polls read two more changes, and no Space notification ever came: the
+        # checks that rest on them were blind. Its poll at 4.044 s, the first more than 0.5 s after the first change,
+        # finds that change missed.
+        rows = self.decide({'front': 100, 'guardSeconds': 1800}, [
+            {'t': 3.524, 'feed': 'activation', 'changes': [{'display': None, 'space': 9}]},
+            {'t': 3.644, 'feed': 'activation', 'changes': [{'display': None, 'space': 4}]},
+            {'t': 4.0, 'feed': 'poll'},
+            {'t': 4.044, 'feed': 'poll'},
+        ])
+        self.assertEqual([r['missed'] for r in rows],
+                         [None, None, None, {'at': 3.524, 'display': None, 'space': 9, 'via': 'activation', 'sealed': False}])
+        # A notification within 0.5 s follows every change waiting, of any display; one that waits longer is missed,
+        # once per run (nothing is tracked after); at the seal a change still waiting is missed however young.
+        rows = self.decide({'front': 100, 'guardSeconds': 60}, [
+            {'t': 1.0, 'feed': 'poll', 'changes': [{'display': None, 'space': 106}]},
+            {'t': 1.2, 'feed': 'poll', 'changes': [{'display': 'D2', 'space': 111}]},
+            {'t': 1.48, 'feed': 'notification'},
+            {'t': 2.0, 'feed': 'restore', 'changes': [{'display': 'D2', 'space': 110}]},
+            {'t': 2.49, 'feed': 'poll'},
+            {'t': 2.51, 'feed': 'poll'},
+            {'t': 3.0, 'feed': 'poll', 'changes': [{'display': None, 'space': 101}]},
+            {'t': 9.0, 'feed': 'end', 'seal': True},
+        ])
+        self.assertEqual([(r['t'], r['missed'], r['waiting'], r['pending']) for r in rows], [
+            (1.0, None, 1, True), (1.2, None, 2, True), (1.48, None, 0, False), (2.0, None, 1, True), (2.49, None, 1, True),
+            (2.51, {'at': 2.0, 'display': 'D2', 'space': 110, 'via': 'restore', 'sealed': False}, 0, False),
+            (3.0, None, 0, False), (9.0, None, 0, False)])
+        rows = self.decide({'front': 100, 'guardSeconds': 60}, [
+            {'t': 1.0, 'feed': 'poll', 'changes': [{'display': None, 'space': 106}]},
+            {'t': 1.1, 'feed': 'notification'},
+            {'t': 1.2, 'feed': 'end', 'changes': [{'display': None, 'space': 101}], 'seal': True},
+        ])
+        self.assertEqual([r['missed'] for r in rows], [None, None, {'at': 1.2, 'display': None, 'space': 101, 'via': 'end', 'sealed': True}])
+
     # Reverts -----------------------------------------------------------------------------------------
 
     REVERT = {'front': 100, 'frontWindow': 42, 'frontWindowSpace': 2, 'guardSeconds': 60, 'roots': [500], 'timSpace': 2,
@@ -1559,9 +1630,10 @@ class Guard(unittest.TestCase):
 
     # The rig: the guard without a GUI ---------------------------------------------------------------------
 
-    def rig(self, windows=()):
-        """A --rig guard (--space 7) over RIG_YABAI: yabai's Spaces as rig_spaces() says, answered 0.6 s late;
-        `windows` its window list; Tim's display on Space 1. The process, its stdout lines, and its directory."""
+    def rig_argv(self, windows=()):
+        """What a --rig guard (--space 7) reads, in a directory of its own: RIG_YABAI, with yabai's Spaces as
+        rig_spaces() says, answered 0.6 s late, and `windows` its window list; Tim's display on Space 1. Its argv,
+        and the directory."""
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))
         yabai = root / 'yabai'
         yabai.write_text(RIG_YABAI % {'dir': root})
@@ -1574,13 +1646,19 @@ class Guard(unittest.TestCase):
         for w in windows:
             put(root / ('window-%d.json' % w['id']), json.dumps(w))
         show(root, 101)
-        process = subprocess.Popen([str(self.binary), '--rig', '--space', '7', '--guard-seconds', '60', '--yabai', str(yabai),
-                                    '--displays', str(root / 'displays.json'), '--summary', str(root / 'summary.json')],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        return [str(self.binary), '--rig', '--space', '7', '--guard-seconds', '60', '--yabai', str(yabai),
+                '--displays', str(root / 'displays.json'), '--summary', str(root / 'summary.json')], root
+
+    def rig(self, windows=()):
+        """A --rig guard as rig_argv() sets it up. The process, its stdout lines, and its directory; its start event
+        (guarding) is self.rig_start."""
+        argv, root = self.rig_argv(windows)
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         lines = Lines(process.stdout)
         self.addCleanup(lambda: (process.kill(), process.wait(), lines.thread.join(5), process.stdin.close(), process.stdout.close()))
         started = lines.until(lambda row: row.get('event') in ('guarding', 'error'), 15)
         self.assertEqual(started[-1]['event'], 'guarding', started)
+        self.rig_start = started[-1]
         return process, lines, root
 
     def end_rig(self, process, lines, root):
@@ -1749,6 +1827,151 @@ class Guard(unittest.TestCase):
         breaches = [r for r in result['spaceRestores'] if r['event'] == 'space-breach']
         self.assertEqual([(r['from'], r['spaceId'], r['via']) for r in breaches], [(6, 106, 'notification')])
         self.assertFalse([p for p in result['problems'] if 'after the guard sealed' in p], result['problems'])
+
+    NOT_ARRIVING = 'Space notifications are not arriving: '
+
+    def not_arriving(self, problems):
+        return [p for p in problems if p.startswith(self.NOT_ARRIVING)]
+
+    def test_a_change_a_read_finds_with_no_space_notification_within_half_a_second_fails_the_check(self):
+        # GR1 (roblox's receipt 20261006T163321Z): activations and polls read four changes of Tim's display and no
+        # Space notification ever came, so the checks that rest on them (space-unseen, decision A) failed open. A
+        # change of any display that a read finds must be followed by a notification within 0.5 s: here the poll reads
+        # the change and the rig sends none, so the guard records the problem as it happens, once.
+        cases = [
+            ('tims', 106, 110, "a change to Space 6 at {} s after launch (Tim's display, read by poll)"),
+            ('other', 101, 111, 'a change to a Space yabai did not list (SkyLight id 111) at {} s after launch (display D2, read by poll)'),
+        ]
+        for name, shown, other, change in cases:
+            with self.subTest(display=name):
+                process, lines, root = self.rig()
+                self.send(process, 'theft')
+                time.sleep(0.15)
+                began = time.monotonic()
+                show(root, shown, other=other)
+                seen = lines.until(lambda row: row.get('event') == 'problem' and row['message'].startswith(self.NOT_ARRIVING), 5)
+                self.assertGreater(time.monotonic() - began, 0.5, 'a change is missed only after it has waited 0.5 s')
+                message = seen[-1]['message']
+                at = message.split(' at ', 1)[1].split(' s after launch', 1)[0]
+                self.assertRegex(at, r'^\d+\.\d{3}$')
+                self.assertEqual(message, self.NOT_ARRIVING + change.format(at) +
+                                 ' got none within 0.5 s, so the guard cannot check for unseen excursions')
+                self.send(process, 'back')
+                show(root, 101, other=other)
+                self.send(process, 'notify')
+                time.sleep(0.3)
+                _, result = self.end_rig(process, lines, root)
+                self.assertEqual(self.not_arriving(result['problems']), [message])
+
+    def test_a_space_notification_within_half_a_second_of_a_change_a_read_found_is_no_problem(self):
+        # GR1: the poll reads the change to Space 6 at once and macOS's notification comes 0.2 s later (a sleep here can
+        # run 0.1 s long or more); the change back comes with its notification.
+        process, lines, root = self.rig()
+        self.send(process, 'theft')
+        time.sleep(0.15)
+        show(root, 106)
+        time.sleep(0.2)
+        self.send(process, 'notify')
+        time.sleep(0.15)
+        self.send(process, 'back')
+        show(root, 101)
+        self.send(process, 'notify')
+        time.sleep(0.3)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual([(h['spaceId'], h['via']) for h in result['spaceHistory']][:2], [(101, 'baseline'), (106, 'poll')])
+        self.assertEqual(result['problems'], [])
+
+    def test_the_end_waits_for_a_notification_on_its_way_and_a_change_still_waiting_at_the_seal_fails_closed(self):
+        # GR1 at the guard's end: the poll reads the change to Space 6, the guard's end begins at once, and the
+        # notification comes 0.15 s into the end, while the end waits for it (up to 0.5 s, the poll still running): no
+        # problem. (The test waits for the poll's read itself, not a sleep: a sleep here can run 0.1 s long or more.)
+        process, lines, root = self.rig()
+        self.send(process, 'theft')
+        time.sleep(0.15)
+        show(root, 106)
+        read = lines.until(lambda row: row.get('event') == 'display-space' and row.get('spaceId') == 106, 5)
+        self.assertEqual(read[-1]['via'], 'poll')
+        self.send(process, 'end')
+        time.sleep(0.15)
+        self.send(process, 'notify')
+        seen = read + lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        self.assertEqual(process.wait(10), 0)
+        result = json.loads((root / 'summary.json').read_text())
+        self.assertEqual(len([e for e in seen if e.get('event') == 'display-space' and e.get('via') == 'notification']), 1, seen)
+        self.assertEqual(self.not_arriving(result['problems']), [])
+        # Outside any theft window nothing reads Tim's display until the seal: the change it finds there can get no
+        # notification before the records are sealed, so it fails closed, however young.
+        process, lines, root = self.rig()
+        show(root, 106)
+        time.sleep(0.1)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual([(h['spaceId'], h['via']) for h in result['spaceHistory']], [(101, 'baseline'), (106, 'end')])
+        missing = self.not_arriving(result['problems'])
+        self.assertEqual(len(missing), 1, result['problems'])
+        self.assertRegex(missing[0], r"^Space notifications are not arriving: a change to Space 6 at \d+\.\d{3} s after launch "
+                                     r"\(Tim's display, read by end\) got none before the guard sealed its records, so the guard "
+                                     r"cannot check for unseen excursions$")
+
+    def test_the_rig_runs_without_an_appkit_app(self):
+        # GR1: the live guard becomes an AppKit app that is never activated (startAppKit, after its GUI-session check
+        # and before its observers) and its start event names the activation policy; the rig, which runs without a
+        # GUI session, skips that and records none.
+        process, lines, root = self.rig()
+        self.assertIn('activationPolicy', self.rig_start)
+        self.assertIsNone(self.rig_start['activationPolicy'])
+        self.end_rig(process, lines, root)
+
+    def test_an_objective_c_exception_ends_the_guard_at_once_as_a_failure(self):
+        # GR1-F1: AppKit's loop would log an Objective-C exception it catches and go on, unless the
+        # NSApplicationCrashOnExceptions default, which a preference or an argument can set, says crash. The live guard
+        # ends at once on every exception: its own app (GuardApplication) on those AppKit's loop hands to
+        # reportException, the uncaught-exception handler on every other, both through exceptionEnds. The rig has no
+        # AppKit loop (it runs without a GUI session), so this shows the handler and the end exceptionEnds makes (an
+        # error event, nothing after, no summary, exit 2) for an exception raised on main that nothing catches. It
+        # does not show that AppKit's loop hands what it catches to GuardApplication: that needs a GUI session.
+        process, lines, root = self.rig()
+        self.send(process, 'raise')
+        seen = lines.until(lambda row: row.get('event') == 'error', 10)
+        self.assertEqual(seen[-1]['message'], 'an Objective-C exception that nothing caught (GuiLaunchRigException: raised by the rig) '
+                                              'ended the guard at once: its records are incomplete')
+        self.assertEqual(process.wait(10), 2)
+        self.assertIsNone(lines.rows.get(timeout=5), 'nothing is printed after the error')
+        self.assertFalse((root / 'summary.json').exists())
+
+    def test_an_objective_c_exception_ends_the_guard_within_a_second_though_nobody_drains_its_output(self):
+        # GR1-F2: the end on an exception cannot hang on the guard's output. Its stdout (then its stderr too) is a pipe
+        # nobody reads, filled to the brim by the test (through its own copy of the write end) while the rig is idle
+        # after its start; then the rig raises an exception nothing catches. The guard must exit 2 within 1 s: its
+        # error event and stderr line are best-effort (one write each, made only if the pipe can take it at once), and
+        # a watchdog it arms first ends it after 0.5 s whatever blocks. 67b2e27's guard blocks in its write to stdout,
+        # or, with stderr full, in CoreFoundation's own report of the exception before its handler runs. The rig has no
+        # AppKit loop, so this is the uncaught path; GuardApplication.reportException calls the same exceptionEnds.
+        for stalled in (('stdout',), ('stdout', 'stderr')):
+            with self.subTest(stalled=stalled):
+                argv, root = self.rig_argv()
+                out_r, out_w = os.pipe()
+                err_r, err_w = os.pipe()
+                process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out_w, stderr=err_w)
+                self.addCleanup(lambda p=process, fds=(out_r, out_w, err_r, err_w): (
+                    p.kill(), p.wait(), p.stdin.close(), [os.close(fd) for fd in fds]))
+                self.assertEqual(started_event(out_r), 'guarding')
+                fill_pipe(out_w)
+                if 'stderr' in stalled:
+                    fill_pipe(err_w)
+                began = time.monotonic()
+                process.stdin.write(b'raise\n')
+                process.stdin.flush()
+                try:
+                    code = process.wait(5)
+                except subprocess.TimeoutExpired:
+                    self.fail('the guard had not exited 5 s after the exception')
+                self.assertEqual(code, 2)
+                self.assertLess(time.monotonic() - began, 1.0)
+                self.assertFalse((root / 'summary.json').exists())
+                if 'stderr' not in stalled:
+                    os.set_blocking(err_r, False)
+                    self.assertIn(b'gui-launch-guard: an Objective-C exception that nothing caught (GuiLaunchRigException: raised by the rig) '
+                                  b'ended the guard at once', os.read(err_r, 1 << 16))
 
     def test_a_tree_window_whose_owner_yabai_does_not_name_stays_unknown_and_fails_the_check(self):
         # GP2: windows 9003 (on Space 6) and 9004 (no Space) are the tree's in yabai's list, but its answer about each
