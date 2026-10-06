@@ -7,6 +7,20 @@ vim.o.shiftwidth = 2
 vim.o.swapfile = false
 vim.o.wrap = false
 vim.o.clipboard = "unnamedplus"
+-- Over SSH the machine's own clipboard (pbcopy) is the remote one. Yank through OSC 52 so the
+-- terminal you sit at (Ghostty, or herdr's client, which forwards it) sets your local clipboard.
+-- Paste from nvim's own register: OSC 52 reads would make the terminal prompt or hang.
+if vim.env.SSH_TTY or vim.env.SSH_CONNECTION then
+  local osc52 = require "vim.ui.clipboard.osc52"
+  local function paste()
+    return { vim.fn.split(vim.fn.getreg "", "\n"), vim.fn.getregtype "" }
+  end
+  vim.g.clipboard = {
+    name = "OSC 52",
+    copy = { ["+"] = osc52.copy "+", ["*"] = osc52.copy "*" },
+    paste = { ["+"] = paste, ["*"] = paste },
+  }
+end
 vim.o.relativenumber = true
 vim.o.number = true
 vim.o.signcolumn = "yes"
