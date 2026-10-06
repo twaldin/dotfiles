@@ -71,7 +71,10 @@ RULES = {
     "windowserver_hot": {"msg": "WindowServer {windowserver_cpu:.0f}% CPU (>60%)", "streak": 3},
     "cpu_saturated": {"msg": "CPU idle {cpu_idle:.0f}% (<15%)", "streak": 3},
     "colorsync_ratchet": {"msg": "ColorSync rebuilds {cs_profiles:.0f} display profiles/s ({cs_requests:.1f} requests/s) on WindowServer pid {ws_pid}, above its alert level of {cs_ack_level:.1f}/s: virtual-display changes are ratcheting WindowServer again (it crashed at ~46/s on 09-29); sky-lead asked to be told", "streak": 3},
+    # Streak counted per omp pid (SPIN_RUNS) inside evaluate(), so the rule itself needs one run.
+    "omp_spin": {"msg": "omp {spin_pid} ({spin_pane}, {spin_project}) used {spin_cpu:.0f}% CPU itself in each of the last {spin_runs} runs; herdr status {spin_status}; kernel time {spin_sys}. A spinning omp burns CPU whatever herdr shows, and only a root sample sees it; ask its owner before restarting it", "streak": 1},
 }
+SPIN_CPU, SPIN_RUNS = 100.0, 5
 
 
 def run(cmd, timeout=60):
@@ -165,6 +168,13 @@ def evaluate(c, fs, state, now, cs=None, ws=None):
         return h[-1][1] - old[-1][1] if h else 0
     hot = [a for a in agents if a["mem_mb"] > 6144 or (a["mem_mb"] > 3072 and growth(a["pid"]) > 1024)]
     grow = max(hot, key=lambda a: a["mem_mb"], default=None)
+    # Consecutive runs (~2 min apart) in which each omp's own CPU, from census's root interval sample,
+    # exceeded SPIN_CPU. canvas's omp ran at ~400%, mostly kernel time, for 95 min on 10-06 while it
+    # looked idle; unprivileged ps/top in agent panes showed 0.5-10%.
+    spin = state.get("spin", {})
+    spin = {str(a["pid"]): spin.get(str(a["pid"]), 0) + 1 for a in agents if (a.get("cpu") or 0) > SPIN_CPU}
+    state["spin"] = spin
+    spinner = max((a for a in agents if spin.get(str(a["pid"]), 0) >= SPIN_RUNS), key=lambda a: a["cpu"], default=None)
     # Alert level for ColorSync profile builds/s: 5 on a WindowServer nobody acknowledged, else the
     # acknowledged level + 3. An acknowledgement from before a WindowServer restart no longer applies.
     ack = state.get("cs_ack") or {}
@@ -201,6 +211,13 @@ def evaluate(c, fs, state, now, cs=None, ws=None):
         "cmprs_top_name": (c.get("top_compressed") or [{}])[0].get("name", "-"),
         "cmprs_top_pid": (c.get("top_compressed") or [{}])[0].get("pid"),
         "cmprs_top_mb": (c.get("top_compressed") or [{}])[0].get("cmprs_mb", 0),
+        "spin_pid": spinner["pid"] if spinner else None,
+        "spin_pane": spinner["pane"] if spinner else None,
+        "spin_project": spinner["project"] if spinner else None,
+        "spin_cpu": spinner["cpu"] if spinner else 0,
+        "spin_runs": spin[str(spinner["pid"])] if spinner else 0,
+        "spin_status": "-",
+        "spin_sys": "-",
     }
     tripped = {
         "memory_free_low": v["free_pct"] is not None and v["free_pct"] < 20,
@@ -233,6 +250,7 @@ def evaluate(c, fs, state, now, cs=None, ws=None):
         # from 5/s. A rise-over-recent-low rule false-alarmed at 16:05 on 09-29, when saturated throughput
         # dipped to 26/s once.
         "colorsync_ratchet": cs is not None and ws is not None and cs["profiles_ps"] > cs_ack_level,
+        "omp_spin": spinner is not None,
     }
     fire = []
     for rule, hit in tripped.items():
@@ -242,6 +260,31 @@ def evaluate(c, fs, state, now, cs=None, ws=None):
         if hit and streak >= RULES[rule]["streak"] and (last is None or now - last >= COOLDOWN_S):
             fire.append(rule)
     return v, fire
+
+
+def spin_detail(pid, pane):
+    """herdr's status for the spinning omp's pane, and its kernel share of CPU time over 2 s (root ps:
+    an agent pane's own ps cannot read other users' processes reliably)."""
+    status = "unknown"
+    try:
+        out = run([os.path.join(BIN, "herdr"), "agent", "list"], timeout=20)
+        status = next((a.get("agent_status") or "none" for a in json.loads(out)["result"]["agents"]
+                       if a.get("pane_id") == pane), "not in herdr")
+    except (ValueError, KeyError, TypeError):
+        pass
+
+    def times():
+        out = run(["sudo", "-n", "ps", "-o", "utime=,stime=", "-p", str(pid)], timeout=20).split()
+        secs = lambda t: sum(float(x) * 60 ** i for i, x in enumerate(reversed(t.split(":"))))
+        return (secs(out[0]), secs(out[1])) if len(out) == 2 else None
+    a = times()
+    time.sleep(2)
+    b = times()
+    if a and b and (b[0] - a[0]) + (b[1] - a[1]) > 0:
+        sys_share = f"{100 * (b[1] - a[1]) / ((b[0] - a[0]) + (b[1] - a[1])):.0f}% of its CPU over 2 s"
+    else:
+        sys_share = "n/a (no root ps sample)"
+    return status, sys_share
 
 
 def shepherd_pane():
@@ -588,6 +631,8 @@ def main():
                 "fsevents": fs, "colorsync": cs, "fired": fire, **({"broker_clients": broker} if broker else {}),
                 **({"patch": patch} if patch else {})})
     if fire and not a.no_alert:
+        if "omp_spin" in fire:
+            v["spin_status"], v["spin_sys"] = spin_detail(v["spin_pid"], v["spin_pane"])
         notify(census, fs, v, fire, a.dry_run)
         if not a.dry_run:
             for r in fire:

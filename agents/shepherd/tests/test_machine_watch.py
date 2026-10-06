@@ -235,6 +235,34 @@ class RealRuns(MachineWatchCase):
             self.assertEqual(self.records()[-1]['fired'], [])
         self.assertFalse((self.state_dir / 'machine-watch.alerts').exists())
 
+    def test_an_omp_over_100_percent_for_five_runs_in_a_row_alerts_once_with_its_herdr_status_and_kernel_share(self):
+        # omp_spin: canvas's omp ran ~400% CPU, mostly kernel time, for 95 min on 10-06 while it looked idle.
+        write_exec(self.bin / 'herdr', LOGGING.format(
+            body='''echo '{"result": {"agents": [{"pane_id": "w1:p2", "agent_status": "idle"}]}}' '''))
+        # Root ps reports 1 s user + 3 s system between its two samples: a 75% kernel share.
+        count = self.home / 'ps-count'
+        write_exec(Path(self.env['PATH'].split(':')[0]) / 'sudo', LOGGING.format(body=f'''
+[ "$*" = "-n ps -o utime=,stime= -p 301" ] || exit 1
+n=$(cat "{count}" 2>/dev/null || echo 0); echo $((n + 1)) > "{count}"
+[ "$n" = 0 ] && echo "0:10.00 0:20.00" || echo "0:11.00 0:23.00"'''))
+
+        def run(pid, cpu):
+            report = census()
+            report['agents'][0].update(pid=pid, cpu=cpu)
+            result = self.watch(report=report)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return self.records()[-1]['fired']
+        # 100% is not over; a dip resets; a new pid (the old omp restarted) starts its own count.
+        fired = [run(300, cpu) for cpu in (150, 150, 150, 150, 100, 150, 150, 150, 150)]
+        fired += [run(301, 150) for _ in range(4)]
+        self.assertEqual(fired, [[]] * 13)
+        self.assertEqual(run(301, 420.0), ['omp_spin'])
+        self.assertEqual(run(301, 420.0), [], 'one alert per hour')
+        queued = [json.loads(line) for line in (self.state_dir / 'machine-watch.alerts').read_text().splitlines()]
+        self.assertEqual(len(queued), 1)
+        self.assertIn('omp 301 (w1:p2, proj) used 420% CPU itself in each of the last 5 runs; herdr status idle; '
+                      'kernel time 75% of its CPU over 2 s.', queued[0]['text'])
+
     def configure_shepherd(self, agent_msg_exit, name='w1:shepherd'):
         pane = self.home / '.config/machine-shepherd/pane'
         pane.parent.mkdir(parents=True)
