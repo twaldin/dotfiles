@@ -1,11 +1,11 @@
-"""Smoke test for bin/omp-update: the chief-of-staff restart decisions (`omp-update cos`), the quiet-window
-check, the extension-fingerprint pins that decide whether a pane is due a restart, the checkpoint summary line, and
-the easl tiles (the switch file, tile restarts and their gates, roll, `migrate`).
+"""Smoke test for bin/omp-update: the quiet-window check, the extension-fingerprint pins that decide whether a
+pane is due a restart, the checkpoint summary line, and the easl tiles (the switch file, tile restarts and their
+gates, roll, `migrate`).
 
 The script is loaded as a module with HOME = a temp dir, so every path it derives (state, config, the quiet
 book, HERDR, the easl switch) is sandboxed. What it reaches outside itself is replaced by one fake `World`: herdr's
-JSON, the easl CLI (FakeEasl), the process table, the start script (never run) and the clock (sleeps advance it;
-nothing really waits). Config, state files, the quiet book, the run lock (a real flock), idle_gate, live_children,
+JSON, the easl CLI (FakeEasl), the process table and the clock (sleeps advance it; nothing really waits). Config,
+state files, the quiet book, the run lock (a real flock), idle_gate, live_children,
 quiet_block and the session-size check run for real. A few tests run the script itself, or the easl helpers,
 against real processes.
 """
@@ -14,12 +14,10 @@ import contextlib
 import datetime as dt
 import importlib.machinery
 import importlib.util
-import fcntl
 import io
 import json
 import os
 import shutil
-import signal
 import shlex
 import subprocess
 import sys
@@ -157,20 +155,16 @@ class FakeEasl:
 
 
 class World:
-    """herdr, ps, the start script and the clock, as seen from omp-update."""
+    """herdr, ps and the clock, as seen from omp-update."""
     PID = 500000  # above any real pid, so nothing here can be the test process's own ancestry
 
     def __init__(self, mod, root):
         self.mod, self.root = mod, root
         self.agents, self.process_info, self.procs, self.pane_text = [], {}, {}, {}
-        self.list_error = None
-        self.status_at_recheck = None
-        self.start_script = os.path.expanduser('~/dotfiles/agents/cos/start-cos.sh')
-        self.starts, self.start_rc, self.start_err, self.start_revives = [], 0, '', True
         self.herdr_calls, self.events = [], []  # events: the order of mutating herdr and every easl call
         self.typed, self.closed, self.agent_starts = [], [], []  # `/exit` prompts, closed panes, `agent start` argv
         self.agent_start_rc, self.agent_start_err = 0, ''
-        self.shell_pid = self.omp_pid = None
+        self.omp_pid = None
         self.next_pid = self.PID
         self.sessions = root / 'sessions'
         self.sessions.mkdir(exist_ok=True)
@@ -198,7 +192,7 @@ class World:
                                    'foreground_processes': [{'pid': omp, 'argv': cmd.split()}]}
         if with_omp:
             self.procs[omp] = {'ppid': shell, 'age_s': age_s, 'cmd': cmd}
-        self.shell_pid, self.omp_pid, self.pane, self.agent, self.session = shell, omp, pane, agent, session
+        self.omp_pid, self.pane, self.agent, self.session = omp, pane, agent, session
         return agent
 
     def place_tile(self, name='lead', tile='obj_lead', state='idle', seen=True, restored=False, focused=False,
@@ -220,41 +214,21 @@ class World:
         self.easl.agents.append(agent)
         return agent
 
-    def place_cos(self, **kw):
-        return self.place_agent('cos', kw.pop('pane', 'w1:p1'), **kw)
-
     def add_child(self, parent, cmd):
         pid = self.pid()
         self.procs[pid] = {'ppid': parent, 'age_s': 60, 'cmd': cmd}
         return pid
-
-    def omp_exits(self):
-        del self.procs[self.omp_pid]
-
-    def pane_closes(self):
-        self.agents.clear()
-
-    def revive(self):
-        """What start-cos.sh --replace does: a fresh cos in a new pane, the old one gone."""
-        for pid in [self.omp_pid, self.shell_pid]:
-            self.procs.pop(pid, None)
-        self.agents.clear()
-        self.place_cos(pane='w1:p9')
 
     # -- the seams omp-update calls
 
     def herdr(self, *args, timeout=60):
         self.herdr_calls.append(args)
         if args[:2] == ('agent', 'list'):
-            if self.list_error:
-                return {'error': self.list_error}
             return {'result': {'agents': list(self.agents)}}
         if args[:2] == ('agent', 'get'):
             agent = next((a for a in self.agents if args[2] in (a['name'], a['pane_id'])), None)
             if agent is None:
                 return {'error': 'no such agent'}
-            if self.status_at_recheck:
-                agent = {**agent, 'agent_status': self.status_at_recheck}
             return {'result': {'agent': agent}}
         if args[:2] == ('pane', 'process-info'):
             return {'result': {'process_info': self.process_info.get(args[3], {})}}
@@ -289,11 +263,6 @@ class World:
             return self.agent_start(cmd)
         if cmd[0] == self.easl.cli:
             return self.easl.run(cmd[1:])
-        if cmd[0] == self.start_script:
-            self.starts.append(cmd[1:])
-            if self.start_rc == 0 and self.start_revives:
-                self.revive()
-            return subprocess.CompletedProcess(cmd, self.start_rc, 'started cos', self.start_err)
         raise AssertionError(f'unexpected command {cmd}')
 
     def ps_table(self):
@@ -329,11 +298,6 @@ class Sandbox(unittest.TestCase):
             self.book_path.unlink()
         return self.world
 
-    def configure(self, **cos):
-        os.makedirs(os.path.dirname(self.mod.CONFIG), exist_ok=True)
-        with open(self.mod.CONFIG, 'w') as f:
-            json.dump({'cos': {'enabled': True, **cos}}, f)
-
     def book(self, *windows):
         """windows: (start, end) minutes from now."""
         self.book_path.parent.mkdir(parents=True, exist_ok=True)
@@ -344,254 +308,6 @@ class Sandbox(unittest.TestCase):
     def actions(self):
         path = Path(self.mod.STATE) / 'actions.jsonl'
         return [json.loads(ln) for ln in path.read_text().splitlines()] if path.exists() else []
-
-    def cos_state(self):
-        path = Path(self.mod.STATE) / 'cos.json'
-        return json.loads(path.read_text()) if path.exists() else None
-
-
-class Cos(Sandbox):
-    def cos(self, dry_run=False):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.mod.main_cos(argparse.Namespace(dry_run=dry_run))
-        lines = [ln for ln in out.getvalue().splitlines() if ln.startswith('COS ')]
-        self.assertEqual(len(lines), 1, out.getvalue())
-        return json.loads(lines[0][4:])
-
-    def assert_restarted(self, res):
-        self.assertEqual(res['action'], 'restarted fresh', res)
-        self.assertEqual(self.world.starts, [['--replace']])
-        self.assertEqual(res['new_pane'], 'w1:p9')
-        self.assertNotEqual(res['new_pid'], res.get('pid'))
-
-    # -- disabled
-
-    def test_a_host_without_cos_enabled_never_looks_at_herdr_or_starts_one(self):
-        # No config.json: the defaults are written and say cos is off, however dead cos looks.
-        res = self.cos()
-        self.assertEqual(res['action'], 'none: disabled in config')
-        self.assertFalse(json.loads(Path(self.mod.CONFIG).read_text())['cos']['enabled'])
-        self.configure(enabled=False)
-        self.assertEqual(self.cos()['action'], 'none: disabled in config')
-        self.assertEqual(self.world.herdr_calls, [])
-        self.assertEqual(self.world.starts, [])
-        self.assertIsNone(self.cos_state())
-        self.assertEqual(self.actions(), [])
-
-    # -- dead cos: confirm, then restart
-
-    def confirm_then_restart(self, reason):
-        self.configure(dead_confirm_s=120)
-        first = self.cos()
-        self.assertTrue(first['action'].startswith(f'wait: {reason}, first seen 0 s ago'), first)
-        self.clock.advance(100)
-        second = self.cos()
-        self.assertTrue(second['action'].startswith(f'wait: {reason}, first seen 100 s ago'), second)
-        self.assertEqual(self.world.starts, [], 'dead for 100 s of 120: not yet')
-        self.clock.advance(30)
-        res = self.cos()
-        self.assert_restarted(res)
-        self.assertEqual(res['reason'], reason)
-        self.assertEqual(self.world.starts[0], ['--replace'])
-        self.assertEqual([(a['kind'], a['host'], a['action']) for a in self.actions()],
-                         [('cos', 'home', 'restarted fresh')])
-        again = self.cos()  # the fresh cos is up: nothing more to do
-        self.assertEqual(again['action'], 'none: alive')
-        self.assertEqual(len(self.world.starts), 1)
-        self.assertNotIn('dead_since', self.cos_state())
-
-    def test_a_missing_cos_agent_is_restarted_only_after_it_stays_gone_for_dead_confirm_s(self):
-        self.confirm_then_restart('pane gone')
-
-    def test_a_cos_whose_omp_exited_is_restarted_only_after_it_stays_dead_for_dead_confirm_s(self):
-        self.world.place_cos()
-        self.world.omp_exits()
-        self.confirm_then_restart('omp exited')
-
-    def test_a_cos_that_comes_back_resets_the_confirmation(self):
-        self.configure(dead_confirm_s=120)
-        self.assertTrue(self.cos()['action'].startswith('wait: pane gone'))
-        self.clock.advance(100)
-        self.world.place_cos()  # someone else's --replace finished
-        self.assertEqual(self.cos()['action'], 'none: alive')
-        self.assertNotIn('dead_since', self.cos_state())
-        self.clock.advance(100)
-        self.world.pane_closes()  # 200 s after the first sighting, but a new one
-        res = self.cos()
-        self.assertTrue(res['action'].startswith('wait: pane gone, first seen 0 s ago'), res)
-        self.assertEqual(self.world.starts, [])
-
-    def test_the_start_script_that_runs_is_the_configured_one_with_replace(self):
-        self.configure(dead_confirm_s=0, start='~/bin/my-cos-start')
-        self.world.start_script = os.path.expanduser('~/bin/my-cos-start')
-        self.assert_restarted(self.cos())  # sh() raises on any other command
-
-    # -- quiet windows
-
-    def test_a_dead_cos_is_not_restarted_during_a_quiet_window_or_within_its_guard(self):
-        for start, end, blocked in ((-5, 60, True), (20, 50, True), (45, 75, False), (-60, -1, False)):
-            with self.subTest(window=(start, end)):
-                self.new_world()
-                self.configure(dead_confirm_s=120)
-                self.cos()
-                self.clock.advance(130)  # confirmed dead
-                self.book((start, end))
-                res = self.cos()
-                if blocked:
-                    self.assertTrue(res['action'].startswith('skip: quiet window w1 '), res)
-                    self.assertEqual(self.world.starts, [])
-                else:
-                    self.assert_restarted(res)
-
-    def test_a_dead_cos_restarts_once_the_quiet_window_is_gone(self):
-        self.configure(dead_confirm_s=120)
-        self.cos()
-        self.clock.advance(130)
-        self.book((-5, 60))
-        self.assertTrue(self.cos()['action'].startswith('skip: quiet window'))
-        self.clock.advance(60)
-        self.book()  # window removed
-        self.assert_restarted(self.cos())
-
-    # -- oversized session: only through idle_gate
-
-    def oversized(self, **kw):
-        self.configure(max_session_mb=100)
-        self.world.place_cos(session_mb=150, **kw)
-        return self.world
-
-    def test_an_oversized_session_restarts_fresh_when_every_gate_passes(self):
-        self.oversized()
-        old_session, old_pid = self.world.session.name, self.world.omp_pid
-        res = self.cos()
-        self.assert_restarted(res)
-        self.assertEqual((res['reason'], res['session_mb'], res['pid'], res['old_session']),
-                         ('session 150 MB', 150, old_pid, old_session))
-        self.assertEqual(self.actions()[-1]['reason'], 'session 150 MB')
-
-    def test_a_session_under_the_limit_is_left_alone_and_the_limit_comes_from_config(self):
-        self.configure(max_session_mb=100)
-        self.world.place_cos(session_mb=60)
-        self.assertEqual(self.cos()['action'], 'none: alive')
-        self.assertEqual(self.world.starts, [])
-        self.configure(max_session_mb=50)
-        self.assert_restarted(self.cos())
-
-    def test_an_oversized_session_waits_for_each_gate(self):
-        def draft(w):
-            w.pane_text[w.pane] = DRAFT_IN_EDITOR
-
-        def runs_this_job(w):
-            w.procs[os.getpid()] = {'ppid': w.omp_pid, 'age_s': 5, 'cmd': 'omp-update cos'}
-
-        def worker_running_a_job(w):
-            worker = w.add_child(w.omp_pid, '/Users/x/.bun/bin/omp __omp_worker_python')
-            w.add_child(worker, '/usr/bin/python3 render_everything.py')
-
-        cases = [
-            ('working', lambda w: w.agent.update(agent_status='working'), 'skip: working'),
-            ('blocked', lambda w: w.agent.update(agent_status='blocked'), 'skip: blocked'),
-            ('focused', lambda w: w.agent.update(focused=True), 'skip: focused by Tim'),
-            ('child build', lambda w: w.add_child(w.omp_pid, '/usr/bin/cargo build --release'),
-             'skip: live child work'),
-            ('job under an omp worker', worker_running_a_job, 'skip: live child work'),
-            ('draft typed', draft, 'skip: text waiting in the editor'),
-            ('busy again at the recheck', lambda w: setattr(w, 'status_at_recheck', 'working'), 'skip: working'),
-            ('runs this job', runs_this_job, 'skip: runs this job'),
-        ]
-        for label, setup, expected in cases:
-            with self.subTest(gate=label):
-                self.new_world()
-                world = self.oversized()
-                setup(world)
-                res = self.cos()
-                self.assertEqual(res['action'], expected, res)
-                self.assertEqual(res['reason'], 'session 150 MB')
-                self.assertEqual(world.starts, [])
-                self.assertEqual(self.actions(), [], 'a skip is not logged as an action')
-        # The skipped cos is retried at the next tick, and goes once the gate clears.
-        self.new_world()
-        world = self.oversized()
-        build = world.add_child(world.omp_pid, '/usr/bin/cargo build --release')
-        res = self.cos()
-        self.assertEqual(res['action'], 'skip: live child work')
-        self.assertIn('cargo build', res['children'][0])
-        del world.procs[build]
-        self.assert_restarted(self.cos())
-
-    def test_omps_own_workers_and_language_servers_do_not_count_as_child_work(self):
-        world = self.oversized()
-        worker = world.add_child(world.omp_pid, '/Users/x/.bun/bin/omp __omp_worker_daemon_broker')
-        world.add_child(worker, '/usr/local/bin/pyright-langserver --stdio')
-        world.add_child(world.omp_pid, '/usr/bin/node /x/typescript/lib/tsserver.js')
-        self.assert_restarted(self.cos())
-
-    def test_a_dry_run_says_what_it_would_do_and_does_nothing(self):
-        self.oversized()
-        res = self.cos(dry_run=True)
-        self.assertEqual(res['action'],
-                         'would restart fresh (session 150 MB): ~/dotfiles/agents/cos/start-cos.sh --replace')
-        self.assertEqual(self.world.starts, [])
-        self.assertIsNone(self.cos_state())
-        self.assertEqual([(a['kind'], a['dry_run']) for a in self.actions()], [('cos', True)])
-
-    # -- failures
-
-    def test_a_start_script_that_fails_is_reported_as_restart_failed_and_retried_next_tick(self):
-        self.configure(dead_confirm_s=120)
-        self.cos()
-        self.clock.advance(130)
-        self.world.start_rc, self.world.start_err = 1, 'start-cos.sh: herdr not running'
-        res = self.cos()
-        self.assertEqual(res['action'], 'restart failed')
-        self.assertEqual(res['rc'], 1)
-        self.assertIn('herdr not running', res['out'])
-        self.assertEqual(self.world.starts, [['--replace']])
-        self.assertEqual([a['action'] for a in self.actions()], ['restart failed'])
-        # Still dead, and still confirmed: the next tick tries again at once.
-        self.world.start_rc, self.world.start_err = 0, ''
-        self.assertEqual(self.cos()['action'], 'restarted fresh')
-        self.assertEqual(self.world.starts, [['--replace'], ['--replace']])
-
-    def test_a_start_script_that_exits_ok_but_brings_no_cos_back_is_restart_failed(self):
-        self.oversized()
-        self.world.start_revives = False
-        res = self.cos()
-        self.assertEqual(res['action'], 'restart failed')
-        self.assertEqual(res['rc'], 0)
-        self.assertEqual(self.world.starts, [['--replace']])
-        self.assertEqual(self.actions()[-1]['action'], 'restart failed')
-
-    # -- things that must not look like a dead cos
-
-    def test_a_herdr_outage_is_not_a_dead_cos(self):
-        self.configure(dead_confirm_s=120)
-        self.cos()
-        self.clock.advance(500)
-        self.world.list_error = 'herdr: could not connect to the server'
-        res = self.cos()
-        self.assertTrue(res['action'].startswith('skip: herdr agent list failed'), res)
-        self.assertIn('could not connect', res['action'])
-        self.assertEqual(self.world.starts, [])
-
-    def test_a_pane_herdr_has_no_process_info_for_is_not_restarted(self):
-        self.configure(dead_confirm_s=0)
-        self.world.place_cos()
-        self.world.process_info[self.world.pane] = {}
-        self.assertEqual(self.cos()['action'], 'skip: no process info for the pane')
-        self.assertEqual(self.world.starts, [])
-
-    def test_a_held_run_lock_means_a_daily_run_or_roll_is_working_so_cos_waits(self):
-        self.configure(dead_confirm_s=0)
-        lock_path = Path(self.mod.STATE) / 'run.lock'
-        held = open(lock_path, 'a')
-        self.addCleanup(held.close)
-        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.assertEqual(self.cos()['action'], 'skip: run.lock held (daily run or roll pass)')
-        self.assertEqual(self.world.starts, [])
-        fcntl.flock(held, fcntl.LOCK_UN)
-        self.assert_restarted(self.cos())
 
 
 class QuietBlock(Sandbox):
@@ -789,86 +505,6 @@ class SummaryLine(Sandbox):
                          'due but left: none; seats/outside herdr: 0; errors 0')
 
 
-FAKE_HERDR = '''#!@PY@
-import json, sys
-state = json.load(open('@STATE@'))
-args = sys.argv[1:]
-if args[:2] == ['agent', 'list']:
-    print(json.dumps({'result': {'agents': state['agents']}}))
-elif args[:2] == ['pane', 'process-info']:
-    print(json.dumps({'result': {'process_info': state['process_info']}}))
-else:
-    sys.exit(1)
-'''
-
-
-class CosCli(unittest.TestCase):
-    """`omp-update cos` as machine-watch runs it: the real script, real ps, a stand-in herdr in $HOME."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        self.env = {**os.environ, 'HOME': str(self.root)}
-        self.state = self.root / '.local' / 'state' / 'omp-update'
-
-    def cos(self):
-        r = subprocess.run([sys.executable, str(OMP_UPDATE), 'cos'], env=self.env, capture_output=True,
-                           text=True, timeout=60)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        (line,) = [ln for ln in r.stdout.splitlines() if ln.startswith('COS ')]
-        return json.loads(line[4:])
-
-    def test_cos_is_disabled_until_the_host_config_enables_it(self):
-        res = self.cos()
-        self.assertEqual(res['action'], 'none: disabled in config')
-        self.assertFalse(json.loads((self.root / '.config' / 'omp-update' / 'config.json').read_text())['cos']['enabled'])
-
-    def test_a_real_process_tree_is_alive_until_its_omp_exits_and_then_waits_to_confirm(self):
-        link = self.root / 'omp'
-        link.symlink_to('/bin/bash')  # ps shows `<tmp>/omp -c ...`: an interactive omp to is_agent_omp
-        pidfile = self.root / 'omp.pid'
-        shell = subprocess.Popen(['/bin/bash', '-c', f'{link} -c "sleep 300; :" & echo $! > {pidfile}; wait'],
-                                 start_new_session=True, stderr=subprocess.DEVNULL)
-        self.addCleanup(lambda: (os.killpg(shell.pid, signal.SIGKILL), shell.wait()))
-        deadline = time.time() + 10
-        while time.time() < deadline and not (pidfile.exists() and pidfile.read_text().strip()):
-            time.sleep(0.05)
-        omp_pid = int(pidfile.read_text().strip())
-        session = self.root / 'cos-session.jsonl'
-        session.write_text('{}\n')
-        (self.root / 'herdr-state.json').write_text(json.dumps({
-            'agents': [{'agent': 'omp', 'name': 'cos', 'pane_id': 'w1:p1', 'agent_status': 'idle',
-                        'agent_session': {'kind': 'path', 'value': str(session)}}],
-            'process_info': {'shell_pid': shell.pid, 'foreground_process_group_id': omp_pid,
-                             'foreground_processes': [{'pid': omp_pid, 'argv': [str(link)]}]}}))
-        herdr = self.root / '.local' / 'bin' / 'herdr'
-        herdr.parent.mkdir(parents=True)
-        herdr.write_text(FAKE_HERDR.replace('@PY@', sys.executable).replace('@STATE@', str(self.root / 'herdr-state.json')))
-        herdr.chmod(0o755)
-        marker = self.root / 'start-cos-ran'
-        start = self.root / 'start-cos.sh'
-        start.write_text(f'#!/bin/sh\necho "$@" >> {marker}\n')
-        start.chmod(0o755)
-        config = self.root / '.config' / 'omp-update'
-        config.mkdir(parents=True)
-        (config / 'config.json').write_text(json.dumps({'cos': {'enabled': True, 'start': str(start)}}))
-
-        alive = self.cos()
-        self.assertEqual((alive['action'], alive['pid'], alive['pane']), ('none: alive', omp_pid, 'w1:p1'))
-
-        os.kill(omp_pid, signal.SIGKILL)
-        for _ in range(100):  # until bash has reaped it
-            if subprocess.run(['ps', '-p', str(omp_pid)], capture_output=True).returncode != 0:
-                break
-            time.sleep(0.05)
-        dead = self.cos()
-        self.assertTrue(dead['action'].startswith('wait: omp exited, first seen 0 s ago'), dead)
-        self.assertEqual(dead['reason'], 'omp exited')
-        self.assertFalse(marker.exists(), 'not restarted on first sight')
-        self.assertIn('dead_since', json.loads((self.state / 'cos.json').read_text()))
-
-
 EASL_STUB = '''#!@PY@
 import json, sys
 open('@CALLS@', 'a').write(json.dumps(sys.argv[1:]) + '\\n')
@@ -1059,7 +695,7 @@ class TileRestart(TileSandbox):
         self.assertEqual(self.mutations(), [])
 
     def test_a_tile_named_as_a_seat_is_reported_never_restarted(self):
-        self.world.place_tile(name='cos')
+        self.world.place_tile(name='lindy-seat')
         row = self.row(self.host())
         self.assertEqual(row['action'], 'report: seat/front door (owner decides)')
         self.assertEqual(self.mutations(), [])

@@ -1,9 +1,9 @@
 """Smoke test for bin/machine-watch: records machine health, alerts the shepherd when a rule trips.
 
 HOME is a temp dir, so machine-watch's BIN is HOME/.local/bin and holds stub machine-census and
-fsevents-top (plus agent-msg where delivery is tested). omp-update is absent there, which switches
-off the chief-of-staff check. Stubs first on PATH stand in for sudo, pgrep, log (WindowServer and ColorSync
-probes), osascript and ssh; every call to them lands in $CALLS so a test can prove what was and was not run.
+fsevents-top (plus agent-msg where delivery is tested). Stubs first on PATH stand in for sudo, pgrep, log
+(WindowServer and ColorSync probes), osascript and ssh; every call to them lands in $CALLS so a test can
+prove what was and was not run.
 No remotes or broker-clients files exist unless a test makes them, so nothing reaches ssh by accident.
 An easl CLI stub lives outside PATH: only a test that writes the switch file into HOME reaches it, and it
 logs to $CALLS too.

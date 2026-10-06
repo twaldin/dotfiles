@@ -17,13 +17,8 @@ Policy (Tim, 2026-10-05, via the meta pane):
   background jobs as idle and /exit would kill them), text is waiting in its editor,
   or the pane runs this job. The restart is verified: same session file, new pid, and
   the memory before/after is logged.
-- Seats and front doors (config report_only: the chief of staff `cos`, and every omp
-  outside herdr such as the work Lindy seat): the daily run only reports them.
-- The chief of staff (home): `omp-update cos`, run by machine-watch every 5 min,
-  restarts it FRESH through ~/dotfiles/agents/cos/start-cos.sh --replace when its pane
-  is gone or its omp has exited (seen twice, dead_confirm_s apart), or when its session
-  file passes cos.max_session_mb, through the same gates as every restart (COS.md: its
-  state lives in ~/cos, so a fresh session loses nothing).
+- Seats and front doors (config report_only: `lindy-seat`, and every omp outside herdr
+  such as the work Lindy seat): the daily run only reports them.
 - launchd omp services (home: auth broker + gateway) restart through launchctl
   kickstart when their omp is older than the installed one.
 - easl tiles (home, behind ~/.config/machine-shepherd/easl.json {"enabled": true, "cli":
@@ -39,8 +34,7 @@ last-run.json; real runs also put one summary line in the shepherd checkpoint.
 
 Usage:
   omp-update run [--dry-run] [--hosts home,work,deckbox] [--only-pane w2:pXX] [--no-wait]
-  omp-update roll [--hosts home,deckbox] [--include cos] [--hours 24] [--dry-run]
-  omp-update cos [--dry-run]  # restart the chief of staff if dead or its session is too big
+  omp-update roll [--hosts home,deckbox] [--include <name>] [--hours 24] [--dry-run]
   omp-update migrate <herdr agent> [--board ~/dotfiles] [--model M] [--dry-run]
   omp-update ext-ack --since <UTC> --note <why>  # an extension change needs no restart
   omp-update target          # print the release the policy picks right now
@@ -95,20 +89,14 @@ DEFAULT_CONFIG = {
     "max_uptime_hours": 48,
     "quiet_guard_minutes": 30,
     "quiet_wait_hours": 6,
-    # Seats/front doors: the daily run only reports them (move a name to opt_in to manage
-    # it). `cos` is restarted fresh by `omp-update cos` instead; see "cos".
-    "report_only": {"names": ["cos", "chief-of-staff", "lindy-seat"], "panes": []},
+    # Seats/front doors: the daily run only reports them (move a name to opt_in to manage it).
+    "report_only": {"names": ["lindy-seat"], "panes": []},
     "opt_in": [],
     "skip_panes": [],
     # Extension changes that need no restart (e.g. a refactor that behaves the same):
     # {content fingerprint: {"since": epoch of the last change that did need one, "note"}}.
     # Written by `omp-update ext-ack`; any later, unacknowledged change re-arms the trigger.
     "extensions_pins": {},
-    # The chief of staff: `omp-update cos` restarts it fresh when its pane is gone or its
-    # omp exited, or when its session passes max_session_mb. Enabled per host (home only)
-    # in config.json, so a host without a cos never starts one.
-    "cos": {"enabled": False, "name": "cos", "start": "~/dotfiles/agents/cos/start-cos.sh",
-            "max_session_mb": 100, "dead_confirm_s": 120},
 }
 
 # Descendants of an agent's omp that a restart may end without losing work: omp's own
@@ -613,7 +601,7 @@ def restart_services(services, installed, dry, blocked, pending, errors):
 
 def idle_gate(a, pid, procs, mine, blocked, recheck=True):
     """(skip reason or None, live children) for restarting the omp `pid` in herdr agent or
-    easl tile `a` (a["tile"]). Every restart (daily run, roll, cos, migrate) passes the same
+    easl tile `a` (a["tile"]). Every restart (daily run, roll, migrate) passes the same
     gates: no quiet window now or within the guard, idle/done, not focused by Tim (he may
     start typing; /exit would race his draft), not running this job, no live child work
     (background jobs show as idle and /exit would kill them), nothing typed in its editor;
@@ -1074,118 +1062,6 @@ def main_ext_ack(args):
                             "hosts": args.hosts}) + "\n")
 
 
-def omps_under(shell, procs):
-    """Agent omp pids anywhere below a pane's shell."""
-    kids = {}
-    for p, info in procs.items():
-        kids.setdefault(info["ppid"], []).append(p)
-    found, stack = [], list(kids.get(shell, []))
-    while stack:
-        c = stack.pop()
-        if is_agent_omp(procs[c]["cmd"]):
-            found.append(c)
-        stack.extend(kids.get(c, []))
-    return found
-
-
-def main_cos(args):
-    """`omp-update cos` (machine-watch, every 5 min on home). COS.md: the shepherd restarts
-    the chief of staff fresh with start-cos.sh --replace when its pane dies or its session
-    file passes max_session_mb; its state lives in ~/cos, so nothing is handed off.
-    Dead = no herdr agent of that name, or no omp left under its pane's shell; restarted
-    only when still dead dead_confirm_s after it was first seen (someone else's --replace
-    takes seconds), and not in a quiet window. A big session restarts only through
-    idle_gate. Prints `COS <json>`; restarts and failures go to actions.jsonl."""
-    cfg = load_config()
-    cc = {**DEFAULT_CONFIG["cos"], **(cfg.get("cos") or {})}
-    name, dry = cc["name"], args.dry_run
-    res = {"name": name, "dry_run": dry}
-
-    def done(action, **kw):
-        res.update(action=action, **kw)
-        if dry or action.startswith(("restarted", "restart failed")):
-            with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
-                f.write(json.dumps({"ts": stamp(), "host": "home", "kind": "cos", **res}) + "\n")
-        print("COS " + json.dumps(res))
-
-    if not cc["enabled"]:
-        return done("none: disabled in config")
-    lock = take_lock(10)
-    if not lock:
-        return done("skip: run.lock held (daily run or roll pass)")
-    hc = cfg["hosts"]["home"]
-    blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"]) if hc.get("quiet_book") else None
-    listing = herdr("agent", "list")
-    if "result" not in listing:
-        return done(f"skip: herdr agent list failed ({listing.get('error')})")
-    a = next((x for x in listing["result"].get("agents", []) if x.get("name") == name), None)
-    procs = ps_table()
-    state_path = os.path.join(STATE, "cos.json")
-    try:
-        with open(state_path) as f:
-            state = json.load(f)
-    except (OSError, ValueError):
-        state = {}
-    reason, skip, session = None, None, None
-    if a is None:
-        reason = "pane gone"
-    else:
-        res.update(pane=a["pane_id"], status=a.get("agent_status"))
-        session = (a.get("agent_session") or {}).get("value")
-        shell = herdr("pane", "process-info", "--pane", a["pane_id"]).get("result", {}) \
-            .get("process_info", {}).get("shell_pid")
-        if not shell:
-            return done("skip: no process info for the pane")
-        omps = omps_under(shell, procs)
-        if not omps:
-            reason = "omp exited"
-        else:
-            pid = pane_omp(a["pane_id"])[0] or omps[0]
-            smb = round(os.path.getsize(session) / 1048576) if session and os.path.exists(session) else None
-            res.update(pid=pid, session_mb=smb)
-            if smb and smb > cc["max_session_mb"]:
-                reason = f"session {smb} MB"
-                skip, busy = idle_gate(a, pid, procs, ancestors(procs), blocked, recheck=not dry)
-                if busy:
-                    res["children"] = busy
-    now = time.time()
-    if reason in ("pane gone", "omp exited"):
-        first = state.setdefault("dead_since", now)
-        if now - first < cc["dead_confirm_s"]:
-            skip = f"wait: {reason}, first seen {int(now - first)} s ago; confirming"
-        elif blocked:
-            skip = f"skip: {blocked}"
-    else:
-        state.pop("dead_since", None)
-    if not dry:
-        with open(state_path + ".tmp", "w") as f:
-            json.dump(state, f)
-        os.replace(state_path + ".tmp", state_path)
-    if not reason:
-        return done("none: alive")
-    res["reason"] = reason
-    if skip:
-        return done(skip)
-    if dry:
-        return done(f"would restart fresh ({reason}): {cc['start']} --replace")
-    r = sh([os.path.expanduser(cc["start"]), "--replace"], timeout=300)
-    new, new_pid = None, None
-    for _ in range(60):
-        g = herdr("agent", "get", name).get("result", {}).get("agent")
-        new_pid = pane_omp(g["pane_id"])[0] if g else None
-        if new_pid and new_pid != res.get("pid"):
-            new = g
-            break
-        time.sleep(2)
-    if r.returncode == 0 and new:
-        state.pop("dead_since", None)
-        with open(state_path, "w") as f:
-            json.dump(state, f)
-        return done("restarted fresh", new_pane=new["pane_id"], new_pid=new_pid,
-                    old_session=os.path.basename(session or ""), start_out=r.stdout.strip()[-120:])
-    return done("restart failed", rc=r.returncode, out=(r.stderr or r.stdout).strip()[-300:])
-
-
 def drop_model(flags):
     out, skip = [], False
     for x in flags:
@@ -1346,8 +1222,6 @@ def main():
     ea.add_argument("--since", required=True, help="UTC time of the last change that DID need a restart, e.g. 2026-10-05T21:35:48Z")
     ea.add_argument("--note", required=True)
     ea.add_argument("--hosts", default="home,deckbox")
-    cp = sub.add_parser("cos", help="restart the chief of staff fresh if its pane died or its session is too big")
-    cp.add_argument("--dry-run", action="store_true")
     mp = sub.add_parser("migrate", help="move a herdr pane's omp session into an easl tile of the same name")
     mp.add_argument("name")
     mp.add_argument("--board", default="~/dotfiles", help="a directory; inside a git repo it opens the repo's board")
@@ -1363,8 +1237,6 @@ def main():
     a = ap.parse_args()
     if a.cmd == "host":
         host_main(json.loads(a.params))
-    elif a.cmd == "cos":
-        main_cos(a)
     elif a.cmd == "migrate":
         main_migrate(a)
     elif a.cmd == "roll":

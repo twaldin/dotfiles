@@ -14,10 +14,7 @@ each run, and flags a remote whose watcher stops reporting. Hosts listed in
 mode against this machine's auth broker: every 5 minutes it checks, FROM each client,
 that the broker URL in the client's config.yml answers /v1/healthz and accepts the
 client's token, and alerts when that has failed for 10 minutes (clients lose
-credentials ~1 h after the broker becomes unreachable). Where omp-update is installed
-(home), every 5 minutes it runs `omp-update cos`, which restarts the chief of staff
-fresh when its pane died or its session passed 100 MB (gates and logic live there),
-and tells the shepherd about each restart or failure. It never kills
+credentials ~1 h after the broker becomes unreachable). It never kills
 anything: diagnosis and reclaiming stay with the shepherd, and kills that are
 not already automated need Tim's approval.
 Hosts listed in ~/.config/machine-shepherd/patch-hosts (`<ssh target> [unit ...]` per line) are
@@ -49,8 +46,6 @@ PANE_FILE = os.path.join(HOME, ".config/machine-shepherd/pane")
 REMOTES = os.path.join(HOME, ".config/machine-shepherd/remotes")
 BROKER_CLIENTS = os.path.join(HOME, ".config/machine-shepherd/broker-clients")
 BROKER_EVERY_S, BROKER_ALERT_S = 300, 600
-OMP_UPDATE = os.path.join(BIN, "omp-update")
-COS_EVERY_S = 300
 PATCH_HOSTS = os.path.join(HOME, ".config/machine-shepherd/patch-hosts")
 PATCH_EVERY_S, PATCH_REPORT_S = 6 * 3600, 24 * 3600
 PATCH_STALE_H = 72  # package lists or unattended-upgrades older than this: the daily apt jobs stopped
@@ -474,32 +469,6 @@ def broker_clients(state, now, dry, no_alert):
     return results or None
 
 
-def cos_watch(state, now, dry, no_alert):
-    """`omp-update cos` every 5 min (see the docstring); None where omp-update is absent."""
-    if not os.path.exists(OMP_UPDATE) or now - state.get("cos_checked", 0) < COS_EVERY_S:
-        return None
-    state["cos_checked"] = now
-    try:
-        r = subprocess.run(["/usr/bin/python3", OMP_UPDATE, "cos"] + (["--dry-run"] if dry else []),
-                           capture_output=True, text=True, timeout=400)
-        line = next((l for l in r.stdout.splitlines() if l.startswith("COS ")), None)
-        res = json.loads(line[4:]) if line else {"action": "error", "error": (r.stderr or r.stdout).strip()[-300:]}
-    except subprocess.TimeoutExpired:
-        res = {"action": "error", "error": "omp-update cos timed out after 400 s"}
-    act = res.get("action", "")
-    if no_alert:
-        return res
-    if act == "restarted fresh":
-        deliver(f"[machine-watch cos] restarted the chief of staff fresh ({res.get('reason')}): "
-                f"new pane {res.get('new_pane')}, pid {res.get('new_pid')}. State lives in ~/cos (COS.md).",
-                "cos restarted", False, dry)
-    elif act in ("restart failed", "error") and now - state["last_alert"].get("cos", 0) >= COOLDOWN_S:
-        deliver(f"[machine-watch cos] {act}: {json.dumps(res)[:600]}", f"cos {act}", True, dry)
-        if not dry:
-            state["last_alert"]["cos"] = now
-    return res
-
-
 # Runs on a patched Linux host (python3 stdin; argv: units that must be active). Reads only.
 PATCH_PROBE = r'''
 import glob, json, os, subprocess, sys, time
@@ -613,12 +582,10 @@ def main():
     state = load_state()
     v, fire = evaluate(census, fs, state, now, cs, ws)
     broker = broker_clients(state, now, a.dry_run, a.no_alert)
-    cos = cos_watch(state, now, a.dry_run, a.no_alert)
     patch = patch_watch(state, now, a.dry_run, a.no_alert)
     append_log({"ts": now, "values": v, "memory": census["memory"], "groups": census["groups"],
                 "agents": [{k: r[k] for k in ("pid", "pane", "mem_mb", "cpu", "session_mb", "project")} for r in census["agents"]],
                 "fsevents": fs, "colorsync": cs, "fired": fire, **({"broker_clients": broker} if broker else {}),
-                **({"cos": cos} if cos and cos.get("action") != "none: alive" else {}),
                 **({"patch": patch} if patch else {})})
     if fire and not a.no_alert:
         notify(census, fs, v, fire, a.dry_run)
