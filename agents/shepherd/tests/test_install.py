@@ -119,6 +119,15 @@ class Install(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.agents.iterdir()), all_plists)
         bootstraps = [c for c in self.lines(self.launchctl_log) if c.startswith('bootstrap ')]
         self.assertEqual(len(bootstraps), len(all_plists))
+        # Every Swift tool is built, each into its own name under ~/.local/bin.
+        built = self.lines(self.swiftc_log)
+        tools = sorted(p.stem for p in (CHECKOUT / 'src').glob('*.swift'))
+        self.assertEqual(tools, ['fsevents-top', 'gui-launch-guard'])
+        self.assertEqual(len(built), len(tools), built)
+        for tool, line in zip(tools, built):
+            self.assertTrue(line.endswith('-o %s %s' % (self.bin / (tool + '.new'), CHECKOUT / 'src' / (tool + '.swift'))), line)
+            self.assertTrue(os.access(self.bin / tool, os.X_OK), tool)
+            self.assertIn('bin %s: built' % tool, result.stdout)
 
     def test_second_run_changes_nothing_and_never_calls_launchctl_or_the_compiler(self):
         self.assertEqual(self.install().returncode, 0)

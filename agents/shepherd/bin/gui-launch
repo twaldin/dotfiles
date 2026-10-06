@@ -1,0 +1,222 @@
+#!/usr/bin/python3
+"""gui-launch --space <agent Space | display:<screen>> [--guard-seconds 60] [--hide] -- <open args | executable [args]>
+
+Launches a GUI app for an agent run without taking Tim's screen (twaldin-home: he works on Spaces 1-4),
+then checks that it didn't.
+- Launch: with `open` arguments (`-n -a <app> --args …`; they must name the app with -a or -b) it runs
+  `open -g`, which never activates the app. --hide adds -j, for launchers whose own window you never need
+  (Prism): a hidden app's windows don't draw until it unhides. An executable runs as is.
+- Guard, until --guard-seconds pass, the launched process tree exits, or gui-launch gets SIGTERM/SIGINT:
+  gui-launch-guard (src/gui-launch-guard.swift) re-activates Tim's frontmost app whenever macOS reports
+  that a process of the tree became frontmost, and moves every tree window to the target Space by id as
+  Accessibility reports it created or focused (and again whenever the tree activates or the active Space
+  changes). macOS still lets an app activate itself and opens its new windows on the Space Tim is viewing:
+  the guard undoes both within milliseconds, it cannot prevent them. The tree is the executable, or the new
+  instance of the named app that `open` started, plus their descendants (Prism's java); an app they start
+  through LaunchServices (parent launchd) is outside it.
+- Check: no window of the tree on Spaces 1-4, Tim's frontmost app unchanged (the app he had at launch, or
+  the one he switched to himself during the guard), and the active display unchanged, by both yabai's
+  focused display and AppKit's main screen. The guard gives focus back by re-activating Tim's app, never
+  by focusing one of his windows, so a theft from another display can leave the active display there
+  (yabai still reported it after Superwhisper got focus back): that fails the check, and a click on his
+  display clears it.
+stdout carries only JSON lines: the guard's events (launched, root, activation, reverted, window,
+guard-end), then `check`. The launched program's own output goes to stderr. gui-launch never quits what
+it launched: the caller tears it down. Agent shells live in launchd's Background session, where macOS
+reports no frontmost app and no activations, so from there the guard runs in Tim's GUI (Aqua) session
+through `sudo -n launchctl asuser` (then `sudo -u` back to Tim, so yabai's per-user socket still answers).
+Exit 0 ok; 1 the check failed; 2 usage, launch or guard error.
+"""
+import argparse
+import json
+import os
+import pwd
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+
+TIM_SPACES = {1, 2, 3, 4}
+YABAI = os.environ.get('GUI_LAUNCH_YABAI', os.path.expanduser('~/Applications/Yabai.app/Contents/MacOS/yabai'))
+GUARD = os.environ.get('GUI_LAUNCH_GUARD', os.path.expanduser('~/.local/bin/gui-launch-guard'))
+
+
+def die(message, code=2):
+    print('gui-launch: ' + message, file=sys.stderr)
+    sys.exit(code)
+
+
+def parse(argv):
+    cut = argv.index('--') if '--' in argv else len(argv)
+    if cut == len(argv) and not {'-h', '--help'} & set(argv):
+        die('missing `--` before the launch command')
+    ap = argparse.ArgumentParser(prog='gui-launch', usage=__doc__.splitlines()[0], description='\n'.join(__doc__.splitlines()[2:]),
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--space', required=True, help='agent Space index, or display:<screen name> for that screen\'s visible Space')
+    ap.add_argument('--guard-seconds', type=float, default=60.0)
+    ap.add_argument('--hide', action='store_true', help='open -j: launch the app hidden')
+    args = ap.parse_args(argv[:cut])
+    args.command = argv[cut + 1:]
+    if not args.command:
+        die('nothing to launch after `--`')
+    if args.guard_seconds <= 0:
+        die('--guard-seconds must be positive')
+    return args
+
+
+def plan(command, hide):
+    """(argv the guard spawns, the guard's flags naming the launched app)."""
+    if command[0] in ('open', '/usr/bin/open'):
+        command = command[1:]
+    elif not command[0].startswith('-'):
+        exe = command[0] if os.sep in command[0] else shutil.which(command[0])
+        if exe and os.path.isfile(exe) and os.access(exe, os.X_OK):
+            return [exe] + command[1:], ['--exec']
+        die('%s is not an executable; `open` arguments start with a flag such as -a or -n' % command[0])
+    if hide and '-j' not in command:
+        command = ['-j'] + command
+    own = command[:command.index('--args')] if '--args' in command else command
+    target = None
+    for flag, value in zip(own, own[1:]):
+        if flag == '-b':
+            target = ['--bundle-id', value]
+        elif flag == '-a':
+            if os.sep in value or value.endswith('.app'):
+                if not os.path.isdir(value):
+                    die('no app at %s' % value)
+                target = ['--app-path', os.path.realpath(value)]
+            else:
+                target = ['--app-name', value]
+    if target is None:
+        die('name the app with -a <app> or -b <bundle id>, so the guard can tell which process is the launch')
+    return ['/usr/bin/open', '-g'] + command, target
+
+
+def yabai(*args):
+    done = subprocess.run([YABAI, '-m'] + list(args), capture_output=True, text=True, timeout=10)
+    if done.returncode != 0:
+        die('yabai %s: %s' % (' '.join(args), done.stderr.strip()[:200]))
+    return json.loads(done.stdout)
+
+
+def session_wrapper():
+    """The argv prefix that runs the guard in Tim's Aqua session (see the docstring); none when already there."""
+    manager = subprocess.run(['launchctl', 'managername'], capture_output=True, text=True).stdout.strip()
+    if manager == 'Aqua':
+        return []
+    uid = os.getuid()
+    return ['sudo', '-n', '-E', 'launchctl', 'asuser', str(uid), 'sudo', '-n', '-E', '-u', pwd.getpwuid(uid).pw_name]
+
+
+def resolve_space(spec, spaces):
+    if spec.startswith('display:'):
+        screen = spec[len('display:'):]
+        screens = json.loads(subprocess.run([GUARD, '--screens'], capture_output=True, text=True, timeout=10).stdout or '{}')
+        if screen not in screens:
+            die('no screen named %r (screens: %s)' % (screen, ', '.join(sorted(screens)) or 'none'))
+        display = next((d for d in yabai('query', '--displays') if d['id'] == screens[screen]), None)
+        if display is None:
+            die('yabai lists no display with id %s (screen %r)' % (screens[screen], screen))
+        visible = [s['index'] for s in spaces if s['display'] == display['index'] and s['is-visible']]
+        if not visible:
+            die('screen %r shows no Space' % screen)
+        index = visible[0]
+    else:
+        try:
+            index = int(spec)
+        except ValueError:
+            die('--space takes a Space index or display:<screen name>, not %r' % spec)
+    space = next((s for s in spaces if s['index'] == index), None)
+    if space is None:
+        die('there is no Space %d' % index)
+    if index in TIM_SPACES:
+        die('Space %d is one of Tim\'s Spaces (1-4)' % index)
+    # Tim views the display that holds his Spaces. (has-focus is no test: yabai can report the focus on a
+    # virtual screen after an app there took and gave back focus.)
+    tims_display = next(s['display'] for s in spaces if s['index'] == 1)
+    if space['display'] == tims_display and space['is-visible']:
+        die('Space %d is the one Tim\'s display shows' % index)
+    return index
+
+
+def focus(spaces):
+    """yabai's focused Space and its display."""
+    return next(({'space': s['index'], 'display': s['display']} for s in spaces if s['has-focus']), None)
+
+
+def name(app):
+    return '%s (pid %s)' % (app.get('name') or app.get('bundle') or '?', app.get('pid')) if app else 'none'
+
+
+def problems(summary, windows, focus_before, focus_after):
+    """Why the launch took Tim's screen: tree windows on Spaces 1-4, a changed frontmost app, or the active
+    display moved (yabai's focused display, or AppKit's main screen: the two can disagree, so both count)."""
+    tree = set(summary.get('tree') or [])
+    found = []
+    for w in windows:
+        if w.get('pid') in tree and w.get('space') in TIM_SPACES:
+            found.append('window %s of %s (pid %s, "%s") is on Space %s'
+                         % (w.get('id'), w.get('app'), w.get('pid'), w.get('title', ''), w.get('space')))
+    front, user = summary.get('frontAtEnd'), summary.get('userFront')
+    if not front:
+        found.append('no app is frontmost at the end')
+    elif front.get('pid') in tree:
+        found.append('the launched %s is frontmost' % name(front))
+    elif user and front.get('pid') != user.get('pid'):
+        found.append('Tim\'s frontmost app changed from %s to %s' % (name(user), name(front)))
+    if focus_before and (not focus_after or focus_after['display'] != focus_before['display']):
+        found.append('yabai\'s focused display moved from display %s (Space %s) to %s'
+                     % (focus_before['display'], focus_before['space'],
+                        'display %s (Space %s)' % (focus_after['display'], focus_after['space']) if focus_after else 'none'))
+    screen_before = (summary.get('focusAtLaunch') or {}).get('mainScreen')
+    screen_after = (summary.get('focusAtEnd') or {}).get('mainScreen')
+    if screen_before != screen_after:
+        found.append('the key window\'s screen (AppKit main screen) moved from %s to %s' % (screen_before, screen_after))
+    return found
+
+
+def main():
+    args = parse(sys.argv[1:])
+    spawn, target = plan(args.command, args.hide)
+    if not os.access(GUARD, os.X_OK):
+        die('%s is missing: run ~/dotfiles/agents/shepherd/install.sh' % GUARD)
+    spaces = yabai('query', '--spaces')
+    space = resolve_space(args.space, spaces)
+    focus_before = focus(spaces)
+    fd, summary_path = tempfile.mkstemp(prefix='gui-launch-', suffix='.json')
+    os.close(fd)
+    try:
+        # A new session keeps sudo from wrapping the guard in a pty; Ctrl-C reaches it through the handler below.
+        guard = subprocess.Popen(session_wrapper() + [GUARD, '--space', str(space), '--guard-seconds', str(args.guard_seconds),
+                                                      '--yabai', YABAI, '--summary', summary_path] + target + ['--'] + spawn,
+                                 start_new_session=True)
+        # The guard ends early on these (and still writes its summary); gui-launch waits for it, then checks.
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda signum, _frame: guard.send_signal(signum))
+        if guard.wait() != 0:
+            die('the guard exited %d' % guard.returncode)
+        with open(summary_path) as f:
+            summary = json.load(f)
+    finally:
+        os.unlink(summary_path)
+    tree = set(summary.get('tree') or [])
+    windows = [w for w in yabai('query', '--windows') if w.get('pid') in tree]
+    focus_after = focus(yabai('query', '--spaces'))
+    found = problems(summary, windows, focus_before, focus_after)
+    print(json.dumps({'event': 'check', 'ok': not found, 'problems': found, 'space': space,
+                      'windows': [{k: w.get(k) for k in ('id', 'pid', 'app', 'title', 'space')} for w in windows],
+                      'frontAtLaunch': summary.get('frontAtLaunch'), 'frontAtEnd': summary.get('frontAtEnd'),
+                      'focusBefore': dict(focus_before or {}, **(summary.get('focusAtLaunch') or {})),
+                      'focusAfter': dict(focus_after or {}, **(summary.get('focusAtEnd') or {})),
+                      'reverted': len(summary.get('reverted') or [])}, sort_keys=True), flush=True)
+    if found:
+        die('FAILED: ' + '; '.join(found), 1)
+    latencies = [r['latencyMs'] for r in summary.get('reverted') or []]
+    print('gui-launch: ok: %d window(s) of the launch, none on Spaces 1-4; %d activation(s) reverted%s; frontmost %s'
+          % (len(windows), len(latencies), ' (max %.1f ms)' % max(latencies) if latencies else '',
+             name(summary.get('frontAtEnd'))), file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()

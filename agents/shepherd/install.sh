@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install the shepherd's machine-health glue on this Mac from this checkout:
-# symlink bin/* into ~/.local/bin, build src/fsevents-top.swift, and copy launchd/*.plist
+# symlink bin/* into ~/.local/bin, build src/*.swift there, and copy launchd/*.plist
 # into ~/Library/LaunchAgents (launchd ignores symlinked plists at login), reloading a job
 # only when its plist changed.
 #   install.sh           install what this host runs (twaldin-home: all; twaldin-work: the watcher set)
@@ -24,10 +24,12 @@ swiftc=${SWIFTC:-swiftc}
 
 case "$host" in
   twaldin-home)
-    bins="machine-ok machine-watch machine-census omp-update omp-browser-cycle quiet-window quiet-check gpu-top colorsync-k cs-measure logout-colorsync-test"
+    bins="machine-ok machine-watch machine-census omp-update omp-browser-cycle quiet-window quiet-check gpu-top colorsync-k cs-measure logout-colorsync-test gui-launch"
+    tools="fsevents-top gui-launch-guard"
     jobs="net.waldin.machine-watch net.waldin.omp-browser-cycle net.waldin.omp-update net.waldin.quiet-window" ;;
   twaldin-work)
     bins="machine-ok machine-watch machine-census omp-browser-cycle"
+    tools="fsevents-top"
     jobs="net.waldin.machine-watch net.waldin.omp-browser-cycle" ;;
   *) echo "install.sh: no shepherd profile for host '$host'" >&2; exit 2 ;;
 esac
@@ -57,18 +59,16 @@ for b in $bins; do
   echo "bin $b -> $src"
 done
 
-# fsevents-top: rebuild when the source is newer than the binary.
-fsrc="$here/src/fsevents-top.swift" fbin="$bin_dir/fsevents-top"
-if [ ! -x "$fbin" ] || [ "$fsrc" -nt "$fbin" ]; then
+# Swift tools: rebuild each when its source is newer than its binary.
+for t in $tools; do
+  tsrc="$here/src/$t.swift" tbin="$bin_dir/$t"
+  [ -x "$tbin" ] && [ ! "$tsrc" -nt "$tbin" ] && continue
   drift=1
-  if [ "$check" = 1 ]; then
-    echo "bin fsevents-top: older than its source"
-  else
-    "$swiftc" -O -swift-version 5 -target arm64-apple-macos13 -o "$fbin.new" "$fsrc"
-    /bin/mv -f "$fbin.new" "$fbin"
-    echo "bin fsevents-top: built"
-  fi
-fi
+  if [ "$check" = 1 ]; then echo "bin $t: older than its source"; continue; fi
+  "$swiftc" -O -swift-version 5 -target arm64-apple-macos13 -o "$tbin.new" "$tsrc"
+  /bin/mv -f "$tbin.new" "$tbin"
+  echo "bin $t: built"
+done
 
 uid=$(id -u)
 for j in $jobs; do

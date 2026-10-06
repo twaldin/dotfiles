@@ -66,6 +66,7 @@ Everything custom around the harnesses (omp extensions, herdr hooks, launchd job
 - `quiet-window` and `quiet-check`: book and enforce quiet windows for measured runs.
 - `omp-browser-cycle` (launchd, hourly): recycles omp's headless browsers.
 - ColorSync and GPU diagnostics: `gpu-top`, `colorsync-k`, `cs-measure`, `logout-colorsync-test`.
+- `gui-launch` (twaldin-home): launches an agent's GUI test app off Tim's Spaces, reverts any focus it takes, and checks afterwards; its event-driven guard is `src/gui-launch-guard.swift`.
 - `deckbox/`: deckbox's system config, installed by hand as root, with the live copy under `/etc`. It holds:
   - the default-deny inbound firewall: `deckbox-inbound.nft` in its own `inet` table, loaded by `deckbox-firewall.service`. It never flushes Docker's or Tailscale's rules, and the stock `nftables.service` is masked;
   - `agents.slice` and herdr's drop-in: one CPU and memory budget shared by herdr and easld tiles;
@@ -74,6 +75,6 @@ Everything custom around the harnesses (omp extensions, herdr hooks, launchd job
 
   The monthly window is booked with hone. It runs `apt full-upgrade` and `snap refresh`, reboots when `/var/run/reboot-required` exists, then checks that the units in `~/.config/machine-shepherd/patch-hosts` are back. Release upgrades need Tim.
 
-`shepherd/install.sh` links the scripts into `~/.local/bin`, builds `fsevents-top`, and installs the launchd jobs each host runs; `--check` reports drift. `python3 -m unittest discover -s agents/shepherd/tests` runs one smoke test per script.
+`shepherd/install.sh` links the scripts into `~/.local/bin`, builds the Swift tools in `src/` (`fsevents-top`; `gui-launch-guard` on twaldin-home), and installs the launchd jobs each host runs; `--check` reports drift. `python3 -m unittest discover -s agents/shepherd/tests` runs one smoke test per script.
 
 Upstream: Matt Pocock skills v1.3.1 at `b40b9b199752462750c56d9a26655981e48a4344`; Vercel references at `063bee94c3f4df8453406c830b0a7df0f2860278`. Source metadata and licenses are retained. Do not run their bulk installers over this selected library.
