@@ -1783,7 +1783,7 @@ let scanQueue = DispatchQueue(label: "gui-launch.scan")
 let restoreQueue = DispatchQueue(label: "gui-launch.restore")
 let startQueue = DispatchQueue(label: "gui-launch.start")
 let endQueue = DispatchQueue(label: "gui-launch.end")
-let watchQueue = DispatchQueue(label: "gui-launch.watch")
+let watchQueue = DispatchQueue(label: "gui-launch.watch", qos: .userInteractive)
 let mapQueue = DispatchQueue(label: "gui-launch.map")
 
 // MARK: - Tim's input
@@ -1844,25 +1844,25 @@ func windowFields(_ w: [String: Any]?) -> [String: Any] {
 
 // MARK: - Windows (yabaiQueue; the final sweep on endQueue)
 
-func recordWindowFault(_ record: [String: Any]) {
+@Sendable func recordWindowFault(_ record: [String: Any]) {
     windowFaults.update { $0.append(record) }
     emit(record)
 }
 
 /// yabai would not say where tree window `id` is: unknown until a window list places it or no longer has it.
-func windowUnknown(_ id: Int, via: String, why: String) {
+@Sendable func windowUnknown(_ id: Int, via: String, why: String) {
     windowsUnknown.update { $0[id] = why }
     recordWindowFault(["event": "window-unknown", "window": id, "via": via, "reason": why])
 }
 
 /// A window list failed: where the tree's windows are is unknown until one answers.
-func windowListFailed(via: String, why: String) {
+@Sendable func windowListFailed(via: String, why: String) {
     windowListFailure.update { $0 = why }
     recordWindowFault(["event": "window-list-failed", "via": via, "reason": why])
 }
 
 /// Tree window `w` (`id`) is on Space `at`, not --space, and was not moved there.
-func windowOffTarget(_ id: Int, _ w: [String: Any], at: Int, via: String, why: String) {
+@Sendable func windowOffTarget(_ id: Int, _ w: [String: Any], at: Int, via: String, why: String) {
     recordWindowFault(["event": "window-off-target", "window": id, "pid": w["pid"] ?? NSNull(), "app": w["app"] ?? "",
                        "space": at, "target": space, "via": via, "reason": why])
 }
@@ -2078,7 +2078,7 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
 /// The fallback's final turn, on the main queue: focus still goes back to `pid` with the theft still open (main's
 /// policy), `pid` is still the process it was taken from and outside the tree, and then the activation, with no
 /// activation or adoption served in between. main.
-func finalActivation(_ pid: pid_t) -> FinalTurn {
+@Sendable func finalActivation(_ pid: pid_t) -> FinalTurn {
     if let why = policy.unwanted(pid) { return .unwanted(why) }
     guard revalidateTarget(pid) else { return .unwanted("pid \(pid) joined the tree or is another process now") }
     lastRestore.update { $0 = ("activate", nil) }
@@ -2126,7 +2126,7 @@ func finalActivation(_ pid: pid_t) -> FinalTurn {
 /// only as ownerTimeoutProblem rules, otherwise a problem too. The read: NSWorkspace's frontmost app and SkyLight's
 /// Space for Tim's display, every 25 ms for up to 1 s after the fallback (its activation lands asynchronously),
 /// until both are what is expected. restoreQueue.
-func settleOwnerTimeout(_ query: [String], allowed: Double, outcome: RevertOutcome, to pid: pid_t, fallbackMs: NSDecimalNumber) {
+@Sendable func settleOwnerTimeout(_ query: [String], allowed: Double, outcome: RevertOutcome, to pid: pid_t, fallbackMs: NSDecimalNumber) {
     let fellBack = uptime()
     var read: PostFallbackRead?
     var shown: [String: Any] = [:]
@@ -2306,7 +2306,7 @@ final class SpaceWatch {
         let (decision, revoked, expected, breach) = spacePolicy.update {
             ($0.observed(key, since: t, theft: theft, window: target.window, windowSpace: target.windowSpace), $0.revoked, $0.expected, $0.breach)
         }
-        func hint() -> Any { (input ?? lastInput()).map { ms(t - $0) } ?? NSNull() }
+        func hint() -> Any { input.map { ms(t - $0) } ?? NSNull() }
         func record(_ fields: [String: Any]) {
             spaceEvents.update { $0.append(fields) }
             emit(fields)
@@ -2363,7 +2363,7 @@ final class SpaceWatch {
         if theftState.value.covers(since: t) {
             sampling.watch(at: t)
             if timer == nil {
-                let ticker = DispatchSource.makeTimerSource(queue: watchQueue)
+                let ticker = DispatchSource.makeTimerSource(flags: .strict, queue: watchQueue)
                 ticker.schedule(deadline: .now() + SpaceSampling.interval, repeating: SpaceSampling.interval, leeway: .milliseconds(5))
                 ticker.setEventHandler { [unowned self] in self.poll() }
                 ticker.resume()
