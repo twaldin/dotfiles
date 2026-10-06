@@ -825,12 +825,17 @@ def resolve_target(min_age_h):
 
 
 def quiet_block(book, guard_min):
+    """The booking or hold that blocks restarts now: one running, or starting within guard_min. Holds
+    (quiet-holds.json beside the book) are windows for runs whose driver refuses any booked row; a
+    restart's omp start disturbs them just the same."""
     path = os.path.expanduser(book)
-    try:
-        with open(path) as f:
-            windows = json.load(f)
-    except (OSError, ValueError):
-        return None
+    windows = []
+    for f in (path, os.path.join(os.path.dirname(path), "quiet-holds.json")):
+        try:
+            with open(f) as fh:
+                windows += json.load(fh)
+        except (OSError, ValueError):
+            pass
     now = utcnow()
     for w in windows:
         start, end = parse_ts(w["start"]), parse_ts(w["end"])

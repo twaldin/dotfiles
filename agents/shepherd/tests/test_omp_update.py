@@ -338,6 +338,15 @@ class QuietBlock(Sandbox):
     def test_a_host_with_no_book_is_never_blocked(self):
         self.assertIsNone(self.mod.quiet_block(self.BOOK, 30))
 
+    def test_a_hold_beside_the_book_blocks_like_a_booking(self):
+        # quiet-window keeps holds (runs whose driver refuses booked rows) in quiet-holds.json.
+        self.book((-120, -60))
+        (self.book_path.parent / 'quiet-holds.json').write_text(json.dumps(
+            [{'id': 'h1-hold', 'start': stamp(10), 'end': stamp(40), 'owner': 'teleport-lab', 'label': 'r4'}]))
+        self.addCleanup((self.book_path.parent / 'quiet-holds.json').unlink)
+        self.assertEqual(self.mod.quiet_block(self.BOOK, 30),
+                         f"quiet window h1-hold {stamp(10)}->{stamp(40)} (teleport-lab)")
+
 
 class ExtensionFingerprint(Sandbox):
     def setUp(self):
