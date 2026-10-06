@@ -47,11 +47,14 @@ and/or guards one that something else starts, then checks that nothing took it.
   breach the moment it is read, and if his display shows another Space at any moment of a theft window, focusing
   that window brings his Space back. SkyLight tells only the Space shown now, so a Space shown between two reads
   (an excursion of under ~20 ms, or longer if reads are late) cannot be named; instead each Space notification must
-  be explained by a change the reads found on some display since the notification before it, and one that is not
+  be explained by a change the reads found since the notification before it (two reads positively naming two
+  Spaces on one display; a display left out of a read or unreadable never counts as changed), and one that is not
   is a change and back unseen: in a theft window a breach (space-unseen), outside one his own, as his changes are.
-  This rests on an assumption [INFERENCE, not shown]: macOS posts at least one Space notification after each
-  completed Space change (Apple documents only that it is posted "when a Spaces change occurs"); and an unseen
-  excursion whose notification is shared with a change the reads did see passes as explained. In a theft window,
+  In a theft window only a change of Tim's own display explains a notification (sky-lead's decision A): one that
+  coincides with another display's change is a breach too. So callers must not drive other displays (their
+  Spaces) during a guarded launch: doing so produces false failures by design. This rests on an assumption
+  [INFERENCE, not shown]: macOS posts at least one Space notification after each completed Space change (Apple
+  documents only that it is posted "when a Spaces change occurs"). In a theft window,
   reads more than 100 ms apart, or a read that fails, are a problem. That is all it does to his windows. It moves
   every tree window to the target Space by id as Accessibility reports it created or focused (and again whenever the
   tree activates or the active Space changes); a window yabai will not place or name the owner of, a window list
@@ -64,12 +67,13 @@ and/or guards one that something else starts, then checks that nothing took it.
   group (a member it cannot read counts as alive). At its end, work in flight (reverts included) gets 3 s to finish
   and its own final checks 3 s more (what does not finish fails the check, and so does a theft it can no longer
   revert), then any yabai helper still running is killed, with what it started; then its watch of the displays
-  takes its last read and stops, before the summary is written.
+  stops polling, and in one turn of its main queue takes its last read, is sealed and has the summary's records
+  taken (a Space notification after the seal is a problem, never dropped unrecorded).
 - Check: no tree window on Spaces 1-4; Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
   himself); no Space the tree showed his display in a theft window, each one a breach even when the guard brought
-  his Space back (the check shows both), no Space notification in a theft window that no read explains, and no
-  switch of his that a theft came within 2 s of; the active display
+  his Space back (the check shows both), no Space notification in a theft window that no change of his display
+  explains, and no switch of his that a theft came within 2 s of; the active display
   unchanged, by both yabai's focused display and AppKit's main screen; no fault, no yabai timeout but an
   expected-slow owner query, no gap or failed read of his display in a theft window, no tree window the guard could
   not locate at its end, no unsettled or killed work. The guard gives focus back without moving the active display,
@@ -298,8 +302,10 @@ def space_breaches(summary):
         elif kind == 'space-unseen':
             since = e.get('sinceTheftMs')
             when = ('%s ms %s the theft' % (abs(since), 'before' if since < 0 else 'after')) if isinstance(since, (int, float)) else 'in a theft window'
-            found.append('Tim\'s display changed Space and back unseen: macOS reported a Space change %s that no read of any '
-                         'display explains, so the Space it showed is unknown: a breach' % when)
+            others = e.get('othersChanged') or []
+            found.append('Tim\'s display changed Space and back unseen: macOS reported a Space change %s that no read of his '
+                         'display explains%s, so the Space it showed is unknown: a breach'
+                         % (when, ' (other displays changed: %s)' % ', '.join(others) if others else ''))
         elif kind == 'space-restored' and e.get('ok') and e.get('to') == expected:
             found.append('the tree moved Tim\'s display to %s: a breach, although the guard brought Space %s back (%s ms after the theft)'
                          % (space_name(e), expected, e.get('latencyMs')))

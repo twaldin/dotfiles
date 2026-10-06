@@ -39,12 +39,16 @@
 //     Space history. Each Space the tree shows him (a change at any moment of a theft window, or one that stays on
 //     the Space the tree took him to) is a breach the moment it is read, once per excursion from his expected
 //     Space, even when restored. SkyLight tells only the Space shown now: a Space shown between two reads can go
-//     unnamed. So each notification must be explained by a change the reads found on some display since the
-//     notification before it; one that is not is a change and back that no read saw, in a theft or grace window
+//     unnamed. So each notification must be explained by a change the reads found since the notification before
+//     it, two reads positively naming two Spaces on one display: in a theft or grace window only a change of Tim's
+//     own display explains one (sky-lead's decision A; another display's change never does, so a caller that
+//     drives another display's Spaces during a guarded launch gets false failures by design); outside them any
+//     display's does. One that is not explained is a change and back that no read saw: in a theft or grace window
 //     a breach that cannot be named (space-unseen), outside them his own, as his changes are. This rests on macOS
 //     posting at least one notification after each completed Space change [INFERENCE: not shown here]. In a theft
 //     or grace window, reads more than 100 ms apart, and any read that fails, leave a Space possibly unseen: a
-//     problem. As the guard ends the watch takes its last read and closes before the summary is taken;
+//     problem. As the guard ends the poll stops; then, in one main-queue turn, the watch takes its last read and is
+//     sealed and the summary's records are taken; a notification after the seal is a problem;
 //   - restores Tim's Space: focusing the restore target, when it was last seen on the expected Space and its owner
 //     checks out, brings that Space back, if a fresh read still wants it before each owner query and the focus;
 //     each restore is recorded too. A change taken for Tim's is undone when a theft turns out to have come within
@@ -533,17 +537,27 @@ func ownerTimeoutProblem(_ outcome: RevertOutcome, to pid: pid_t, expectedSpace:
 /// last seen on the expected Space. Any other change is his own and becomes the expected Space, until a theft turns
 /// out to have come within `grace` of it (the change may reach the guard before the theft does): then the Space
 /// before it is expected again. Each Space the tree shows him is a breach once per excursion: from leaving the
-/// expected Space until it is shown again (or he switches himself), however often it is read. A Space notification
-/// that no read explains (some display changed Space and back unseen: SpaceNotices) is judged as a change is: the
-/// tree's, a breach that cannot be named, if any moment since the notification before it lies in a theft window;
-/// else his, until a theft turns out to have come within `grace` of it. A Space is its yabai index, or, for one
-/// yabai's map does not know, minus its SkyLight id (spaceKey).
+/// expected Space until it is shown again (or he switches himself), however often it is read. Each Space
+/// notification must be explained by a change the reads found (SpaceNotices). In a theft or grace window (any moment
+/// since the notification before it) only a change of Tim's own display explains it (sky-lead's decision A): any
+/// other, one that coincides with another display's change included, is a change and back unseen, the tree's, a
+/// breach that cannot be named. Outside them another display's change explains it too, and one that nothing
+/// explains is his, until a theft turns out to have come within `grace` of it. A Space is its yabai index, or, for
+/// one yabai's map does not know, minus its SkyLight id (spaceKey).
 struct SpacePolicy {
     enum Decision: Equatable {
         case unchanged
         case user(Int)
         case restore(from: Int, to: Int, window: Int)
         case unrestorable(from: Int, to: Int)
+    }
+
+    /// What a Space notification was: explained by the change of a display (its identifier), the tree's (a change
+    /// and back unseen, a breach), or taken for Tim's.
+    enum Notice: Equatable {
+        case explained(String)
+        case tree
+        case tim
     }
 
     private(set) var expected: Int?
@@ -557,21 +571,22 @@ struct SpacePolicy {
     private(set) var seen = Set<Int>()
     /// The Space the last `observed` found the tree showing for the first time in this excursion: a breach.
     private(set) var breach: Int?
-    /// The notifications no read explained that were taken for Tim's, by when they were read, kept 2 × `grace`.
+    /// The notifications nothing explained that were taken for Tim's, by when they were read, kept 2 × `grace`.
     private(set) var unseenOutside: [Double] = []
     /// The ones of them the last `observed` charged to the tree: a theft came within `grace` of each.
     private(set) var unseenCharged: [Double] = []
 
     init(expected: Int?) { self.expected = expected }
 
-    /// A Space notification read at `t` that no read explains: a change and back, unseen, after `since` (when the
-    /// notification before it was read). Returns whether it is the tree's now (a theft window covers any moment since
-    /// `since`); otherwise it is taken for Tim's and kept, for `observed` to charge if a theft comes within `grace`.
-    mutating func unseen(at t: Double, since: Double, theft: TheftWindow) -> Bool {
+    /// A Space notification read at `t`; the one before it was read at `since`. `tim`: Tim's display, if the reads
+    /// since then named two different Spaces on it; `others`: the other displays they did that for.
+    mutating func noticed(at t: Double, since: Double, theft: TheftWindow, tim: String?, others: [String]) -> Notice {
         unseenOutside.removeAll { t - $0 > 2 * TheftWindow.grace }
-        if theft.covers(since: since) { return true }
+        if let tim { return .explained(tim) }
+        if theft.covers(since: since) { return .tree }
+        if let other = others.first { return .explained(other) }
         unseenOutside.append(t)
-        return false
+        return .tim
     }
 
     /// Tim's display showed `visible` at some moment from `since` (the read, or the event that reported a change)
@@ -637,14 +652,16 @@ struct SpaceMap: Equatable {
 }
 
 /// One read of SkyLight's managed display Spaces, [{"Display Identifier", "Current Space": {"id64"}, "Spaces":
-/// [{"id64"}, …]}, …] ("ManagedSpaceID" where "id64" is missing): the Space each display shows, by SkyLight id,
-/// keyed by its identifier ("display N", by its place in the list, for one without), and which display is Tim's
-/// (the one holding Space `anchor`). A display whose current Space cannot be read is left out: no change of it
-/// is seen. nil: unreadable, or no display holds `anchor`, or his shows no readable Space.
+/// [{"id64"}, …]}, …] ("ManagedSpaceID" where "id64" is missing): the Space Tim's display (the one holding Space
+/// `anchor`, which is how it is known from read to read) shows, by SkyLight id, and the Space each other display
+/// shows, by its identifier. Only positive readings are kept: another display without an identifier (or sharing one)
+/// or without a readable current Space is left out, so nothing about it can count as a change. nil: unreadable, or
+/// no display (or more than one) holds `anchor`, or his shows no readable Space.
 struct DisplayRead: Equatable {
+    /// Tim's display's identifier, for the record ("" without one).
     let tim: String
     let timSpace: UInt64
-    let shown: [String: UInt64]
+    let others: [String: UInt64]
 
     init?(_ displays: Any?, anchor: UInt64) {
         func id(_ space: Any?) -> UInt64? {
@@ -652,60 +669,69 @@ struct DisplayRead: Equatable {
             return ((space["id64"] ?? space["ManagedSpaceID"]) as? NSNumber)?.uint64Value
         }
         guard let displays = displays as? [[String: Any]] else { return nil }
-        var shown: [String: UInt64] = [:]
-        var tim: String?
-        for (i, display) in displays.enumerated() {
-            let key = display["Display Identifier"] as? String ?? "display \(i + 1)"
-            if let current = id(display["Current Space"]) { shown[key] = current }
-            if tim == nil, (display["Spaces"] as? [Any])?.contains(where: { id($0) == anchor }) == true { tim = key }
+        let holding = displays.filter { ($0["Spaces"] as? [Any])?.contains(where: { id($0) == anchor }) == true }
+        guard holding.count == 1, let timSpace = id(holding[0]["Current Space"]) else { return nil }
+        let tim = holding[0]["Display Identifier"] as? String ?? ""
+        var others: [String: UInt64] = [:]
+        var keys = Set<String>(), shared = Set<String>()
+        for display in displays where !((display["Spaces"] as? [Any])?.contains(where: { id($0) == anchor }) == true) {
+            guard let key = display["Display Identifier"] as? String, !key.isEmpty, key != tim else { continue }
+            if !keys.insert(key).inserted { shared.insert(key) }
+            if let current = id(display["Current Space"]) { others[key] = current }
         }
-        guard let tim, let timSpace = shown[tim] else { return nil }
+        for key in shared { others[key] = nil }
         self.tim = tim
         self.timSpace = timSpace
-        self.shown = shown
+        self.others = others
     }
 }
 
-/// Whether each Space notification is explained: by a display whose Space the reads (of every display, at each
-/// notification and poll) found changed since the previous notification's read, Tim's display first. A notification
-/// that none explains means a change and back that no read saw: SkyLight tells only the Space each display shows
-/// now, never the ones it passed through, and keeps no history of them, so such a Space cannot be named.
+/// Whether each Space notification can be explained: by Tim's display, or another, when two reads of it (of every
+/// display, at each notification and poll) since the previous notification's read positively named two different
+/// Spaces on it. A display left out of a read, or unreadable, never counts as changed. A notification that nothing
+/// explains means a change and back that no read saw: SkyLight tells only the Space each display shows now, never
+/// the ones it passed through, and keeps no history of them, so such a Space cannot be named. (Which changes may
+/// explain a notification, and when, is SpacePolicy.noticed's.)
 /// [INFERENCE] macOS posts at least one activeSpaceDidChange after each completed Space change of any display
 /// (several changes may share one). Apple documents only that it is posted "when a Spaces change occurs", with no
 /// count, no coalescing rule and no userInfo; no source found shows a completed change that posts none, nor proves
 /// that none ever does; and no per-transition source (SkyLight's 1401 and 1329 events included) is documented as
-/// lossless. Under it, an excursion between two reads, however short, leaves a notification no read explains,
-/// unless that notification is shared with a change a read did see (on any display). Neither is checked here: the
-/// guard relies on both. Times: seconds since launch.
+/// lossless. Under it, an excursion of Tim's display between two reads, however short, leaves a notification that
+/// no read of his display explains. That is not checked here: the guard relies on it. Times: seconds since launch.
 struct SpaceNotices: Equatable {
-    /// Each display's Space at the last read.
-    private(set) var last: [String: UInt64]?
-    /// The displays found changed since the last notification's read, in the order found.
-    private(set) var changed: [String] = []
+    /// The last Space each display was positively read to show (Tim's apart).
+    private(set) var lastTim: UInt64?
+    private(set) var lastOthers: [String: UInt64] = [:]
+    /// Whether Tim's display, and which other displays (in the order found), were read to change since the last
+    /// notification's read.
+    private(set) var timChanged = false
+    private(set) var othersChanged: [String] = []
     /// When the last notification was read (at first, when the watch began).
     private(set) var since: Double
 
     init(since: Double) { self.since = since }
 
     /// A read of every display.
-    mutating func read(_ shown: [String: UInt64]) {
-        if let last {
-            for key in Set(last.keys).union(shown.keys).sorted() where last[key] != shown[key] && !changed.contains(key) {
-                changed.append(key)
-            }
+    mutating func read(_ read: DisplayRead) {
+        if let lastTim, lastTim != read.timSpace { timChanged = true }
+        for (key, now) in read.others.sorted(by: { $0.key < $1.key }) {
+            if let before = lastOthers[key], before != now, !othersChanged.contains(key) { othersChanged.append(key) }
+            lastOthers[key] = now
         }
-        last = shown
+        lastTim = read.timSpace
     }
 
-    /// A notification, read at `t` (after `read`, if the read succeeded; `tim`: nil, it failed). Returns the
-    /// display whose change explains it (nil: none does), and when the notification before it was read.
-    mutating func notified(at t: Double, tim: String?) -> (by: String?, since: Double) {
+    /// A notification, read at `t` (after `read`, if the read succeeded; `readOK`: false, it failed, and then
+    /// nothing explains it). Returns whether Tim's display changed, the other displays that did, and when the
+    /// notification before it was read.
+    mutating func notified(at t: Double, readOK: Bool) -> (tim: Bool, others: [String], since: Double) {
         defer {
-            changed.removeAll()
+            timChanged = false
+            othersChanged.removeAll()
             since = t
         }
-        guard let tim else { return (nil, since) }
-        return (changed.contains(tim) ? tim : changed.first, since)
+        guard readOK else { return (false, [], since) }
+        return (timChanged, othersChanged, since)
     }
 }
 
@@ -1477,8 +1503,9 @@ func unknownWindow(_ id: Int) -> String { "yabai knows no window \(id)" }
 /// - `{"t", "read": n}` (or `{"t", "read": null, "id": i}`: a Space yabai's map does not know): a direct read of
 ///   his display at t; it takes "windowSpace" too. A Space row reports the unexplained notifications it charges to
 ///   the tree ("unseenCharged");
-/// - `{"t", "unseen": s}`: a Space notification read at t that no read explains, the one before it read at s:
-///   "tree" or "tim".
+/// - `{"t", "notice": s, "tim": true|false, "others": [display]}`: a Space notification read at t, the one before
+///   it read at s; "tim", whether reads of Tim's display named two Spaces since then, "others" the other displays
+///   they did that for: "explained" (with "explainedBy"), "tree" or "tim".
 /// Other keys (such as "input") play no part. stdout: one line per row.
 func decide() -> Never {
     var procs: [pid_t: [String: Any]] = [:]
@@ -1689,9 +1716,16 @@ func decide() -> Never {
             case .restore(let from, let to, let window): out["space"] = "restore"; out["from"] = from; out["to"] = to; out["window"] = window
             case .unrestorable(let from, let to): out["space"] = "unrestorable"; out["from"] = from; out["to"] = to
             }
-        } else if let since = number(row["unseen"])?.doubleValue {
+        } else if let since = number(row["notice"])?.doubleValue {
             epoch += 1
-            out["unseen"] = spaces.unseen(at: t, since: since, theft: policy.window) ? "tree" : "tim"
+            let tim: String? = row["tim"] as? Bool == true ? "tim" : nil
+            switch spaces.noticed(at: t, since: since, theft: policy.window, tim: tim, others: row["others"] as? [String] ?? []) {
+            case .explained(let display):
+                out["notice"] = "explained"
+                out["explainedBy"] = display
+            case .tree: out["notice"] = "tree"
+            case .tim: out["notice"] = "tim"
+            }
         } else {
             continue
         }
@@ -2409,16 +2443,19 @@ enum SkyLight {
 
 /// Tim's display, read directly: at every Space notification, at each activation, every SpaceSampling.interval
 /// through each theft and grace window (macOS can report two changes in one notification), around each Space
-/// restore, after a fallback activation, and once more as the guard ends. Each read takes every display. The reads
-/// go to SpacePolicy one at a time, in the order taken, so each Space the tree shows him is a breach (space-breach)
-/// the moment it is read; each read that changes what his display shows is in the Space history (display-space; a
-/// notification's read is logged even with no change, with the display whose change explains it). A notification
-/// that no read explains (SpaceNotices) is a change and back that no read saw: in a theft or grace window a breach
-/// that cannot be named (space-unseen). A Space yabai's map does not know is recorded by its id, and the map asked
-/// for again (at most once a second). A read that fails, and, while a theft or grace window lasts, reads more than
-/// SpaceSampling.maxGap apart, are problems: nothing then proves that no Space went unseen. A restore is asked of
-/// timQueue for each new breach and each notification that still finds the tree's Space; it acts on the latest
-/// read. Every read holds the lock throughout, and records nothing once the watch is closed (close).
+/// restore, after a fallback activation, and once more as the guard seals its records. Each read takes every
+/// display. The reads go to SpacePolicy one at a time, in the order taken, so each Space the tree shows him is a
+/// breach (space-breach) the moment it is read; each read that changes what his display shows is in the Space
+/// history (display-space; a notification's read is logged even with no change, with what changed since the
+/// notification before it and what explains it). A notification that nothing may explain (SpacePolicy.noticed) is
+/// a change and back that no read saw: in a theft or grace window a breach that cannot be named (space-unseen). A
+/// Space yabai's map does not know is recorded by its id, and the map asked for again (at most once a second). A
+/// read that fails, and, while a theft or grace window lasts, reads more than SpaceSampling.maxGap apart, are
+/// problems: nothing then proves that no Space went unseen. A restore is asked of timQueue for each new breach and
+/// each notification that still finds the tree's Space; it acts on the latest read. Every read holds the lock
+/// throughout. Once the guard's end has done its work the poll stops (stopPolling, off main); then main takes the
+/// last read and seals the watch (seal) in the turn that takes the summary's records: no read records anything after
+/// that, and a notification that comes after it is a problem, never dropped unrecorded.
 final class SpaceWatch {
     private let lock = NSLock()
     private var rows: (() -> Any?)?
@@ -2427,7 +2464,9 @@ final class SpaceWatch {
     private var notices = SpaceNotices(since: 0)
     private var shown: UInt64?
     private var failing = false
-    private var closed = false
+    /// The poll stopped for good (the guard's end).
+    private var pollStopped = false
+    private var sealed = false
     private var timer: DispatchSourceTimer?
     private var nextRefresh = -Double.infinity
     private var refreshing = false
@@ -2456,19 +2495,24 @@ final class SpaceWatch {
 
     /// One read of every display, `via` what prompted it; `input`, the last HID input then (a hint), if known.
     /// Returns the Space Tim's display shows (its SkyLight id, and its index if yabai's map knows it); nil: the
-    /// read failed, or the watch is closed.
+    /// read failed, or the watch is sealed (a notification then is a problem).
     @discardableResult
     func sample(via: String, input: Double? = nil) -> (id: UInt64, index: Int?)? {
         lock.lock(); defer { lock.unlock() }
-        guard !closed else { return nil }
         let t = uptime() - t0
         let notice = via == "notification"
+        guard !sealed else {
+            if notice {
+                problem(String(format: "a Space notification came %.3f s after launch, after the guard sealed its records: what it reported is not in them", t))
+            }
+            return nil
+        }
         if let from = sampling.read(at: t) {
             problem(String(format: "Tim's display went unread for %.0f ms in a theft or grace window (%.3f to %.3f s after launch): a Space shown then may be unrecorded",
                            (t - from) * 1000, from, t))
         }
         guard let map, let read = DisplayRead(rows?(), anchor: map.anchor) else {
-            if notice { _ = notices.notified(at: t, tim: nil) }  // no read explains it; the failed read is a problem
+            if notice { _ = notices.notified(at: t, readOK: false) }  // nothing explains it; the failed read is a problem
             if !failing {
                 failing = true
                 problem(String(format: "Tim's display could not be read directly %.3f s after launch (%@): SkyLight's record shows no display holding Space 1", t, via))
@@ -2477,46 +2521,64 @@ final class SpaceWatch {
             return nil
         }
         failing = false
-        notices.read(read.shown)
+        notices.read(read)
         let id = read.timSpace
         let index = map.indexes[id]
         if index == nil { refreshMap() }
         let changed = id != shown
         shown = id
         if changed { trail.append(["at": decimal(t, 3), "space": index ?? NSNull(), "spaceId": NSNumber(value: id), "via": via]) }
-        var unexplainedSince: Double?
+        var event: [String: Any] = ["event": "display-space", "space": index ?? NSNull(), "spaceId": NSNumber(value: id), "via": via, "changed": changed]
+        var noticed: (since: Double, tim: String?, others: [String])?
         if notice {
-            let (by, since) = notices.notified(at: t, tim: read.tim)
-            if by == nil { unexplainedSince = since }
-            emit(["event": "display-space", "space": index ?? NSNull(), "spaceId": NSNumber(value: id), "via": via, "changed": changed,
-                  "explainedBy": by ?? NSNull(), "timsDisplay": read.tim])
-        } else if changed {
-            emit(["event": "display-space", "space": index ?? NSNull(), "spaceId": NSNumber(value: id), "via": via, "changed": changed])
+            let found = notices.notified(at: t, readOK: true)
+            let tims = read.tim.isEmpty ? "Tim's display" : read.tim
+            noticed = (found.since, found.tim ? tims : nil, found.others)
+            event["timChanged"] = found.tim
+            event["othersChanged"] = found.others
+            event["timsDisplay"] = tims
+        } else if !changed {
+            event = [:]
         }
-        judge(spaceKey(index: index, id: id), id: id, at: t, via: via, input: input, unexplainedSince: unexplainedSince)
+        judge(spaceKey(index: index, id: id), id: id, at: t, via: via, input: input, noticed: noticed, event: event)
         return (id, index)
     }
 
-    /// What SpacePolicy decides for the read, recorded; `unexplainedSince`: the read is a notification's that no read
-    /// explains, and the notification before it was read then. Lock held.
-    private func judge(_ key: Int, id: UInt64, at t: Double, via: String, input: Double?, unexplainedSince: Double?) {
+    /// What SpacePolicy decides for the read, recorded after `event` (the read's display-space; empty: none):
+    /// `noticed`, for a notification's read, is when the notification before it was read, Tim's display if it was
+    /// read to change since then, and the other displays that were. Lock held.
+    private func judge(_ key: Int, id: UInt64, at t: Double, via: String, input: Double?,
+                       noticed: (since: Double, tim: String?, others: [String])?, event: [String: Any]) {
         let theft = theftState.value
         let target = restoreTarget.value
-        let (decision, revoked, expected, breach, unseen) = spacePolicy.update { (policy: inout SpacePolicy) -> (SpacePolicy.Decision, Int?, Int?, Int?, [Double]) in
-            var now = false
-            if let since = unexplainedSince { now = policy.unseen(at: t, since: since, theft: theft) }
+        let (verdict, decision, revoked, expected, breach, charged) = spacePolicy.update {
+            (policy: inout SpacePolicy) -> (SpacePolicy.Notice?, SpacePolicy.Decision, Int?, Int?, Int?, [Double]) in
+            let verdict = noticed.map { policy.noticed(at: t, since: $0.since, theft: theft, tim: $0.tim, others: $0.others) }
             let decision = policy.observed(key, since: t, theft: theft, window: target.window, windowSpace: target.windowSpace)
-            return (decision, policy.revoked, policy.expected, policy.breach, policy.unseenCharged + (now ? [t] : []))
+            return (verdict, decision, policy.revoked, policy.expected, policy.breach, policy.unseenCharged)
         }
         func hint() -> Any { input.map { ms(t - $0) } ?? NSNull() }
         func record(_ fields: [String: Any]) {
             spaceEvents.update { $0.append(fields) }
             emit(fields)
         }
-        for at in unseen {
+        func unseen(_ at: Double, others: [String]) {
             record(["event": "space-unseen", "noticeAt": decimal(at, 3), "expected": expected.map(spaceField) ?? NSNull(),
-                    "sinceTheftMs": theft.lastTheft.map { ms(at - $0) } ?? NSNull(), "theftAt": theft.lastTheft.map { decimal($0, 3) } ?? NSNull()])
+                    "othersChanged": others, "sinceTheftMs": theft.lastTheft.map { ms(at - $0) } ?? NSNull(),
+                    "theftAt": theft.lastTheft.map { decimal($0, 3) } ?? NSNull()])
         }
+        if !event.isEmpty {
+            var fields = event
+            if let verdict {
+                switch verdict {
+                case .explained(let display): fields["explainedBy"] = display
+                case .tree, .tim: fields["explainedBy"] = NSNull()
+                }
+            }
+            emit(fields)
+        }
+        for at in charged { unseen(at, others: []) }
+        if verdict == .tree { unseen(t, others: noticed?.others ?? []) }
         if let revoked {
             record(["event": "user-space-revoked", "space": spaceField(revoked), "expected": expected.map(spaceField) ?? NSNull(),
                     "theftAt": theft.lastTheft.map { decimal($0, 3) } ?? NSNull()])
@@ -2563,24 +2625,24 @@ final class SpaceWatch {
 
     /// Before a Space restore's owner query, and again immediately before its focus: why focusing `window` would no
     /// longer restore Tim's Space (a fresh read finds his display back, or wanting another window, or cannot be
-    /// taken, or the watch is closed); nil: it still would. timQueue.
+    /// taken, or the watch is sealed); nil: it still would. timQueue.
     func restorePending(_ window: Int) -> String? {
         let read = sample(via: "restore-check")
         lock.lock(); defer { lock.unlock() }
-        if closed { return "the guard is ending" }
+        if sealed { return "the guard is ending" }
         guard read != nil else { return "Tim's display could not be read" }
         guard let want = restoreWanted else { return "Tim's display no longer shows a Space the tree took it to" }
         return want.window == window ? nil : "the restore now wants window \(want.window)"
     }
 
     /// After main published the theft windows (each activation): while one lasts, reads every
-    /// SpaceSampling.interval on watchQueue; and reads now. main.
+    /// SpaceSampling.interval on watchQueue (until the poll stops for the guard's end); and reads now. main.
     func follow(via: String) {
         lock.lock()
         let t = uptime() - t0
-        if !closed && theftState.value.covers(since: t) {
+        if !sealed && theftState.value.covers(since: t) {
             sampling.watch(at: t)
-            if timer == nil {
+            if timer == nil && !pollStopped {
                 let ticker = DispatchSource.makeTimerSource(flags: .strict, queue: watchQueue)
                 ticker.schedule(deadline: .now() + SpaceSampling.interval, repeating: SpaceSampling.interval, leeway: .milliseconds(5))
                 ticker.setEventHandler { [unowned self] in self.poll() }
@@ -2592,36 +2654,51 @@ final class SpaceWatch {
         sample(via: via)
     }
 
-    /// One poll; the last once no theft or grace window lasts, or the watch is closed. watchQueue.
+    /// One poll; the last once no theft or grace window lasts, or the poll is stopped. watchQueue.
     private func poll() {
         sample(via: "poll")
         lock.lock(); defer { lock.unlock() }
-        if closed || !theftState.value.covers(since: uptime() - t0) {
+        if pollStopped || sealed {
+            timer?.cancel()
+            timer = nil
+        } else if !theftState.value.covers(since: uptime() - t0) {
             timer?.cancel()
             timer = nil
             sampling.unwatch()
         }
     }
 
-    /// The guard's end, before its summary is taken (endQueue, once the end's work is done): one last read of
-    /// every display (a poll held up then, or a change since the last read, is judged now; none if the watch never
-    /// began), then the watch closes: under the lock, which every read holds throughout, so no read is under way
-    /// once it is closed and none records anything after; the poll is cancelled, and watchQueue drained (for up to
-    /// 1 s) so no poll outlives the summary. From here the history, breaches and problems the watch records are final.
-    func close() {
+    /// The guard's end, once its work is done (endQueue, never main): the poll stops for good, and watchQueue is
+    /// drained (for up to 1 s) so no poll is under way as the records are taken. Notifications and other reads are
+    /// still taken and recorded until the seal; a theft or grace window still counts as watched, so the seal's read
+    /// shows whether the reads stayed close enough.
+    func stopPolling() {
+        lock.lock()
+        pollStopped = true
+        timer?.cancel()
+        timer = nil
+        lock.unlock()
+        let drained = DispatchSemaphore(value: 0)
+        watchQueue.async { drained.signal() }
+        _ = drained.wait(timeout: .now() + 1)
+    }
+
+    /// The seal, on main, in the turn that takes the summary's records (conclude): the last read of every display
+    /// (a change since the last read, a breach, a gap or an unexplained notification is judged now; none if the watch
+    /// never began), then, under the lock every read holds throughout, nothing records any more. Main serves the
+    /// notifications, so none can come between the seal and the records; one that comes after the seal is a problem
+    /// (sample), never dropped unrecorded.
+    func seal() {
         lock.lock()
         let begun = rows != nil
         lock.unlock()
         if begun { sample(via: "end") }
         lock.lock()
-        closed = true
+        sealed = true
         timer?.cancel()
         timer = nil
         sampling.unwatch()
         lock.unlock()
-        let drained = DispatchSemaphore(value: 0)
-        watchQueue.async { drained.signal() }
-        _ = drained.wait(timeout: .now() + 1)
     }
 
     /// Asks yabai for its Space map again: for a Space it does not know, or a read that found no display holding
@@ -2716,8 +2793,9 @@ func scanOnce() {
 /// Ends the guard (main): no new work starts; on endQueue, work in flight (reverts still queued included) settles
 /// within its 3 s, then the final scan, sweep and focus read get their own 3 s (unless gui-launch is gone): the
 /// tree's windows that the final sweep cannot locate are a problem. Then the helpers still running are ended; then
-/// the Space watch takes its last read and closes; then, on main, the summary (its records taken in that one turn,
-/// when nothing records any more) and guard-end. The main thread keeps serving events until then.
+/// the Space watch's poll stops (off main). Then, in one main-queue turn, the watch takes its last read and is
+/// sealed, the summary's records are taken, and the summary and guard-end are written. The main thread keeps
+/// serving events, Space notifications included, until that turn.
 func finish(_ reason: String) {  // main
     guard !finishing else { return }
     finishing = true
@@ -2740,15 +2818,17 @@ func finish(_ reason: String) {  // main
             }
             focusAtEnd = windowFields(yabai(["query", "--windows", "--window"]) as? [String: Any])
         }
-        spaceWatch.close()
+        spaceWatch.stopPolling()
         DispatchQueue.main.async { conclude(reason, orphaned: orphaned, focusAtEnd: focusAtEnd) }
     }
 }
 
 func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  // main
     finished = true
-    // The records, taken together: the Space watch is closed, the end's work settled (or reported unsettled), and
-    // main, which serves the activations and notifications, records nothing else in this turn.
+    // The seal and the records, in this one turn: the Space watch takes its last read and records nothing after; the
+    // end's work is settled (or reported unsettled); and main, which serves the activations and notifications, serves
+    // none in between.
+    spaceWatch.seal()
     let records: [String: Any] = [
         "reverted": reverted, "moves": moves.value, "spaceRestores": spaceEvents.value, "problems": problems.value,
         "spaceHistory": spaceWatch.history, "ownerQueryTimeouts": ownerTimeouts.value, "windowFaults": windowFaults.value,
@@ -2980,8 +3060,7 @@ if !rigTest {
         if tree.adopt(app.processIdentifier, via: "launch") { observe(app.processIdentifier) }
     }
     center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: nil) { _ in
-        guard !finished else { return }
-        spaceChanged(input: lastInput())
+        spaceChanged(input: lastInput())  // after the seal, a problem (SpaceWatch.sample): never dropped unrecorded
     }
     center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil) { _ in
         timEpoch.update { $0 += 1 }

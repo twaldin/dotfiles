@@ -258,12 +258,13 @@ def rig_spaces(extra=()):
 
 def show(root, shown, extra=(), anchor=True, other=110):
     """SkyLight's record of the displays, as the rig reads it: display D1 (ids 101-109, then `extra`) shows the Space
-    with id `shown`, display D2 (ids 110 and 111) the one with id `other`. Without `anchor`, no display holds Space 1
-    (id 101): the read fails."""
+    with id `shown`, display D2 (ids 110 and 111) the one with id `other` (None: its current Space is unreadable).
+    Without `anchor`, no display holds Space 1 (id 101): the read fails."""
     spaces = [{'id64': 100 + i} for i in range(1 if anchor else 2, 10)] + [{'id64': sid} for sid in extra]
-    put(root / 'displays.json', json.dumps([{'Display Identifier': 'D1', 'Current Space': {'id64': shown}, 'Spaces': spaces},
-                                            {'Display Identifier': 'D2', 'Current Space': {'id64': other},
-                                             'Spaces': [{'id64': 110}, {'id64': 111}]}]))
+    d2 = {'Display Identifier': 'D2', 'Spaces': [{'id64': 110}, {'id64': 111}]}
+    if other is not None:
+        d2['Current Space'] = {'id64': other}
+    put(root / 'displays.json', json.dumps([{'Display Identifier': 'D1', 'Current Space': {'id64': shown}, 'Spaces': spaces}, d2]))
 
 
 class Lines:
@@ -662,18 +663,22 @@ class GuiLaunch(unittest.TestCase):
 
     def test_a_space_notification_no_read_explains_fails_the_check_as_a_breach_it_cannot_name(self):
         # GP1: Tim's display went to another Space and back between two reads, so macOS's notification is all that
-        # shows it: in a theft window, or within 2 s before a theft, a breach the guard cannot name.
-        unseen = [{'event': 'space-unseen', 'noticeAt': 3.412, 'expected': 2, 'sinceTheftMs': 312.0, 'theftAt': 3.1},
-                  {'event': 'space-unseen', 'noticeAt': 19.8, 'expected': 2, 'sinceTheftMs': -700.0, 'theftAt': 20.5}]
+        # shows it: in a theft window, or within 2 s before a theft, a breach the guard cannot name. Decision A: in a
+        # theft window another display's change explains nothing, and the check names it.
+        unseen = [{'event': 'space-unseen', 'noticeAt': 3.412, 'expected': 2, 'othersChanged': [], 'sinceTheftMs': 312.0, 'theftAt': 3.1},
+                  {'event': 'space-unseen', 'noticeAt': 3.9, 'expected': 2, 'othersChanged': ['D2'], 'sinceTheftMs': 800.0, 'theftAt': 3.1},
+                  {'event': 'space-unseen', 'noticeAt': 19.8, 'expected': 2, 'othersChanged': [], 'sinceTheftMs': -700.0, 'theftAt': 20.5}]
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app),
                                      summary=summary(timSpace={'atLaunch': 2, 'expected': 2}, spaceRestores=unseen))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         check = self.check_event(result)
         self.assertEqual(check['problems'], [
             "Tim's display changed Space and back unseen: macOS reported a Space change 312.0 ms after the theft that no read "
-            "of any display explains, so the Space it showed is unknown: a breach",
+            "of his display explains, so the Space it showed is unknown: a breach",
+            "Tim's display changed Space and back unseen: macOS reported a Space change 800.0 ms after the theft that no read "
+            "of his display explains (other displays changed: D2), so the Space it showed is unknown: a breach",
             "Tim's display changed Space and back unseen: macOS reported a Space change 700.0 ms before the theft that no read "
-            "of any display explains, so the Space it showed is unknown: a breach"])
+            "of his display explains, so the Space it showed is unknown: a breach"])
         self.assertEqual(check['timSpace']['breaches'], unseen)
 
     def test_owner_query_timeouts_count_in_the_revert_latencies_and_fail_the_check_only_as_the_guard_rules(self):
@@ -922,22 +927,28 @@ class Guard(unittest.TestCase):
         self.assertEqual(sorted({r['from'] for r in rows if r.get('space') in ('restore', 'unrestorable')}), [3, 6])
         self.assertEqual([(r['t'], r['breach']) for r in rows if 'breach' in r], [(2.5, 6), (3.4, 3), (3.7, 6)])
 
-    def test_a_space_notification_no_read_explains_is_judged_as_a_change_is(self):
-        # GP1: a notification that no read explains is a change and back that no read saw (SkyLight tells only the
-        # Space shown now). If any moment since the notification before it lies in a theft window it is the tree's;
+    def test_a_space_notification_is_explained_only_as_decision_a_allows_and_else_judged_as_a_change_is(self):
+        # GP1: a notification nothing explains is a change and back that no read saw (SkyLight tells only the Space
+        # shown now). If any moment since the notification before it lies in a theft window it is the tree's;
         # otherwise Tim's, until a theft turns out to have come within 2 s of it (GM3, as for his seen changes).
+        # Decision A: in a theft or grace window only a change of Tim's own display explains one, never another
+        # display's (D2); outside them another display's does.
         rows = self.decide(dict(self.COUNTER_BALL, timSpace=1, frontWindowSpace=1), [
-            {'t': 5.0, 'unseen': 4.0},    # no theft yet: his
-            {'t': 5.5, 'activate': 500},  # the theft, 0.5 s later: the read after it charges the tree
+            {'t': 5.0, 'notice': 4.0},                     # no theft yet: his
+            {'t': 5.2, 'notice': 5.0, 'others': ['D2']},   # no theft yet: D2's change explains it
+            {'t': 5.5, 'activate': 500},                   # the theft, 0.5 s later: the read after it charges the first
             {'t': 5.6, 'read': 1},
-            {'t': 5.9, 'unseen': 5.6},    # in the theft window
-            {'t': 5.95, 'activate': 100},  # focus back: the grace window lasts until 7.95
-            {'t': 7.0, 'unseen': 5.9},    # in the grace window
-            {'t': 30.0, 'unseen': 7.0},   # the notification before it was read in the grace window
-            {'t': 40.0, 'unseen': 30.0},  # long after: his
+            {'t': 5.8, 'notice': 5.6, 'tim': True},        # his display was read to change
+            {'t': 5.9, 'notice': 5.8},                     # in the theft window
+            {'t': 5.92, 'notice': 5.9, 'others': ['D2']},  # in the theft window, though D2 changed
+            {'t': 5.95, 'activate': 100},                  # focus back: the grace window lasts until 7.95
+            {'t': 7.0, 'notice': 5.92, 'others': ['D2']},  # in the grace window, though D2 changed
+            {'t': 30.0, 'notice': 7.0},                    # the notification before it was read in the grace window
+            {'t': 40.0, 'notice': 30.0},                   # long after: his
             {'t': 40.1, 'read': 1},
         ])
-        self.assertEqual([r['unseen'] for r in rows if 'unseen' in r], ['tim', 'tree', 'tree', 'tree', 'tim'])
+        self.assertEqual([r['notice'] for r in rows if 'notice' in r], ['tim', 'explained', 'explained', 'tree', 'tree', 'tree', 'tree', 'tim'])
+        self.assertEqual([r['explainedBy'] for r in rows if 'explainedBy' in r], ['D2', 'tim'])
         self.assertEqual([(r['t'], r['unseenCharged']) for r in rows if 'unseenCharged' in r], [(5.6, [5.0])])
 
     # Reverts -----------------------------------------------------------------------------------------
@@ -1652,8 +1663,8 @@ class Guard(unittest.TestCase):
     def test_a_space_change_no_read_saw_is_a_breach_once_its_notification_goes_unexplained(self):
         # GP1: SkyLight tells only the Space shown now. In a theft window Tim's display goes 1 -> 3 -> 1 between two
         # polls, macOS's notification reading Space 1; later 6 -> 3 -> 6 the same way. Neither Space 3 can be named,
-        # but neither notification is explained by a change any read found, on any display, since the notification
-        # before it: each is a breach. A notification that another display's change explains is not.
+        # but neither notification is explained by a change of his display read since the notification before it:
+        # each is a breach. Decision A: nor is one that coincides with another display's (D2's) change.
         process, lines, root = self.rig()
         self.send(process, 'theft')
         time.sleep(0.15)
@@ -1667,7 +1678,7 @@ class Guard(unittest.TestCase):
         time.sleep(0.15)
         show(root, 106, other=111)
         time.sleep(0.15)
-        self.send(process, 'notify')  # explained: display D2 changed
+        self.send(process, 'notify')  # D2 changed, Tim's display was not read to: still a breach
         time.sleep(0.15)
         self.send(process, 'back')
         show(root, 101, other=111)
@@ -1675,11 +1686,31 @@ class Guard(unittest.TestCase):
         time.sleep(0.3)
         seen, result = self.end_rig(process, lines, root)
         recorded = [r for r in result['spaceRestores'] if r['event'] in ('space-unseen', 'space-breach')]
-        self.assertEqual([(r['event'], r.get('spaceId')) for r in recorded], [('space-unseen', None), ('space-breach', 106), ('space-unseen', None)])
+        self.assertEqual([(r['event'], r.get('spaceId'), r.get('othersChanged')) for r in recorded],
+                         [('space-unseen', None, []), ('space-breach', 106, None), ('space-unseen', None, []), ('space-unseen', None, ['D2'])])
         self.assertTrue(all(r['expected'] == 1 and r['sinceTheftMs'] > 0 for r in recorded), recorded)
         notices = [e for e in seen if e.get('event') == 'display-space' and e.get('via') == 'notification']
-        self.assertEqual([e.get('explainedBy') for e in notices], [None, 'D1', None, 'D2', 'D1'])
+        self.assertEqual([(e.get('explainedBy'), e.get('othersChanged')) for e in notices],
+                         [(None, []), ('D1', []), (None, []), (None, ['D2']), ('D1', [])])
         self.assertEqual(result['problems'], [])
+
+    def test_a_display_that_cannot_be_read_never_explains_a_notification(self):
+        # GQ1: D2's current Space becomes unreadable. That is no change of D2: a notification then, before any theft,
+        # is unexplained and taken for Tim's, and the theft 0.3 s later charges it to the tree.
+        process, lines, root = self.rig()
+        show(root, 101, other=None)
+        time.sleep(0.1)
+        self.send(process, 'notify')
+        time.sleep(0.3)
+        self.send(process, 'theft')
+        time.sleep(0.2)
+        self.send(process, 'back')
+        seen, result = self.end_rig(process, lines, root)
+        notices = [e for e in seen if e.get('event') == 'display-space' and e.get('via') == 'notification']
+        self.assertEqual([(e.get('explainedBy'), e.get('othersChanged')) for e in notices], [(None, [])])
+        unseen = [r for r in result['spaceRestores'] if r['event'] == 'space-unseen']
+        self.assertEqual(len(unseen), 1, result['spaceRestores'])
+        self.assertTrue(-1000 < unseen[0]['sinceTheftMs'] < 0, unseen)
 
     def test_the_space_watch_takes_its_last_read_and_closes_before_the_summary(self):
         # GP3: the poll's queue is held up past the guard's end while Tim's display shows Space 6. The end takes a
@@ -1696,6 +1727,28 @@ class Guard(unittest.TestCase):
         self.assertEqual(len([e for e in seen if e.get('event') == 'space-breach']), 1)
         self.assertEqual([(h['spaceId'], h['via']) for h in result['spaceHistory']], [(101, 'baseline'), (106, 'end')])
         self.assertTrue(any(p.startswith("Tim's display went unread for ") for p in result['problems']), result['problems'])
+
+    def test_a_space_notification_while_the_guard_ends_is_recorded_not_dropped(self):
+        # GQ2: the poll's queue is held up while the guard ends; after the end's work is done, but before the
+        # summary is taken, macOS reports a change to Space 6. The watch takes it: the notification's read is in the
+        # summary, a breach, and nothing is dropped unrecorded.
+        process, lines, root = self.rig()
+        self.send(process, 'theft')
+        time.sleep(0.15)
+        self.send(process, 'stall 2.0')
+        time.sleep(0.2)
+        self.send(process, 'end')
+        time.sleep(0.85)  # the end's own work is done by now; the poll's queue is still held up
+        show(root, 106)
+        self.send(process, 'notify')
+        seen = lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        self.assertEqual(process.wait(10), 0)
+        result = json.loads((root / 'summary.json').read_text())
+        notices = [e for e in seen if e.get('event') == 'display-space' and e.get('via') == 'notification']
+        self.assertEqual([(e['spaceId'], e['explainedBy']) for e in notices], [(106, 'D1')])
+        breaches = [r for r in result['spaceRestores'] if r['event'] == 'space-breach']
+        self.assertEqual([(r['from'], r['spaceId'], r['via']) for r in breaches], [(6, 106, 'notification')])
+        self.assertFalse([p for p in result['problems'] if 'after the guard sealed' in p], result['problems'])
 
     def test_a_tree_window_whose_owner_yabai_does_not_name_stays_unknown_and_fails_the_check(self):
         # GP2: windows 9003 (on Space 6) and 9004 (no Space) are the tree's in yabai's list, but its answer about each
