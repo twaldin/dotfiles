@@ -1,0 +1,8 @@
+[Unit]
+Description=Agent hosts (herdr, easld tiles): one CPU and memory budget
+Before=slices.target
+
+[Slice]
+AllowedCPUs=0 6-7 9 11-12 18-19 21 23
+MemoryHigh=28G
+MemoryMax=32G

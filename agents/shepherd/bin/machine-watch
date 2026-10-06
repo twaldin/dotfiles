@@ -20,6 +20,11 @@ fresh when its pane died or its session passed 100 MB (gates and logic live ther
 and tells the shepherd about each restart or failure. It never kills
 anything: diagnosis and reclaiming stay with the shepherd, and kills that are
 not already automated need Tim's approval.
+Hosts listed in ~/.config/machine-shepherd/patch-hosts (`<ssh target> [unit ...]` per line) are
+probed every 6 hours for their patch state: kernel, uptime, /var/run/reboot-required and its
+packages, pending updates, package-list and unattended-upgrades age, and whether the listed units
+are active. The shepherd gets one status line per host per day, and an urgent alert (cooldown 1 h)
+as soon as a listed unit is not active.
 With ~/.config/machine-shepherd/easl.json enabled, a shepherd name that names an omp easl
 tile with an easl protocol gets alerts through `easl agent.prompt` instead of agent-msg.
 
@@ -30,6 +35,7 @@ import functools
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -45,6 +51,9 @@ BROKER_CLIENTS = os.path.join(HOME, ".config/machine-shepherd/broker-clients")
 BROKER_EVERY_S, BROKER_ALERT_S = 300, 600
 OMP_UPDATE = os.path.join(BIN, "omp-update")
 COS_EVERY_S = 300
+PATCH_HOSTS = os.path.join(HOME, ".config/machine-shepherd/patch-hosts")
+PATCH_EVERY_S, PATCH_REPORT_S = 6 * 3600, 24 * 3600
+PATCH_STALE_H = 72  # package lists or unattended-upgrades older than this: the daily apt jobs stopped
 ALERTS = os.path.join(STATE_DIR, "machine-watch.alerts")
 LOG_MAX_BYTES = 20 * 1024 * 1024
 COOLDOWN_S = 60 * 60
@@ -491,6 +500,87 @@ def cos_watch(state, now, dry, no_alert):
     return res
 
 
+# Runs on a patched Linux host (python3 stdin; argv: units that must be active). Reads only.
+PATCH_PROBE = r'''
+import glob, json, os, subprocess, sys, time
+def age_h(paths):
+    ts = [os.stat(p).st_mtime for p in paths if os.path.exists(p)]
+    return round((time.time() - max(ts)) / 3600, 1) if ts else None
+out = {"kernel": os.uname().release, "up_d": round(float(open("/proc/uptime").read().split()[0]) / 86400, 1),
+       "reboot_h": age_h(["/var/run/reboot-required"]),
+       "lists_h": age_h(glob.glob("/var/lib/apt/lists/*InRelease")),
+       "uu_h": age_h(["/var/lib/apt/periodic/unattended-upgrades-stamp"])}
+try:
+    out["reboot_pkgs"] = sorted(set(open("/var/run/reboot-required.pkgs").read().split()))
+except OSError:
+    out["reboot_pkgs"] = []
+lines = [l for l in subprocess.run(["apt", "list", "--upgradable"], capture_output=True, text=True,
+                                   timeout=120).stdout.splitlines() if "/" in l]
+out["upgradable"], out["security"] = len(lines), sum("-security" in l for l in lines)
+units = sys.argv[1:]
+states = subprocess.run(["systemctl", "is-active", *units], capture_output=True, text=True).stdout.split() if units else []
+out["down"] = [u for u, s in zip(units, states) if s != "active"] + units[len(states):]
+print("PATCH " + json.dumps(out))
+'''
+
+
+def patch_status(host, r):
+    """One line on a host's patch state, with what needs the shepherd first."""
+    if "error" in r:
+        return f"[machine-watch patch] {host}: patch probe failed ({r['error']})."
+    head = [f"NOT ACTIVE: {', '.join(r['down'])}"] if r["down"] else []
+    if r["lists_h"] is None or r["lists_h"] > PATCH_STALE_H:
+        head.append(f"package lists {'missing' if r['lists_h'] is None else '%.0f h old' % r['lists_h']}: apt-daily stopped?")
+    if r["uu_h"] is not None and r["uu_h"] > PATCH_STALE_H:
+        head.append(f"unattended-upgrades last ran {r['uu_h']:.0f} h ago")
+    if r["reboot_h"] is not None:
+        pkgs = ", ".join(r["reboot_pkgs"][:6]) + (" …" if len(r["reboot_pkgs"]) > 6 else "")
+        reboot = f"reboot required for {r['reboot_h']:.0f} h ({pkgs or 'no package list'})"
+        reboot += "; monthly window overdue" if r["up_d"] > 35 else ""
+    else:
+        reboot = "no reboot required"
+    tail = [f"kernel {r['kernel']}, up {r['up_d']:.0f} d", reboot,
+            f"{r['upgradable']} upgradable ({r['security']} security) for the monthly window",
+            "unattended-upgrades " + ("not yet run by its timer" if r["uu_h"] is None else f"ran {r['uu_h']:.0f} h ago")]
+    return f"[machine-watch patch] {host}: " + "; ".join(head + tail) + "."
+
+
+def patch_watch(state, now, dry, no_alert):
+    """Probe each patch host every PATCH_EVERY_S (see the docstring); None when there are none or none was due."""
+    try:
+        with open(PATCH_HOSTS) as f:
+            hosts = [line.split() for line in f if line.strip() and not line.startswith("#")]
+    except OSError:
+        return None
+    ps = state.setdefault("patch", {})
+    results = {}
+    for host, *units in hosts:
+        s = ps.setdefault(host, {"checked": 0, "reported": 0})
+        if now - s["checked"] < PATCH_EVERY_S:
+            continue
+        s["checked"] = now
+        try:
+            r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host,
+                                " ".join(["python3", "-"] + [shlex.quote(u) for u in units])],
+                               input=PATCH_PROBE, capture_output=True, text=True, timeout=180)
+            line = next((l for l in r.stdout.splitlines() if l.startswith("PATCH ")), None)
+            res = json.loads(line[6:]) if line else {"error": "ssh failed: " + (r.stderr.strip()[-80:] or f"rc {r.returncode}")}
+        except (subprocess.SubprocessError, ValueError) as e:
+            res = {"error": f"probe failed: {type(e).__name__}"}
+        results[host] = res
+        down = res.get("down") or []
+        alarm = bool(down) and now - state["last_alert"].get("patch:" + host, 0) >= COOLDOWN_S
+        if no_alert or not (alarm or now - s["reported"] >= PATCH_REPORT_S):
+            continue
+        deliver(patch_status(host, res), f"{host}: " + ("units down: " + ", ".join(down) if down else "patch status"),
+                bool(down), dry)
+        if not dry:
+            s["reported"] = now
+            if down:
+                state["last_alert"]["patch:" + host] = now
+    return results or None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="print alerts instead of sending; do not update alert state")
@@ -524,10 +614,12 @@ def main():
     v, fire = evaluate(census, fs, state, now, cs, ws)
     broker = broker_clients(state, now, a.dry_run, a.no_alert)
     cos = cos_watch(state, now, a.dry_run, a.no_alert)
+    patch = patch_watch(state, now, a.dry_run, a.no_alert)
     append_log({"ts": now, "values": v, "memory": census["memory"], "groups": census["groups"],
                 "agents": [{k: r[k] for k in ("pid", "pane", "mem_mb", "cpu", "session_mb", "project")} for r in census["agents"]],
                 "fsevents": fs, "colorsync": cs, "fired": fire, **({"broker_clients": broker} if broker else {}),
-                **({"cos": cos} if cos and cos.get("action") != "none: alive" else {})})
+                **({"cos": cos} if cos and cos.get("action") != "none: alive" else {}),
+                **({"patch": patch} if patch else {})})
     if fire and not a.no_alert:
         notify(census, fs, v, fire, a.dry_run)
         if not a.dry_run:

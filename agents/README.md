@@ -60,12 +60,19 @@ Everything custom around the harnesses (omp extensions, herdr hooks, launchd job
 
 [shepherd/](shepherd/) is the machine shepherd's health glue for twaldin-home and twaldin-work:
 - `machine-ok`: the headroom gate agents run before heavy work.
-- `machine-watch` (launchd, every 2 min): logs machine health and alerts the shepherd. It also checks deckbox's path to home's auth broker, and runs `omp-update cos`, which restarts the chief of staff fresh when its pane died or its session passed 100 MB.
+- `machine-watch` (launchd, every 2 min): logs machine health and alerts the shepherd. It also checks deckbox's path to home's auth broker, reports deckbox's patch state daily (reboot required, pending updates, required units down: urgent), and runs `omp-update cos`, which restarts the chief of staff fresh when its pane died or its session passed 100 MB.
 - `machine-census` and `fsevents-top`: attribute memory, CPU and file-system churn.
 - `omp-update` (launchd, daily): moves every host to the vetted omp release and restarts idle panes onto it.
 - `quiet-window` and `quiet-check`: book and enforce quiet windows for measured runs.
 - `omp-browser-cycle` (launchd, hourly): recycles omp's headless browsers.
 - ColorSync and GPU diagnostics: `gpu-top`, `colorsync-k`, `cs-measure`, `logout-colorsync-test`.
+- `deckbox/`: deckbox's system config, installed by hand as root, with the live copy under `/etc`. It holds:
+  - the default-deny inbound firewall: `deckbox-inbound.nft` in its own `inet` table, loaded by `deckbox-firewall.service`. It never flushes Docker's or Tailscale's rules, and the stock `nftables.service` is masked;
+  - `agents.slice` and herdr's drop-in: one CPU and memory budget shared by herdr and easld tiles;
+  - security-only unattended upgrades with no automatic reboot (`20auto-upgrades`, `52deckbox-unattended-upgrades`); kernel and Docker updates wait for the monthly patch window;
+  - a needrestart override (`50-deckbox.conf`) that keeps automatic runs from restarting agents, containers or the vault.
+
+  The monthly window is booked with hone. It runs `apt full-upgrade` and `snap refresh`, reboots when `/var/run/reboot-required` exists, then checks that the units in `~/.config/machine-shepherd/patch-hosts` are back. Release upgrades need Tim.
 
 `shepherd/install.sh` links the scripts into `~/.local/bin`, builds `fsevents-top`, and installs the launchd jobs each host runs; `--check` reports drift. `python3 -m unittest discover -s agents/shepherd/tests` runs one smoke test per script.
 

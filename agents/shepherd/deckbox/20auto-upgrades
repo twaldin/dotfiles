@@ -1,0 +1,6 @@
+// deckbox (shepherd, 2026-10-06): refresh package lists and install security updates daily.
+// Without this file apt-daily.timer ran but did nothing, so the lists stopped at 2026-08-13.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";

@@ -1,0 +1,21 @@
+#!/usr/sbin/nft -f
+# deckbox inbound firewall (shepherd, Tim-approved 2026-10-06): default-deny inbound on IPv4 and
+# IPv6, in its own table so it never touches Docker's or Tailscale's rules (no flush ruleset).
+# Loaded by deckbox-firewall.service. Docker-published ports are DNAT-forwarded and bypass this
+# input chain; publish container ports on 127.0.0.1 or the tailnet IP only.
+table inet deckbox_inbound
+delete table inet deckbox_inbound
+table inet deckbox_inbound {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iifname "lo" accept
+		ct state established,related accept
+		iifname "tailscale0" accept comment "tailnet"
+		iifname "docker0" accept comment "containers reaching host services"
+		iifname "br-*" accept comment "user-defined docker networks"
+		tcp dport 22 accept comment "sshd (key-only)"
+		udp dport 41641 accept comment "tailscale direct connections"
+		meta l4proto icmp accept
+		meta l4proto ipv6-icmp accept comment "includes neighbour discovery"
+	}
+}

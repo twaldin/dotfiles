@@ -1,0 +1,18 @@
+[Unit]
+Description=deckbox inbound firewall (nft table inet deckbox_inbound)
+Documentation=file:/etc/nftables.d/deckbox-inbound.nft
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/deckbox-inbound.nft
+ExecReload=/usr/sbin/nft -f /etc/nftables.d/deckbox-inbound.nft
+ExecStop=/usr/sbin/nft delete table inet deckbox_inbound
+
+[Install]
+WantedBy=sysinit.target

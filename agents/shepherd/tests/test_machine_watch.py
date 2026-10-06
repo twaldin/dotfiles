@@ -384,6 +384,80 @@ sys.exit(%d)
                     self.assertIn('machine-watch: WARNING: easl TYPED the alert into tile obj_shep', result.stderr)
 
 
+class Patch(MachineWatchCase):
+    """Patch hosts: a probe every 6 h over ssh, one status line a day, an urgent alert when a unit is down."""
+    PROBE = {'kernel': '6.8.0-31-generic', 'up_d': 70.2, 'reboot_h': 26.4,
+             'reboot_pkgs': ['libc6', 'linux-image-6.8.0-85-generic'], 'lists_h': 5.0, 'uu_h': 4.0,
+             'upgradable': 12, 'security': 3, 'down': []}
+
+    def setUp(self):
+        super().setUp()
+        RealRuns.configure_shepherd(self, agent_msg_exit=0)
+        (self.home / '.config/machine-shepherd/patch-hosts').write_text(
+            '# patched hosts\ntim@box deckbox-firewall.service herdr@tim.service\n')
+
+    def probe(self, **changes):
+        (self.home / 'ssh.out').write_text('PATCH ' + json.dumps({**self.PROBE, **changes}) + '\n')
+
+    def seed(self, checked_ago, reported_ago):
+        now = int(time.time())
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / 'machine-watch.state.json').write_text(json.dumps({
+            'streaks': {}, 'last_alert': {}, 'swap_hist': [],
+            'patch': {'tim@box': {'checked': now - checked_ago, 'reported': now - reported_ago}}}))
+
+    def messages(self):
+        return [args[-1] for args in RealRuns.agent_msg_args(self)]
+
+    def ssh_calls(self):
+        return [line for line in self.calls.read_text().splitlines() if line.startswith('ssh ')]
+
+    def test_the_daily_status_names_the_reboot_and_the_next_run_within_6_h_probes_nothing(self):
+        self.probe()
+        first = self.watch(report=census())
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(self.messages(), [
+            '[machine-watch patch] tim@box: kernel 6.8.0-31-generic, up 70 d; reboot required for 26 h '
+            '(libc6, linux-image-6.8.0-85-generic); monthly window overdue; 12 upgradable (3 security) for the '
+            'monthly window; unattended-upgrades ran 4 h ago.'])
+        self.assertEqual(len(self.ssh_calls()), 1)
+        self.assertTrue(self.ssh_calls()[0].endswith(
+            ' tim@box python3 - deckbox-firewall.service herdr@tim.service'), self.ssh_calls()[0])
+        self.assertEqual(self.records()[-1]['patch']['tim@box']['reboot_h'], 26.4)
+        self.assertEqual(RealRuns.notifications(self), [])
+
+        self.watch(report=census())
+        self.assertEqual(len(self.ssh_calls()), 1)
+        self.assertEqual(len(self.messages()), 1)
+        self.assertNotIn('patch', self.records()[-1])
+
+    def test_a_probe_between_daily_reports_stays_quiet_unless_a_unit_is_down(self):
+        self.seed(checked_ago=7 * 3600, reported_ago=3600)
+        self.probe()
+        self.watch(report=census())
+        self.assertEqual(len(self.ssh_calls()), 1)
+        self.assertEqual(self.messages(), [])
+
+        self.seed(checked_ago=7 * 3600, reported_ago=3600)
+        self.probe(down=['deckbox-firewall.service'], reboot_h=None, reboot_pkgs=[], up_d=0.1)
+        self.watch(report=census())
+        self.assertEqual(self.messages(), [
+            '[machine-watch patch] tim@box: NOT ACTIVE: deckbox-firewall.service; kernel 6.8.0-31-generic, up 0 d; '
+            'no reboot required; 12 upgradable (3 security) for the monthly window; unattended-upgrades ran 4 h ago.'])
+        self.assertEqual(len(RealRuns.notifications(self)), 1)  # urgent: Tim sees it too
+
+    def test_stale_package_lists_and_a_failed_probe_are_reported(self):
+        self.probe(lists_h=None, uu_h=100.0, reboot_h=None, reboot_pkgs=[])
+        self.watch(report=census())
+        self.assertIn('tim@box: package lists missing: apt-daily stopped?; unattended-upgrades last ran 100 h ago; ',
+                      self.messages()[-1])
+
+        self.seed(checked_ago=7 * 3600, reported_ago=25 * 3600)
+        (self.home / 'ssh.out').write_text('')
+        self.watch(report=census())
+        self.assertEqual(self.messages()[-1], '[machine-watch patch] tim@box: patch probe failed (ssh failed: rc 0).')
+
+
 class Relay(MachineWatchCase):
     def test_remote_alerts_are_forwarded_only_when_alerting_is_on(self):
         remotes = self.home / '.config/machine-shepherd/remotes'

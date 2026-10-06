@@ -1,0 +1,20 @@
+// deckbox (shepherd, Tim-approved 2026-10-06): security origin only, never reboot. Kernel and
+// Docker/containerd updates wait for the monthly patch window (apt full-upgrade + reboot).
+#clear Unattended-Upgrade::Allowed-Origins;
+#clear Unattended-Upgrade::Origins-Pattern;
+Unattended-Upgrade::Allowed-Origins {
+	"${distro_id}:${distro_codename}-security";
+};
+Unattended-Upgrade::Package-Blacklist {
+	"docker";
+	"containerd";
+	"runc";
+	"linux-image-";
+	"linux-headers-";
+	"linux-modules-";
+	"linux-generic";
+	"linux-firmware";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "false";
+Unattended-Upgrade::SyslogEnable "true";
