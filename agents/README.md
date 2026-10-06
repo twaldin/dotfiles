@@ -46,7 +46,7 @@ The installer backs up every replaced path under `~/.local/state/agent-setup/bac
 
 ## Work system
 
-Efforts start from the chief-of-staff session ([cos/](cos/)) or a conversation. Linear tickets are records that an effort or person owns; the `using-the-work-system` skill says when one earns its place. Nothing dispatches tickets automatically. The home Linear dispatcher was retired on 2026-10-05; its records are archived in `~/archives/meta-audit-2026-10-05/dispatcher/`.
+Efforts start from a board's chief of staff (the `board-cos` skill, on Tim's easl boards) or a conversation. Linear tickets are records that an effort or person owns; the `using-the-work-system` skill says when one earns its place. Nothing dispatches tickets automatically. The home Linear dispatcher was retired on 2026-10-05; its records are archived in `~/archives/meta-audit-2026-10-05/dispatcher/`.
 
 Work and personal are separate deployments. Lindy code, accounts, project guidance, and sessions stay on work, where the work seat (`~/work-agent-system/SEAT.md` on twaldin-work) creates lanes. Personal projects merge after their checks and reviews pass, unless Tim holds them. For Lindy, the agent that opens a PR against `main` arms auto-merge when it opens, unless Tim holds it or it waits on an open PR; GitHub's required checks and approvals decide the merge.
 

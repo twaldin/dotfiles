@@ -20,7 +20,8 @@
     "autoresearch": "skills/autoresearch",
     "frontend": "skills/frontend",
     "writing": "skills/writing",
-    "using-the-work-system": "skills/using-the-work-system"
+    "using-the-work-system": "skills/using-the-work-system",
+    "board-cos": "skills/board-cos"
   },
   "project": {
     "using-the-work-system": "skills/using-the-work-system"
