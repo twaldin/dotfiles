@@ -105,32 +105,46 @@ export PATH="$BUN_INSTALL/bin:$PATH"
 # opencode
 export PATH=/Users/twaldin/.opencode/bin:$PATH
 
+# nvm without `nvm use` at startup: resolving the default version forks dozens of
+# subshells (17-22 s per new shell on a loaded work Mac). Put the default node's bin
+# on PATH directly; `nvm use` and the .nvmrc hook below still work.
 export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
-[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
-
-# Auto `nvm use` when entering a directory with a .nvmrc (per nvm docs)
-autoload -U add-zsh-hook
-load-nvmrc() {
-  local nvmrc_path nvmrc_node_version
-  nvmrc_path="$(nvm_find_nvmrc)"
-  if [ -n "$nvmrc_path" ]; then
-    nvmrc_node_version=$(nvm version "$(cat "${nvmrc_path}")")
-    if [ "$nvmrc_node_version" = "N/A" ]; then
-      nvm install
-    elif [ "$nvmrc_node_version" != "$(nvm version)" ]; then
-      nvm use
-    fi
-  elif [ -n "$(PWD=$OLDPWD nvm_find_nvmrc)" ] && [ "$(nvm version)" != "$(nvm version default)" ]; then
-    echo "Reverting to nvm default version"
-    nvm use default
+_nvm_sh="$NVM_DIR/nvm.sh"
+[ -s "$_nvm_sh" ] || _nvm_sh=/opt/homebrew/opt/nvm/nvm.sh
+if [ -s "$_nvm_sh" ]; then
+  \. "$_nvm_sh" --no-use
+  [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+  _nvm_default=""
+  [ -s "$NVM_DIR/alias/default" ] && _nvm_default=$(<"$NVM_DIR/alias/default")
+  # The alias may be partial ("18"): pick the newest installed match.
+  _nvm_bins=( "$NVM_DIR"/versions/node/v${_nvm_default#v}*(N/nOn) )
+  if [ -n "$_nvm_default" ] && [ -d "$_nvm_bins[1]/bin" ]; then
+    export PATH="$_nvm_bins[1]/bin:$PATH"
+  else
+    nvm use default --silent >/dev/null
   fi
-}
 
-export NVM_DIR="$HOME/.nvm"
-[ -s "/opt/homebrew/opt/nvm/nvm.sh" ] && \. "/opt/homebrew/opt/nvm/nvm.sh"
-add-zsh-hook chpwd load-nvmrc
-load-nvmrc
+  # Auto `nvm use` when entering a directory with a .nvmrc (per nvm docs)
+  autoload -U add-zsh-hook
+  load-nvmrc() {
+    local nvmrc_path nvmrc_node_version
+    nvmrc_path="$(nvm_find_nvmrc)"
+    if [ -n "$nvmrc_path" ]; then
+      nvmrc_node_version=$(nvm version "$(cat "${nvmrc_path}")")
+      if [ "$nvmrc_node_version" = "N/A" ]; then
+        nvm install
+      elif [ "$nvmrc_node_version" != "$(nvm version)" ]; then
+        nvm use
+      fi
+    elif [ -n "$(PWD=$OLDPWD nvm_find_nvmrc)" ] && [ "$(nvm version)" != "$(nvm version default)" ]; then
+      echo "Reverting to nvm default version"
+      nvm use default
+    fi
+  }
+  add-zsh-hook chpwd load-nvmrc
+  load-nvmrc
+fi
+unset _nvm_sh _nvm_default _nvm_bins
 
 # The next line updates PATH for the Google Cloud SDK.
 if [ -f '/Users/twaldin/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/twaldin/google-cloud-sdk/path.zsh.inc'; fi
