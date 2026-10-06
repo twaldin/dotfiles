@@ -8,22 +8,37 @@
 //   --attach-exe E --attach-argv N: each process whose executable's real path is E and one of whose arguments
 //     contains N, and its descendants.
 // Processes are adopted when they activate (before the restore decision), when an app launches, and by a scan
-// of all processes every 150 ms (the token is read only from processes absent from the snapshot taken before
-// the launch). Until the guard ends it
-//   - reverts activations: when a tree process becomes frontmost, it focuses Tim's restore-target window by id
-//     through yabai (the one he had focused at launch or after his last own app switch), or re-activates his
-//     app when that window is gone or yabai fails;
-//   - restores Tim's Space: when his display's visible Space changed after a tree activation, focusing that
-//     window again brings it back;
+// of all processes every 150 ms (the token is read only from processes the snapshot taken before the launch did
+// not see: a pid absent from it, or one now naming a process with another start time). Attach members already
+// running are adopted before the baseline is taken.
+// Before anything launches, the guard takes its baseline: Tim's front app, his focused window and its Space (the
+// restore target, if the window is that app's and the app is outside the tree) and the Space his display shows.
+// A yabai call there that fails or misses its deadline is an error (exit 2): nothing launches.
+// Until the guard ends it
+//   - attributes: an activation or a Space change is Tim's own only with his HID input (keyboard, mouse) after
+//     the last tree theft and within 1 s before it; an app macOS activates without it never becomes his;
+//   - reverts activations: when a tree process becomes frontmost, it focuses Tim's restore-target window by its
+//     cached id (no query on this path; a window that is gone fails the focus harmlessly), or re-activates his
+//     app when there is none or the focus fails. The target is his focused window at launch or after an app
+//     switch of his own, never a tree member's window; before every focus its app is checked again (the same
+//     process, by pid and start time, outside the tree) and dropped if it joined the tree;
+//   - restores Tim's Space: a change of his display's Space while a tree theft is open, within 2 s after it was
+//     given back, or that stays on the Space the tree took it to is the tree's unless he switched apps himself
+//     since the theft and gave input within 1 s; focusing the restore target, when it was last seen on the
+//     expected Space, brings that Space back. Every such change is recorded: a breach even when restored;
 //   - parks windows: each tree window that Accessibility reports created or focused, and each tree window
 //     yabai lists when the tree activates or the active Space changes, is moved by id to --space.
 // The guard ends after --guard-seconds; when the launched tree has exited (without attach flags); when
 // --parent-pid (gui-launch) exits, even by SIGKILL; on SIGTERM/SIGINT; or (--open) when no token-bearing
-// process appeared within --adopt-timeout. It never quits what it launched. Events go to stdout as JSON lines;
-// the summary gui-launch checks goes to --summary.
-// Threads: main handles workspace notifications and reverts, so a slow app never delays a revert; Accessibility
-// calls run on axQueue (observer callbacks on their own run loop thread), window moves on yabaiQueue, Tim's
-// restore target and Space on timQueue, the process scan on scanQueue. Every yabai call has a deadline.
+// process appeared within --adopt-timeout. On every end no new work starts; work in flight gets 3 s to settle
+// (what does not is a problem for the check); then every yabai helper still running is killed with its process
+// group (SIGTERM, then SIGKILL) and reaped; nothing is printed after guard-end. It never quits what it launched.
+// Events go to stdout as JSON lines; the summary gui-launch checks goes to --summary.
+// Threads: main handles workspace notifications, signals and gui-launch's exit, and never waits on a child
+// process (a yabai call there is refused, and is a problem); reverts run on restoreQueue, Accessibility calls on
+// axQueue (observer callbacks on their own run loop thread), window moves on yabaiQueue, Tim's restore target
+// and Space on timQueue, the process scan on scanQueue, the baseline on startQueue and the end on endQueue.
+// Every yabai call has one deadline over its exit and the drain of its output.
 //
 // usage: gui-launch-guard --space N --guard-seconds S --yabai PATH --summary PATH [--parent-pid P]
 //            [--adopt-timeout S] [--attach-exe E --attach-argv N] [(--exec | --open) -- <argv to spawn>]
@@ -31,6 +46,8 @@
 //        gui-launch-guard --decide    tree, restore and Space decisions for synthetic processes on stdin (tests)
 //        gui-launch-guard --resolve [--token T] [--attach-exe E --attach-argv N]
 //                                     tree decisions for live processes named on stdin (tests)
+//        gui-launch-guard --helpers --yabai PATH
+//                                     yabai calls and the guard's end, driven from stdin (tests)
 // build: swiftc -O -swift-version 5 -target arm64-apple-macos13 \
 //          -o ~/.local/bin/gui-launch-guard src/gui-launch-guard.swift
 import AppKit
@@ -38,7 +55,7 @@ import ApplicationServices
 import CryptoKit
 import Security
 
-// MARK: - Decisions (pure; --decide feeds them synthetic processes, activations and Spaces)
+// MARK: - Decisions (pure; --decide feeds them synthetic processes, activations, input and Spaces)
 
 /// The Spaces Tim works on.
 let timSpaces: Set<Int> = [1, 2, 3, 4]
@@ -101,8 +118,9 @@ struct ProcSource {
     var exe: (pid_t) -> String?
     /// nil: unreadable (another user's process) or gone.
     var args: (pid_t) -> ProcArgs?
-    /// Absent from the snapshot taken before the launch.
-    var isNew: (pid_t) -> Bool
+    /// Not the process the pre-launch snapshot saw under this pid (pid, start time): absent from it, or a
+    /// process that started at another time under a reused pid.
+    var isNew: (pid_t, UInt64) -> Bool
 }
 
 /// The tree: roots (the spawned executable, token-bearing processes), attached processes (the attach matcher)
@@ -140,7 +158,7 @@ struct Lineage {
     /// The rule that adopts `pid` on its own. The match and the start time are read in one pass: a process that
     /// changed while its arguments were read is not adopted.
     func rule(for pid: pid_t, start: UInt64, _ source: ProcSource) -> Rule? {
-        let byToken = tokenEntry != nil && source.isNew(pid)
+        let byToken = tokenEntry != nil && source.isNew(pid, start)
         let byExe = matcher != nil && source.exe(pid) == matcher?.exe
         guard byToken || byExe, let args = source.args(pid), source.start(pid) == start else { return nil }
         if byToken, let tokenEntry, args.env.contains(tokenEntry) { return .launchToken }
@@ -194,30 +212,45 @@ struct Lineage {
     func anyAlive(_ source: ProcSource) -> Bool { members.contains { source.start($0.key) == $0.value } }
 }
 
+/// How recent Tim's input must be for a change to count as his own.
+let inputWindow = 1.0
+
+/// Whether Tim's HID input (keyboard, mouse) makes a change at `t` his own: it came after the last tree theft
+/// and within `inputWindow` before the change. Times are seconds since launch; nil: none.
+func timsInput(_ input: Double?, at t: Double, after theft: Double?) -> Bool {
+    guard let input, input <= t, t - input <= inputWindow else { return false }
+    return theft.map { input > $0 } ?? true
+}
+
 /// What to do when an app becomes frontmost. `userFront` is the app to give focus back to: the frontmost app
-/// at launch, then whichever app outside the tree last became frontmost (the user's choice).
+/// at launch (if it is outside the tree), then whichever app outside the tree Tim last switched to himself.
 struct RestorePolicy {
     enum Decision: Equatable {
         case restore(to: pid_t)            // a tree process took focus: give it back
         case restored(latency: Double)     // the user's app is frontmost again; seconds since the theft
-        case user                          // an app outside the tree: the user's new choice
+        case user                          // Tim's own switch to an app outside the tree: his new choice
+        case system                        // an app outside the tree without his input: macOS's choice, not his
         case unrestorable                  // a tree process took focus and there is no app to give it back to
         case afterGuard
     }
 
-    var userFront: pid_t?
+    private(set) var userFront: pid_t?
     let guardUntil: Double
     /// When the tree took focus that is not yet given back.
     private(set) var pendingSince: Double?
+    /// The last tree activation.
+    private(set) var lastTheft: Double?
 
     init(userFront: pid_t?, guardUntil: Double) {
         self.userFront = userFront
         self.guardUntil = guardUntil
     }
 
-    mutating func activation(pid: pid_t, inTree: Bool, at t: Double) -> Decision {
+    /// `input`: when Tim's last HID input came.
+    mutating func activation(pid: pid_t, inTree: Bool, at t: Double, input: Double?) -> Decision {
         if t > guardUntil { return .afterGuard }
         if inTree {
+            lastTheft = t
             guard let to = userFront else { return .unrestorable }
             if pendingSince == nil { pendingSince = t }
             return .restore(to: to)
@@ -226,78 +259,155 @@ struct RestorePolicy {
             pendingSince = nil
             return .restored(latency: t - since)
         }
+        guard timsInput(input, at: t, after: lastTheft) else { return .system }
         userFront = pid
         pendingSince = nil
         return .user
     }
+
+    /// The app focus goes back to joined the tree or is gone: there is none until Tim picks one.
+    mutating func forgetUserFront() {
+        userFront = nil
+        pendingSince = nil
+    }
 }
 
-/// The window a revert focuses: Tim's focused window at launch, then, after each of his own app switches, the
-/// window yabai reports focused once it belongs to the app he switched to. A tree activation never changes it,
-/// and a report of a tree window, or of the app he left (yabai lagging), is not taken.
+/// The window a revert focuses, with the Space it was last verified on (off the main thread): Tim's focused
+/// window at launch, then, after each of his own app switches, the window yabai reports focused once it belongs
+/// to the app he switched to. The app is remembered with its start time. A tree activation or a system-chosen
+/// app never changes it; a window whose owner is in the tree (lineage, token or attach), or is the app he left
+/// (yabai lagging), is never taken; and before every focus the app is checked again: one that is now another
+/// process or in the tree is dropped, with its window.
 struct RestoreTarget: Equatable {
     private(set) var pid: pid_t?
+    private(set) var start: UInt64?
     private(set) var window: Int?
+    private(set) var windowSpace: Int?
 
-    init(pid: pid_t?) { self.pid = pid }
+    /// No target without a live process.
+    init(pid: pid_t?, start: UInt64?) {
+        guard let pid, let start else { return }
+        self.pid = pid
+        self.start = start
+    }
 
     /// The window to focus to give focus back to `app`, if it is the target's.
     func window(for app: pid_t) -> Int? { app == pid ? window : nil }
 
-    /// Tim activated `app`, outside the tree: its window is not known yet.
-    mutating func userSwitched(to app: pid_t) {
-        pid = app
-        window = nil
+    /// Tim switched to `app` himself, outside the tree: its window is not known yet (unless it is the same app).
+    mutating func userSwitched(to app: pid_t, start: UInt64?) {
+        if app == pid && start == self.start { return }
+        self = RestoreTarget(pid: app, start: start)
     }
 
-    /// yabai reports window `id` of `owner` focused; returns whether it became the target.
-    mutating func focused(_ id: Int, owner: pid_t, ownerInTree: Bool) -> Bool {
-        guard !ownerInTree, owner == pid else { return false }
+    /// yabai reports window `id` of `owner` (started at `ownerStart`) on `space`; returns whether it is the
+    /// target now.
+    mutating func verified(_ id: Int, owner: pid_t, ownerStart: UInt64?, ownerInTree: Bool, space: Int?) -> Bool {
+        guard !ownerInTree, owner == pid, ownerStart != nil, ownerStart == start else {
+            if id == window { located(id, space: nil) }  // the cached window turned out not to be his
+            return false
+        }
         window = id
+        windowSpace = space
+        return true
+    }
+
+    /// The target window's Space as last verified; nil: yabai no longer knows the window.
+    mutating func located(_ id: Int, space: Int?) {
+        guard id == window else { return }
+        if space == nil { window = nil }
+        windowSpace = space
+    }
+
+    /// Before a focus: the target's app is still the process it was taken from (`current`: its start time now)
+    /// and outside the tree. Otherwise there is no target any more.
+    mutating func revalidate(start current: UInt64?, inTree: Bool) -> Bool {
+        guard pid != nil else { return false }
+        if inTree || current == nil || current != start {
+            self = RestoreTarget(pid: nil, start: nil)
+            return false
+        }
         return true
     }
 }
 
-/// The Space Tim's display should show. A change there to a Space that is not one of his, within `grace` of a
-/// tree activation, is the tree's doing, and so is staying on that Space: restore it by focusing his
-/// restore-target window, if that window is on the Space he was on. Any other change is his own and becomes
-/// the expected Space.
+/// The Space Tim's display should show. A change of it counts as his own only with his input (`timsInput`), and
+/// within a theft window (a tree theft not yet given back, `grace` after it was, or the display still on the
+/// Space the tree took it to) only once he switched apps himself since the theft. Without that, a change in a
+/// theft window is the tree's: restore it by focusing his restore-target window, if that window was last seen on
+/// the expected Space. Any other change without his input is unexplained: nothing is restored. Neither ever
+/// changes the expected Space.
 struct SpacePolicy {
     enum Decision: Equatable {
         case unchanged
         case user(Int)
         case restore(from: Int, to: Int, window: Int)
         case unrestorable(from: Int, to: Int)
+        case unexplained(shown: Int, expected: Int)
     }
 
     static let grace = 2.0
     private(set) var expected: Int?
+    /// The last tree activation.
     private(set) var theftAt: Double?
+    /// A theft not yet given back.
+    private(set) var open = false
+    private(set) var givenBackAt: Double?
+    /// Tim switched apps himself (with input) since the last theft.
+    private(set) var timSwitched = false
     /// The Space the tree moved Tim's display to, while it still shows it.
     private(set) var thiefSpace: Int?
 
     init(expected: Int?) { self.expected = expected }
 
-    mutating func theft(at t: Double) { theftAt = t }
+    mutating func theft(at t: Double) {
+        theftAt = t
+        open = true
+        givenBackAt = nil
+        timSwitched = false
+    }
 
-    func inGrace(at t: Double) -> Bool { theftAt.map { t - $0 <= SpacePolicy.grace } ?? false }
+    mutating func givenBack(at t: Double) {
+        guard open else { return }
+        open = false
+        givenBackAt = t
+    }
 
-    /// Tim's display shows `visible` at `t`; `window` is his restore target and `windowSpace` the Space it is on
-    /// (nil: gone).
-    mutating func observed(_ visible: Int, at t: Double, window: Int?, windowSpace: Int?) -> Decision {
+    mutating func timActivated(at t: Double) {
+        givenBack(at: t)
+        timSwitched = true
+    }
+
+    func inTheftWindow(at t: Double) -> Bool {
+        guard let theftAt else { return false }
+        return open || t - (givenBackAt ?? theftAt) <= SpacePolicy.grace
+    }
+
+    /// Whether to poll Tim's Space: within `grace` of the last theft or of its return (macOS switches Spaces
+    /// some ms after an activation, possibly after the revert).
+    func polling(at t: Double) -> Bool {
+        guard let theftAt else { return false }
+        return t - max(theftAt, givenBackAt ?? theftAt) <= SpacePolicy.grace
+    }
+
+    /// Tim's display shows `visible` at `t`; `input` is when his last HID input came; `window` is his restore
+    /// target and `windowSpace` the Space it was last verified on (nil: gone).
+    mutating func observed(_ visible: Int, at t: Double, input: Double?, window: Int?, windowSpace: Int?) -> Decision {
         guard let want = expected else { return .unchanged }
         if visible == want {
             thiefSpace = nil
             return .unchanged
         }
-        if visible == thiefSpace || (inGrace(at: t) && !timSpaces.contains(visible)) {
-            thiefSpace = visible
-            guard let window, windowSpace == want else { return .unrestorable(from: visible, to: want) }
-            return .restore(from: visible, to: want, window: window)
+        let theftWindow = visible == thiefSpace || inTheftWindow(at: t)
+        if timsInput(input, at: t, after: theftAt) && (!theftWindow || timSwitched) {
+            expected = visible
+            thiefSpace = nil
+            return .user(visible)
         }
-        expected = visible
-        thiefSpace = nil
-        return .user(visible)
+        guard theftWindow else { return .unexplained(shown: visible, expected: want) }
+        thiefSpace = visible
+        guard let window, windowSpace == want else { return .unrestorable(from: visible, to: want) }
+        return .restore(from: visible, to: want, window: window)
     }
 }
 
@@ -305,6 +415,7 @@ struct SpacePolicy {
 
 signal(SIGPIPE, SIG_IGN)
 let outLock = NSLock()
+var outputClosed = false  // outLock: after guard-end (or the error that ends the guard) nothing is printed
 let isoFormat: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -317,18 +428,19 @@ func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
 func decimal(_ value: Double, _ places: Int) -> NSDecimalNumber { NSDecimalNumber(string: String(format: "%.\(places)f", value)) }
 func ms(_ seconds: Double) -> NSDecimalNumber { decimal(seconds * 1000, 1) }
 
-func writeLine(_ object: [String: Any]) {
+func writeLine(_ object: [String: Any], last: Bool = false) {
     guard var data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) else { return }
     data.append(10)
-    outLock.lock()
+    outLock.lock(); defer { outLock.unlock() }
+    guard !outputClosed else { return }
     data.withUnsafeBytes { _ = write(1, $0.baseAddress, $0.count) }
-    outLock.unlock()
+    if last { outputClosed = true }
 }
 
-func emit(_ event: [String: Any]) {
+func emit(_ event: [String: Any], last: Bool = false) {
     var record = event
     if record["at"] == nil { record["at"] = iso() }
-    writeLine(record)
+    writeLine(record, last: last)
 }
 
 func complain(_ message: String) {
@@ -336,8 +448,9 @@ func complain(_ message: String) {
 }
 
 func fail(_ message: String) -> Never {
-    emit(["event": "error", "message": message])
+    emit(["event": "error", "message": message], last: true)
     complain(message)
+    _ = helpers.shutdown()
     exit(2)
 }
 
@@ -368,6 +481,287 @@ final class Locked<Value> {
         lock.lock(); defer { lock.unlock() }
         return change(&stored)
     }
+}
+
+/// Problems the check must report: yabai calls that ran out of time or were refused, work that did not settle
+/// by the guard's end, helpers killed then.
+let problems = Locked([String]())
+
+func problem(_ message: String) {
+    problems.update { $0.append(message) }
+    emit(["event": "problem", "message": message])
+}
+
+// MARK: - Child processes and work in flight
+
+/// posix_spawn attributes for a child: SIGTERM, SIGINT and SIGPIPE at their defaults (the guard ignores them, and
+/// an ignored signal stays ignored across exec), no signal blocked, its own process group, and with
+/// `onlyListedFds` no descriptor but those its file actions set up.
+func childAttributes(onlyListedFds: Bool) -> posix_spawnattr_t? {
+    var attributes: posix_spawnattr_t?
+    posix_spawnattr_init(&attributes)
+    var defaults = sigset_t()
+    sigemptyset(&defaults)
+    for sig in [SIGTERM, SIGINT, SIGPIPE] { sigaddset(&defaults, sig) }
+    posix_spawnattr_setsigdefault(&attributes, &defaults)
+    var unblocked = sigset_t()
+    sigemptyset(&unblocked)
+    posix_spawnattr_setsigmask(&attributes, &unblocked)
+    var flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
+    if onlyListedFds { flags |= POSIX_SPAWN_CLOEXEC_DEFAULT }
+    posix_spawnattr_setflags(&attributes, Int16(flags))
+    posix_spawnattr_setpgroup(&attributes, 0)
+    return attributes
+}
+
+/// A spawned helper, the leader of its own process group: its output, drained, and its exit, reaped, under one
+/// deadline.
+struct Child {
+    let pid: pid_t
+    let output: Int32
+    private(set) var data = Data()
+    private(set) var eof = false
+    private(set) var reaped = false
+    private var status: Int32 = 0
+
+    init(pid: pid_t, output: Int32) {
+        self.pid = pid
+        self.output = output
+        _ = fcntl(output, F_SETFL, O_NONBLOCK)
+    }
+
+    var code: Int32 { (status & 0x7f) == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f) }
+
+    /// Reads what output there is and reaps the child if it exited, without blocking.
+    private mutating func step() {
+        var buffer = [UInt8](repeating: 0, count: 16384)
+        while !eof {
+            let n = read(output, &buffer, buffer.count)
+            if n > 0 { data.append(contentsOf: buffer[..<n]); continue }
+            if n < 0 && errno == EINTR { continue }
+            if n == 0 || errno != EAGAIN { eof = true }
+            break
+        }
+        if !reaped {
+            let r = waitpid(pid, &status, WNOHANG)
+            if r == pid || (r == -1 && errno == ECHILD) { reaped = true }
+        }
+    }
+
+    /// Until the child has exited and its output is closed (by it and anything it started), or `deadline`
+    /// (uptime) passes. Returns whether it finished.
+    mutating func wait(until deadline: Double) -> Bool {
+        while true {
+            step()
+            if eof && reaped { return true }
+            let left = deadline - uptime()
+            if left <= 0 { return false }
+            if eof {
+                usleep(UInt32(min(left, 0.001) * 1_000_000))
+            } else {
+                var ready = pollfd(fd: output, events: Int16(POLLIN), revents: 0)
+                _ = poll(&ready, 1, Int32((left * 1000).rounded(.up)))
+            }
+        }
+    }
+
+    /// Kills the child's process group (the child and whatever it started that still holds its output): SIGTERM,
+    /// then SIGKILL if that has not ended it within 0.3 s. Returns whether it was reaped and its output closed.
+    mutating func stop() -> Bool {
+        killpg(pid, SIGTERM)
+        if wait(until: uptime() + 0.3) { return true }
+        // Its group still exists: the leader is unreaped, or a member holds the output open.
+        killpg(pid, SIGKILL)
+        return wait(until: uptime() + 0.5)
+    }
+}
+
+/// Whether this code runs on the main thread or the main queue (which dispatchMain() serves from another thread).
+let mainQueueKey = DispatchSpecificKey<Bool>()
+DispatchQueue.main.setSpecific(key: mainQueueKey, value: true)
+func onMain() -> Bool { Thread.isMainThread || DispatchQueue.getSpecific(key: mainQueueKey) == true }
+
+/// The guard's yabai helpers. Each runs in its own process group under one absolute deadline over its exit and
+/// the drain of its output; one that misses it is killed with its group, reaped and reported (a problem and a
+/// yabai-timeout event). None runs on the main thread or queue (refused, and a problem), none starts after shutdown(),
+/// and shutdown() kills those still running.
+final class Helpers {
+    enum Reply {
+        case exited(Int32, Data)
+        case timedOut
+        case refused(String)
+    }
+
+    private let lock = NSLock()
+    private var running: [pid_t: String] = [:]
+    /// Killed by shutdown().
+    private var ended = Set<pid_t>()
+    private var closed = false
+    /// No call's deadline is later (uptime), once the guard is ending.
+    private var cap = Double.infinity
+
+    func endBy(_ deadline: Double) {
+        lock.lock(); defer { lock.unlock() }
+        cap = min(cap, deadline)
+    }
+
+    func run(_ path: String, _ args: [String], timeout: Double) -> Reply {
+        let what = "yabai -m " + args.joined(separator: " ")
+        if onMain() {
+            let message = "\(what) was asked for on the main thread, which never waits on a child process: refused"
+            problem(message)
+            return .refused(message)
+        }
+        var fds: [Int32] = [-1, -1]
+        guard pipe(&fds) == 0 else { return .refused("no pipe for \(what): \(String(cString: strerror(errno)))") }
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_adddup2(&actions, fds[1], 1)
+        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
+        var attributes = childAttributes(onlyListedFds: true)
+        let argv = ([path, "-m"] + args).map { strdup($0) } + [nil]
+        var pid: pid_t = 0
+        var spawned: Int32 = -1
+        lock.lock()
+        let begun = uptime()
+        let allowed = min(timeout, cap - begun)
+        let deadline = begun + allowed
+        if !closed && begun < deadline {
+            spawned = posix_spawn(&pid, path, &actions, &attributes, argv, environ)
+            if spawned == 0 { running[pid] = what }
+        }
+        lock.unlock()
+        posix_spawn_file_actions_destroy(&actions)
+        posix_spawnattr_destroy(&attributes)
+        argv.forEach { free($0) }
+        close(fds[1])
+        guard spawned == 0 else {
+            close(fds[0])
+            return .refused(spawned == -1 ? "the guard is ending: \(what) not run" : "cannot run \(path): \(String(cString: strerror(spawned)))")
+        }
+        var child = Child(pid: pid, output: fds[0])
+        let finished = child.wait(until: deadline)
+        let reaped = finished || child.stop()
+        close(fds[0])
+        lock.lock()
+        running[pid] = nil
+        let killedAtEnd = ended.remove(pid) != nil
+        lock.unlock()
+        if !reaped { problem("\(what) (pid \(pid)) could not be killed and reaped") }
+        if killedAtEnd { return .refused("\(what) was killed at the guard's end") }
+        guard finished else {
+            let seconds = String(format: "%.1f", allowed)
+            problems.update { $0.append("\(what) did not answer within \(seconds) s") }
+            emit(["event": "yabai-timeout", "args": args, "timeoutS": decimal(allowed, 1)])
+            return .timedOut
+        }
+        return .exited(child.code, child.data)
+    }
+
+    /// The guard's end: no helper starts any more, and each still running is killed with its process group
+    /// (SIGTERM, then SIGKILL after 0.3 s) and reaped by the call that started it. Returns what they were.
+    func shutdown() -> [String] {
+        lock.lock()
+        closed = true
+        let victims = running
+        ended.formUnion(victims.keys)
+        lock.unlock()
+        guard !victims.isEmpty else { return [] }
+        for pid in victims.keys { killpg(pid, SIGTERM) }
+        if !gone(Array(victims.keys), within: 0.3) {
+            lock.lock()
+            let left = victims.keys.filter { running[$0] != nil }
+            lock.unlock()
+            for pid in left { killpg(pid, SIGKILL) }
+            _ = gone(left, within: 0.6)
+        }
+        return victims.values.sorted()
+    }
+
+    private func gone(_ pids: [pid_t], within seconds: Double) -> Bool {
+        let until = uptime() + seconds
+        while true {
+            lock.lock()
+            let any = pids.contains { running[$0] != nil }
+            lock.unlock()
+            if !any { return true }
+            if uptime() >= until { return false }
+            usleep(2_000)
+        }
+    }
+}
+
+/// Work that may run a yabai helper (a park, a sweep, a Space check, a restore-target refresh, a revert, the
+/// baseline): the guard's end waits for it, boundedly, so none of its events or timeouts is lost.
+final class InFlight {
+    private let condition = NSCondition()
+    private var active: [Int: String] = [:]
+    private var next = 0
+    private var closed = false
+
+    var isClosed: Bool {
+        condition.lock(); defer { condition.unlock() }
+        return closed
+    }
+
+    /// nil: the guard is ending and this work is not `final` (the end's own, or a revert of a theft).
+    func begin(_ what: String, final: Bool = false) -> Int? {
+        condition.lock(); defer { condition.unlock() }
+        guard final || !closed else { return nil }
+        next += 1
+        active[next] = what
+        return next
+    }
+
+    func end(_ id: Int) {
+        condition.lock()
+        active[id] = nil
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func close() {
+        condition.lock(); defer { condition.unlock() }
+        closed = true
+    }
+
+    /// Waits until no work is in flight or `seconds` pass; returns the work still in flight.
+    func settle(within seconds: Double) -> [String] {
+        let limit = Date().addingTimeInterval(seconds)
+        condition.lock(); defer { condition.unlock() }
+        while !active.isEmpty && condition.wait(until: limit) {}
+        return active.values.sorted()
+    }
+}
+
+let helpers = Helpers()
+let inFlight = InFlight()
+var stopping: Bool { inFlight.isClosed }
+
+func tracked(_ what: String, final: Bool = false, _ body: () -> Void) {
+    guard let id = inFlight.begin(what, final: final) else { return }
+    defer { inFlight.end(id) }
+    body()
+}
+
+/// How long work in flight gets to finish once the guard ends, and how long the end's own work may then take.
+let settleSeconds = 3.0
+let finalSeconds = 3.0
+
+/// The guard's end, on every path (and in --helpers), once inFlight is closed: work in flight gets
+/// `settleSeconds`; `finalWork` runs (no yabai call past `finalSeconds` more); then every helper still running is
+/// killed and reaped, and the work that lost its helper gets a moment to unwind. Work that did not settle, and
+/// each helper killed, is a problem. Never on main.
+func endWork(_ finalWork: () -> Void) -> (unsettled: [String], killed: [String]) {
+    helpers.endBy(uptime() + settleSeconds + finalSeconds)
+    let unsettled = inFlight.settle(within: settleSeconds)
+    for what in unsettled { problem("\(what) was still running \(settleSeconds) s into the guard's end") }
+    finalWork()
+    let killed = helpers.shutdown()
+    for what in killed { problem("\(what) was still running at the guard's end: killed") }
+    _ = inFlight.settle(within: 0.5)
+    return (unsettled, killed)
 }
 
 // MARK: - Live process facts
@@ -428,11 +822,21 @@ func allPids() -> [pid_t] {
     return got > 0 ? buffer[..<Int(got)].filter { $0 > 0 } : []
 }
 
+/// Every process now, by pid, with its start time: the pre-launch snapshot.
+func liveStarts() -> [pid_t: UInt64] {
+    var starts: [pid_t: UInt64] = [:]
+    for pid in allPids() {
+        if let start = processStart(pid) { starts[pid] = start }
+    }
+    return starts
+}
+
 /// The live tree: Lineage on live process facts behind a lock, reporting adoptions and drops as events.
 final class Tree {
     private let lock = NSLock()
     private var lineage: Lineage
-    private var snapshot: Set<pid_t>
+    /// The processes before the launch, by pid and start time.
+    private let snapshot: [pid_t: UInt64]
     private var realPaths: [String: String] = [:]
     /// The scan's: processes checked and not adopted.
     private var checked: [pid_t: Sighting] = [:]
@@ -442,7 +846,7 @@ final class Tree {
     private let tokenHash: String?
     private let needle: String?
 
-    init(_ lineage: Lineage, snapshot: Set<pid_t>, t0: Double, tokenHash: String?, needle: String?) {
+    init(_ lineage: Lineage, snapshot: [pid_t: UInt64], t0: Double, tokenHash: String?, needle: String?) {
         self.lineage = lineage
         self.snapshot = snapshot
         self.t0 = t0
@@ -460,7 +864,7 @@ final class Tree {
 
     private var source: ProcSource {  // used with the lock held
         ProcSource(parent: parentPid, start: processStart, exe: { self.exe($0) }, args: procArgs,
-                   isNew: { !self.snapshot.contains($0) })
+                   isNew: { self.snapshot[$0] != $1 })
     }
 
     func addRoot(_ pid: pid_t) {
@@ -471,7 +875,8 @@ final class Tree {
     /// Membership only, as before a window move: never adopts.
     func contains(_ pid: pid_t) -> Bool { resolve(pid, via: nil) }
 
-    /// An adoption point (an activation, an app launch): pid is in the tree, or it or an ancestor is adopted.
+    /// An adoption point (an activation, an app launch, a restore-target check): pid is in the tree, or it or an
+    /// ancestor is adopted.
     func adopt(_ pid: pid_t, via: String) -> Bool { resolve(pid, via: via) }
 
     private func resolve(_ pid: pid_t, via: String?) -> Bool {
@@ -500,20 +905,20 @@ final class Tree {
     }
 
     /// The periodic scan: every process outside the tree that a rule could adopt on its own (the token rule
-    /// reads only processes absent from the pre-launch snapshot, the attach rule only those running
-    /// --attach-exe). A process checked and not adopted is skipped until its Sighting changes. Returns the
-    /// pids adopted.
+    /// reads only processes the pre-launch snapshot did not see, by pid and start time; the attach rule only
+    /// those running --attach-exe). A process checked and not adopted is skipped until its Sighting changes.
+    /// Returns the pids adopted.
     func scan() -> [pid_t] {
         let pids = allPids()
         lock.lock(); defer { lock.unlock() }
         let live = Set(pids)
-        snapshot.formIntersection(live)  // a pid that went away and came back names a new process
         checked = checked.filter { live.contains($0.key) }
         let me = getpid()
         var adopted: [pid_t] = []
         for pid in pids where pid != me && lineage.members[pid] == nil {
-            guard lineage.matcher != nil || !snapshot.contains(pid), let info = bsdInfo(pid) else { continue }
+            guard let info = bsdInfo(pid) else { continue }
             let sighting = Sighting(info)
+            guard lineage.matcher != nil || snapshot[pid] != sighting.start else { continue }
             if checked[pid] == sighting { continue }
             let result = lineage.resolve(pid, adopting: true, ancestors: false, source)
             report(result, via: "scan")
@@ -553,17 +958,22 @@ func screens() -> Never {
     exit(0)
 }
 
-/// stdin: a header `{"front": pid|null, "frontWindow": id|null, "guardSeconds": S, "token": T, "attach": {"exe",
-/// "needle"}, "before": [pid], "roots": [pid], "timSpace": n, "procs": [...]}` (all but front and guardSeconds
-/// optional), then rows. A row's `procs`, `[{"pid", "ppid", "start", "exe", "argv", "env"}]`, defines synthetic
-/// processes (replacing any with the same pid; "start": null means gone, absent means 1); its action is one of
-/// `{"t", "activate": pid, "focused": {"id", "pid"}}` (an activation; `focused` is the window yabai reports
-/// focused afterwards, optional), `{"t", "launch": pid}` (an app launch or a scan sighting), `{"t", "move": pid}`
-/// (the check before a window move), `{"t", "space": n, "windowSpace": n|null}` (the Space Tim's display shows,
-/// and the one his restore-target window is on). stdout: one line per action.
+/// stdin: a header `{"front": pid|null, "frontWindow": id|null, "frontWindowSpace": n|null, "guardSeconds": S,
+/// "token": T, "attach": {"exe", "needle"}, "before": [pid], "roots": [pid], "timSpace": n, "input": t|null,
+/// "procs": [...]}` (all but front and guardSeconds optional), then rows. `procs`, `[{"pid", "ppid", "start",
+/// "exe", "argv", "env", "unreadable"}]`, defines synthetic processes (replacing any with the same pid; "start":
+/// null means gone, absent means 1; "unreadable": true hides its arguments and environment); "before" pids are
+/// snapshotted with their start times then. In the header, as at the guard's start, attach members among the
+/// header's procs join the tree before the front app and its window become the restore target. A row may set
+/// `"input": t`, when Tim's last HID input came (it stays until changed). Its action is one of
+/// `{"t", "activate": pid, "focused": {"id", "pid", "space"}}` (an activation; `focused` is the window yabai
+/// reports focused afterwards, optional), `{"t", "launch": pid}` (an app launch or a scan sighting),
+/// `{"t", "move": pid}` (the check before a window move), `{"t", "space": n, "windowSpace": n|null}` (the Space
+/// Tim's display shows; windowSpace, optional, is the Space his restore-target window was last verified on, null:
+/// gone). stdout: one line per action.
 func decide() -> Never {
     var procs: [pid_t: [String: Any]] = [:]
-    var before = Set<pid_t>()
+    var before: [pid_t: UInt64] = [:]
     func number(_ value: Any?) -> NSNumber? { value as? NSNumber }
     func pid(_ value: Any?) -> pid_t? { number(value).map { pid_t($0.int32Value) } }
     func strings(_ value: Any?) -> [[UInt8]] { (value as? [String] ?? []).map { Array($0.utf8) } }
@@ -578,30 +988,51 @@ func decide() -> Never {
             return number(row["start"])?.uint64Value ?? 1
         },
         exe: { procs[$0]?["exe"] as? String },
-        args: { p in procs[p].map { ProcArgs(argv: strings($0["argv"]), env: strings($0["env"])) } },
-        isNew: { !before.contains($0) })
+        args: { p in
+            guard let row = procs[p], row["unreadable"] as? Bool != true else { return nil }
+            return ProcArgs(argv: strings(row["argv"]), env: strings(row["env"]))
+        },
+        isNew: { before[$0] != $1 })
     var policy = RestorePolicy(userFront: nil, guardUntil: 0)
     var lineage = Lineage(tokenEntry: nil, matcher: nil)
-    var target = RestoreTarget(pid: nil)
+    var target = RestoreTarget(pid: nil, start: nil)
     var spaces = SpacePolicy(expected: nil)
+    var input: Double?
     var started = false
+    func inTree(_ p: pid_t) -> Bool { lineage.resolve(p, adopting: true, source).inTree }
+    /// The app focus goes back to, checked as before every focus; returns it if it was dropped.
+    func revalidate() -> pid_t? {
+        guard let u = policy.userFront else { return nil }
+        if target.pid == u && target.revalidate(start: source.start(u), inTree: inTree(u)) { return nil }
+        policy.forgetUserFront()
+        target = RestoreTarget(pid: nil, start: nil)
+        return u
+    }
     while let line = readLine() {
         guard !line.isEmpty, let data = line.data(using: .utf8),
               let row = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
         define(row["procs"])
+        if row.keys.contains("input") { input = number(row["input"])?.doubleValue }
         if !started {
             started = true
             let front = pid(row["front"])
-            policy = RestorePolicy(userFront: front, guardUntil: number(row["guardSeconds"])?.doubleValue ?? 0)
             let attach = row["attach"] as? [String: Any]
             lineage = Lineage(tokenEntry: (row["token"] as? String).map(tokenEntry),
                               matcher: attach.map { AttachMatcher(exe: $0["exe"] as? String ?? "", needle: Array(($0["needle"] as? String ?? "").utf8)) })
-            before = Set((row["before"] as? [NSNumber] ?? []).map { pid_t($0.int32Value) })
+            for p in (row["before"] as? [NSNumber] ?? []).map({ pid_t($0.int32Value) }) { before[p] = source.start(p) ?? 1 }
             for root in (row["roots"] as? [NSNumber] ?? []).map({ pid_t($0.int32Value) }) {
                 lineage.addRoot(root, start: source.start(root) ?? 1)
             }
-            target = RestoreTarget(pid: front)
-            if let front, let window = number(row["frontWindow"])?.intValue { _ = target.focused(window, owner: front, ownerInTree: false) }
+            if lineage.matcher != nil {
+                for p in procs.keys.sorted() { _ = lineage.resolve(p, adopting: true, ancestors: false, source) }
+            }
+            let frontIsTims = front.map { !inTree($0) } ?? false
+            policy = RestorePolicy(userFront: frontIsTims ? front : nil, guardUntil: number(row["guardSeconds"])?.doubleValue ?? 0)
+            target = RestoreTarget(pid: frontIsTims ? front : nil, start: front.flatMap(source.start))
+            if let front, let window = number(row["frontWindow"])?.intValue {
+                _ = target.verified(window, owner: front, ownerStart: source.start(front), ownerInTree: !frontIsTims,
+                                    space: number(row["frontWindowSpace"])?.intValue)
+            }
             spaces = SpacePolicy(expected: number(row["timSpace"])?.intValue)
             continue
         }
@@ -616,19 +1047,28 @@ func decide() -> Never {
             out["pid"] = Int(p)
             let result = lineage.resolve(p, adopting: true, source)
             record(result)
-            switch policy.activation(pid: p, inTree: result.inTree, at: t) {
+            if let dropped = revalidate() { out["targetDropped"] = Int(dropped) }
+            switch policy.activation(pid: p, inTree: result.inTree, at: t, input: input) {
             case .restore(let to):
                 out["decision"] = "restore"
                 out["to"] = Int(to)
                 out["window"] = target.window(for: to) ?? NSNull()
                 spaces.theft(at: t)
-            case .restored(let latency): out["decision"] = "restored"; out["latencyMs"] = ms(latency)
-            case .user: out["decision"] = "user"; target.userSwitched(to: p)
+            case .restored(let latency):
+                out["decision"] = "restored"
+                out["latencyMs"] = ms(latency)
+                spaces.givenBack(at: t)
+            case .user:
+                out["decision"] = "user"
+                target.userSwitched(to: p, start: source.start(p))
+                spaces.timActivated(at: t)
+            case .system: out["decision"] = "system"
             case .unrestorable: out["decision"] = "unrestorable"; spaces.theft(at: t)
             case .afterGuard: out["decision"] = "after-guard"
             }
             if let focused = row["focused"] as? [String: Any], let id = number(focused["id"])?.intValue, let owner = pid(focused["pid"]) {
-                _ = target.focused(id, owner: owner, ownerInTree: lineage.resolve(owner, adopting: false, source).inTree)
+                _ = target.verified(id, owner: owner, ownerStart: source.start(owner), ownerInTree: inTree(owner),
+                                    space: number(focused["space"])?.intValue)
             }
             out["target"] = target.window ?? NSNull()
         } else if let p = pid(row["launch"]) {
@@ -638,11 +1078,14 @@ func decide() -> Never {
             out["pid"] = Int(p)
             record(lineage.resolve(p, adopting: false, source))
         } else if let visible = number(row["space"])?.intValue {
-            switch spaces.observed(visible, at: t, window: target.window, windowSpace: number(row["windowSpace"])?.intValue) {
+            if let window = target.window, row.keys.contains("windowSpace") { target.located(window, space: number(row["windowSpace"])?.intValue) }
+            if let dropped = revalidate() { out["targetDropped"] = Int(dropped) }
+            switch spaces.observed(visible, at: t, input: input, window: target.window, windowSpace: target.windowSpace) {
             case .unchanged: out["space"] = "unchanged"
             case .user(let space): out["space"] = "user"; out["expected"] = space
             case .restore(let from, let to, let window): out["space"] = "restore"; out["from"] = from; out["to"] = to; out["window"] = window
             case .unrestorable(let from, let to): out["space"] = "unrestorable"; out["from"] = from; out["to"] = to
+            case .unexplained(let shown, let expected): out["space"] = "unexplained"; out["from"] = expected; out["to"] = shown
             }
         } else {
             continue
@@ -656,7 +1099,7 @@ func decide() -> Never {
 /// (membership only). stdout: `{"ready": true}` once the pre-launch snapshot is taken, then the attached and
 /// dropped events, and `{"scanned": [pid]}` or `{"pid", "tree"}` per line.
 func resolveLive(token: String?, matcher: AttachMatcher?, needle: String?) -> Never {
-    let tree = Tree(Lineage(tokenEntry: token.map(tokenEntry), matcher: matcher), snapshot: Set(allPids()), t0: uptime(),
+    let tree = Tree(Lineage(tokenEntry: token.map(tokenEntry), matcher: matcher), snapshot: liveStarts(), t0: uptime(),
                     tokenHash: token.map(shortHash), needle: needle)
     writeLine(["ready": true])
     while let line = readLine() {
@@ -672,6 +1115,48 @@ func resolveLive(token: String?, matcher: AttachMatcher?, needle: String?) -> Ne
     exit(0)
 }
 
+func describe(_ reply: Helpers.Reply) -> [String: Any] {
+    switch reply {
+    case .exited(let code, let data): return ["reply": "exit", "code": Int(code), "out": String(decoding: data, as: UTF8.self)]
+    case .timedOut: return ["reply": "timeout"]
+    case .refused(let why): return ["reply": "refused", "why": why]
+    }
+}
+
+/// stdin lines: `call <id> <timeout> <args…>` (a yabai call on a worker queue, tracked as work in flight like a
+/// park or a Space check), `main <id> <args…>` (the same call on the main queue), `end` (the guard's end:
+/// endWork). stdout: `{"ready": true}`, the events, `{"call": id, "reply": …}` per call (written before the call
+/// stops being in flight) and `{"end": {"unsettled", "killed", "problems"}}`. Exits at the end of stdin.
+func helpersMode(yabai path: String) -> Never {
+    writeLine(["ready": true])
+    let calls = DispatchQueue(label: "gui-launch.calls", attributes: .concurrent)
+    Thread {
+        while let line = readLine() {
+            let words = line.split(separator: " ").map(String.init)
+            if words.count >= 3, words[0] == "call", let timeout = Double(words[2]) {
+                let id = words[1], args = Array(words[3...])
+                guard let op = inFlight.begin("call \(id)") else {
+                    writeLine(["call": id, "reply": "not started"])
+                    continue
+                }
+                calls.async {
+                    writeLine(describe(helpers.run(path, args, timeout: timeout)).merging(["call": id]) { $1 })
+                    inFlight.end(op)
+                }
+            } else if words.count >= 2, words[0] == "main" {
+                let id = words[1], args = Array(words[2...])
+                DispatchQueue.main.async { writeLine(describe(helpers.run(path, args, timeout: 2)).merging(["call": id]) { $1 }) }
+            } else if words == ["end"] {
+                inFlight.close()
+                let (unsettled, killed) = endWork {}
+                writeLine(["end": ["unsettled": unsettled, "killed": killed, "problems": problems.value] as [String: Any]])
+            }
+        }
+        exit(0)
+    }.start()
+    dispatchMain()
+}
+
 // MARK: - Arguments
 
 var argv = Array(CommandLine.arguments.dropFirst())
@@ -681,7 +1166,7 @@ if argv.first == "--decide" { decide() }
 var space = 0, guardSeconds = 60.0, adoptTimeout = 30.0
 var yabaiPath = "", summaryPath = ""
 var mode: String?  // "exec" or "open"
-var resolving = false
+var resolving = false, helperTest = false
 var parentWatch: pid_t?
 var attachExe: String?, attachNeedle: String?, givenToken: String?
 var launchArgv: [String] = []
@@ -690,6 +1175,7 @@ while !argv.isEmpty {
     if flag == "--" { launchArgv = argv; break }
     if flag == "--exec" || flag == "--open" { mode = String(flag.dropFirst(2)); continue }
     if flag == "--resolve" { resolving = true; continue }
+    if flag == "--helpers" { helperTest = true; continue }
     guard !argv.isEmpty else { fail("\(flag) needs a value") }
     let value = argv.removeFirst()
     switch flag {
@@ -705,6 +1191,7 @@ while !argv.isEmpty {
     default: fail("unknown flag \(flag)")
     }
 }
+if helperTest { helpersMode(yabai: yabaiPath) }
 if (attachExe == nil) != (attachNeedle == nil) { fail("--attach-exe and --attach-argv go together") }
 var matcher: AttachMatcher?
 if let attachExe, let attachNeedle {
@@ -721,150 +1208,131 @@ guard space > 0, guardSeconds > 0, guardSeconds.isFinite, adoptTimeout > 0, adop
 }
 if mode == "open" && launchArgv.first != "/usr/bin/open" { fail("--open launches /usr/bin/open, not \(launchArgv[0])") }
 if let parentWatch, parentWatch <= 1 || processStart(parentWatch) == nil { fail("--parent-pid \(parentWatch) names no process") }
-// Parking windows needs Accessibility events; without them a window could sit on Tim's Space unseen.
-guard AXIsProcessTrusted() else {
-    fail("this process is not trusted for Accessibility, so it cannot see new windows: run it from a terminal app " +
-         "listed in System Settings > Privacy & Security > Accessibility")
-}
-// macOS reports activations only to a process in a GUI session: in launchd's Background session the guard
-// would see no theft and revert none.
-var sessionID = SecuritySessionId(0)
-var sessionBits = SessionAttributeBits(rawValue: 0)
-guard SessionGetInfo(callerSecuritySession, &sessionID, &sessionBits) == errSecSuccess,
-      sessionBits.contains(.sessionHasGraphicAccess) else {
-    fail("this process is not in a GUI session, where activations are reported: start it through gui-launch")
-}
 
 // MARK: - State
 
 let t0 = uptime()
 let workspace = NSWorkspace.shared
-let frontAtLaunch = workspace.frontmostApplication
 let attaching = matcher != nil
 let token = UUID().uuidString.lowercased()
 let tokenHash = shortHash(token)
-let tree = Tree(Lineage(tokenEntry: mode == "open" ? tokenEntry(token) : nil, matcher: matcher), snapshot: Set(allPids()),
+let tree = Tree(Lineage(tokenEntry: mode == "open" ? tokenEntry(token) : nil, matcher: matcher), snapshot: liveStarts(),
                 t0: t0, tokenHash: tokenHash, needle: attachNeedle)
-var policy = RestorePolicy(userFront: frontAtLaunch?.processIdentifier, guardUntil: guardSeconds)
+// The baseline's (main thread): set before anything launches.
+var frontAtLaunch: NSRunningApplication?
+var focusAtLaunch: [String: Any] = [:]
+var timSpaceAtLaunch: Int?
+var policy = RestorePolicy(userFront: nil, guardUntil: guardSeconds)  // main thread
+let restoreTarget = Locked(RestoreTarget(pid: nil, start: nil))
+let spacePolicy = Locked(SpacePolicy(expected: nil))
+let spaceEvents = Locked([[String: Any]]())
+let moves = Locked([[String: Any]]())
 var theft: [String: Any]?          // the tree activation not yet given back (main thread)
+let theftPending = Locked(false)   // theft != nil, for the end
 var reverted: [[String: Any]] = []  // main thread
-var lastRestore: (method: String, window: Int?) = ("", nil)  // main thread
-var finished = false
-let stopping = Locked(false)
+/// How the last revert gave focus back, set before its call (the activation it causes may arrive first).
+let lastRestore = Locked((method: "", window: Int?.none))
+var started = false     // main: launched, or guarding without a launch
+var finishing = false   // main
+var finished = false    // main
 var launchFailure: String?
 var launchedAt: Double?
-/// Problems the check must report: yabai calls that ran out of time.
-let problems = Locked([String]())
+var scanTimer: DispatchSourceTimer?
+var spawnedPid: pid_t = 0
 
 let yabaiQueue = DispatchQueue(label: "gui-launch.yabai")
 let axQueue = DispatchQueue(label: "gui-launch.ax")
 let timQueue = DispatchQueue(label: "gui-launch.tim")
 let scanQueue = DispatchQueue(label: "gui-launch.scan")
+let restoreQueue = DispatchQueue(label: "gui-launch.restore")
+let startQueue = DispatchQueue(label: "gui-launch.start")
+let endQueue = DispatchQueue(label: "gui-launch.end")
 
-// MARK: - yabai (every call bounded)
+// MARK: - Tim's input
 
-final class Box<Value>: @unchecked Sendable {  // written by one reader thread, read after it signals
-    var value: Value
-    init(_ value: Value) { self.value = value }
+let anyInputEvent = unsafeBitCast(UInt32.max, to: CGEventType.self)  // kCGAnyInputEventType
+
+/// When Tim's last HID input (keyboard, mouse, trackpad) came, in seconds since launch: the hardware event
+/// source's clock (the HIDIdleTime one), so no synthetic event, an app's or yabai's, counts.
+func lastInput() -> Double? {
+    let since = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: anyInputEvent)
+    return since.isFinite && since >= 0 ? uptime() - t0 - since : nil
 }
 
-/// One yabai call. One that does not finish within `timeout` is killed and recorded as a problem for the
-/// check, never waited on.
-@Sendable func yabai(_ args: [String], timeout: Double = 2) -> Any? {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: yabaiPath)
-    process.arguments = ["-m"] + args
-    let out = Pipe()
-    process.standardOutput = out
-    process.standardError = FileHandle.nullDevice
-    let exited = DispatchSemaphore(value: 0)
-    process.terminationHandler = { _ in exited.signal() }
-    do { try process.run() } catch { return nil }
-    let output = Box(Data())
-    let read = DispatchSemaphore(value: 0)
-    DispatchQueue.global().async {
-        output.value = out.fileHandleForReading.readDataToEndOfFile()
-        read.signal()
-    }
-    guard exited.wait(timeout: .now() + timeout) == .success else {
-        process.terminate()
-        let message = "yabai -m \(args.joined(separator: " ")) did not answer within \(timeout) s"
-        problems.update { $0.append(message) }
-        emit(["event": "yabai-timeout", "args": args, "timeoutS": timeout])
-        return nil
-    }
-    read.wait()
-    guard process.terminationStatus == 0 else { return nil }
-    return output.value.isEmpty ? [:] as [String: Any] : try? JSONSerialization.jsonObject(with: output.value)
+// MARK: - yabai (off the main thread, every call bounded)
+
+let queryTimeout = 2.0
+/// A focus on the restore path. While Studio launched, yabai let window queries run past 0.5 s and a query plus
+/// a focus took 258 ms (counter-ball receipt 20261006T040054Z): twice the deadline that failed. A focus that
+/// misses it falls back to re-activating the app (580 ms there).
+let focusTimeout = 1.0
+
+@Sendable func yabaiReply(_ args: [String], timeout: Double = queryTimeout) -> Helpers.Reply {
+    helpers.run(yabaiPath, args, timeout: timeout)
 }
 
-@Sendable func windowInfo(_ id: Int, timeout: Double = 2) -> [String: Any]? {
-    yabai(["query", "--windows", "--window", String(id)], timeout: timeout) as? [String: Any]
+@Sendable func json(_ data: Data) -> Any? { data.isEmpty ? [:] as [String: Any] : try? JSONSerialization.jsonObject(with: data) }
+
+@Sendable func yabai(_ args: [String], timeout: Double = queryTimeout) -> Any? {
+    guard case .exited(0, let data) = yabaiReply(args, timeout: timeout) else { return nil }
+    return json(data)
 }
 
-/// yabai's focused window (a query; yabai acts on a window only when given its id) and AppKit's main screen.
-@Sendable func focusContext() -> [String: Any] {
-    let w = yabai(["query", "--windows", "--window"]) as? [String: Any]
-    return ["window": w?["id"] ?? NSNull(), "windowPid": w?["pid"] ?? NSNull(), "windowApp": w?["app"] ?? NSNull(),
-            "mainScreen": NSScreen.main?.localizedName ?? NSNull()]
+@Sendable func windowInfo(_ id: Int) -> [String: Any]? {
+    yabai(["query", "--windows", "--window", String(id)]) as? [String: Any]
 }
 
-/// The Space shown on Tim's display (the one holding Space 1).
-@Sendable func timDisplaySpace() -> Int? {
-    guard let spaces = yabai(["query", "--spaces"]) as? [[String: Any]],
+/// The Space shown on Tim's display (the one holding Space 1), from `yabai -m query --spaces`.
+@Sendable func timDisplaySpace(_ spaces: Any?) -> Int? {
+    guard let spaces = spaces as? [[String: Any]],
           let display = spaces.first(where: { ($0["index"] as? NSNumber)?.intValue == 1 })?["display"] as? NSNumber else { return nil }
     let shown = spaces.first { ($0["display"] as? NSNumber) == display && $0["is-visible"] as? Bool == true }
     return (shown?["index"] as? NSNumber)?.intValue
 }
 
-/// Where focus sat at launch, for gui-launch's check: yabai's focused window, and the screen AppKit calls main
-/// (the key window's); the Space Tim's display showed; and the window a revert focuses, if it is his front app's.
-let focusAtLaunch = focusContext()
-let timSpaceAtLaunch = timDisplaySpace()
-let restoreTarget = Locked(RestoreTarget(pid: frontAtLaunch?.processIdentifier))
-if let id = (focusAtLaunch["window"] as? NSNumber)?.intValue, let owner = (focusAtLaunch["windowPid"] as? NSNumber)?.int32Value {
-    _ = restoreTarget.update { $0.focused(id, owner: owner, ownerInTree: false) }
+@Sendable func queryTimSpace() -> Int? { timDisplaySpace(yabai(["query", "--spaces"])) }
+
+func windowFields(_ w: [String: Any]?) -> [String: Any] {
+    ["window": w?["id"] ?? NSNull(), "windowPid": w?["pid"] ?? NSNull(), "windowApp": w?["app"] ?? NSNull()]
 }
-let spacePolicy = Locked(SpacePolicy(expected: timSpaceAtLaunch))
-let spaceEvents = Locked([[String: Any]]())
 
-// MARK: - Windows (yabaiQueue; the final sweep on main)
-
-let moves = Locked([[String: Any]]())
+// MARK: - Windows (yabaiQueue; the final sweep on endQueue)
 
 /// Moves one tree window to the target Space by id, after checking yabai knows it and that it is the tree's (its
 /// pid, with the start time the tree recorded). `seen` is when the event that reported it arrived; yabai may
 /// learn of a brand-new window a few ms after Accessibility does, so an unknown id is retried for up to a
 /// second, without holding up the queue.
 func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
-    guard final || !stopping.value else { return }
-    guard let w = windowInfo(id) else {
-        if !final && uptime() - seen < 1 { yabaiQueue.asyncAfter(deadline: .now() + 0.01) { park(id, seen: seen, via: via) } }
-        return
+    tracked("park of window \(id) (\(via))", final: final) {
+        guard let w = windowInfo(id) else {
+            if !final && uptime() - seen < 1 { yabaiQueue.asyncAfter(deadline: .now() + 0.01) { park(id, seen: seen, via: via) } }
+            return
+        }
+        guard let pid = (w["pid"] as? NSNumber)?.int32Value, let from = (w["space"] as? NSNumber)?.intValue, from != 0, from != space,
+              tree.contains(pid) else { return }
+        _ = yabai(["window", String(id), "--space", String(space)])
+        let after = (windowInfo(id)?["space"] as? NSNumber)?.intValue
+        let done = uptime()
+        var record: [String: Any] = [
+            "event": "window", "id": id, "pid": Int(pid), "app": w["app"] ?? "", "title": w["title"] ?? "",
+            "subrole": w["subrole"] ?? "", "from": from, "to": after ?? NSNull(), "moved": after == space, "via": via,
+            "latencyMs": ms(done - seen),
+        ]
+        if timSpaces.contains(from) { record["onTimSpaceMs"] = ms(done - seen) }
+        moves.update { $0.append(record) }
+        emit(record)
     }
-    guard let pid = (w["pid"] as? NSNumber)?.int32Value, let from = (w["space"] as? NSNumber)?.intValue, from != 0, from != space,
-          tree.contains(pid) else { return }
-    _ = yabai(["window", String(id), "--space", String(space)])
-    let after = (windowInfo(id)?["space"] as? NSNumber)?.intValue
-    let done = uptime()
-    var record: [String: Any] = [
-        "event": "window", "id": id, "pid": Int(pid), "app": w["app"] ?? "", "title": w["title"] ?? "",
-        "subrole": w["subrole"] ?? "", "from": from, "to": after ?? NSNull(), "moved": after == space, "via": via,
-        "latencyMs": ms(done - seen),
-    ]
-    if timSpaces.contains(from) { record["onTimSpaceMs"] = ms(done - seen) }
-    moves.update { $0.append(record) }
-    emit(record)
 }
 
 func sweep(_ via: String, final: Bool = false) {
-    guard final || !stopping.value else { return }
-    let seen = uptime()
-    guard let windows = yabai(["query", "--windows"]) as? [[String: Any]] else { return }
-    for w in windows {
-        guard let id = (w["id"] as? NSNumber)?.intValue, let pid = (w["pid"] as? NSNumber)?.int32Value,
-              let at = (w["space"] as? NSNumber)?.intValue, at != 0, at != space, tree.contains(pid) else { continue }
-        park(id, seen: seen, via: via, final: final)
+    tracked("sweep (\(via))", final: final) {
+        let seen = uptime()
+        guard let windows = yabai(["query", "--windows"]) as? [[String: Any]] else { return }
+        for w in windows {
+            guard let id = (w["id"] as? NSNumber)?.intValue, let pid = (w["pid"] as? NSNumber)?.int32Value,
+                  let at = (w["space"] as? NSNumber)?.intValue, at != 0, at != space, tree.contains(pid) else { continue }
+            park(id, seen: seen, via: via, final: final)
+        }
     }
 }
 
@@ -875,15 +1343,6 @@ func axWindowID(_ element: AXUIElement, _ id: UnsafeMutablePointer<CGWindowID>) 
 
 var axLoop: CFRunLoop!
 var observers: [pid_t: AXObserver] = [:]  // axQueue
-let axReady = DispatchSemaphore(value: 0)
-Thread {
-    axLoop = CFRunLoopGetCurrent()
-    let keepAlive = CFRunLoopTimerCreateWithHandler(nil, .greatestFiniteMagnitude, 0, 0, 0) { _ in }
-    CFRunLoopAddTimer(axLoop, keepAlive, .defaultMode)
-    axReady.signal()
-    CFRunLoopRun()
-}.start()
-axReady.wait()
 
 let axCallback: AXObserverCallback = { _, element, notification, _ in
     let seen = uptime()
@@ -898,7 +1357,7 @@ let axCallback: AXObserverCallback = { _, element, notification, _ in
 /// that long to become an app), then every 250 ms, until the guard ends.
 func observe(_ pid: pid_t, attempt: Int = 0) {
     axQueue.async {
-        guard observers[pid] == nil, processStart(pid) != nil, !stopping.value else { return }
+        guard observers[pid] == nil, processStart(pid) != nil, !stopping else { return }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
         var created: AXObserver?
@@ -927,100 +1386,193 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
 
 // MARK: - Tim's focus and Space
 
-/// Gives focus back to Tim's app `pid`: by focusing his restore-target window through yabai (SkyLight acts at
-/// once, and the window's Space comes back with it) once yabai confirms the window is still that app's, else by
-/// re-activating the app (cooperative on macOS 14+: a slow app answers late). Main thread.
-@Sendable func restoreFocus(to pid: pid_t) -> (ok: Bool, method: String, window: Int?) {
-    if let window = restoreTarget.value.window(for: pid), let info = windowInfo(window, timeout: 0.5),
-       (info["pid"] as? NSNumber)?.int32Value == pid, info["is-minimized"] as? Bool != true,
-       yabai(["window", "--focus", String(window)], timeout: 0.5) != nil {
-        return (true, "window", window)
+/// Before every focus or activation for Tim: his restore target's app (`pid`) is still the process it was taken
+/// from (pid and start time) and outside the tree (any rule: lineage, token, attach; adopting). If not, the
+/// target is dropped and the app is no longer the one focus goes back to. Any thread; no child process.
+@Sendable func revalidateTarget(_ pid: pid_t) -> Bool {
+    let inTree = tree.adopt(pid, via: "restore-check")
+    let start = processStart(pid)
+    let ok = restoreTarget.update { $0.pid == pid && $0.revalidate(start: start, inTree: inTree) }
+    if !ok {
+        emit(["event": "restore-target-dropped", "pid": Int(pid), "reason": inTree ? "in the tree" : "not the process it was taken from"])
+        if onMain() {
+            if policy.userFront == pid { policy.forgetUserFront() }
+        } else {
+            DispatchQueue.main.async { if policy.userFront == pid { policy.forgetUserFront() } }
+        }
     }
-    guard let app = NSRunningApplication(processIdentifier: pid) else { return (false, "activate", nil) }
-    if #available(macOS 14, *) { return (app.activate(), "activate", nil) }
-    return (app.activate(options: [.activateIgnoringOtherApps]), "activate", nil)
+    return ok
 }
 
-/// After Tim switched to `pid` himself: the window yabai reports focused becomes his restore target once it is
-/// that app's (yabai can lag the switch by some ms, so a few tries).
-func refreshTarget(_ pid: pid_t, attempt: Int = 0) {  // timQueue
-    guard !stopping.value, restoreTarget.value.pid == pid else { return }
-    if let w = yabai(["query", "--windows", "--window"], timeout: 0.5) as? [String: Any],
-       let id = (w["id"] as? NSNumber)?.intValue, let owner = (w["pid"] as? NSNumber)?.int32Value {
-        let ownerInTree = tree.contains(owner)
-        if restoreTarget.update({ $0.focused(id, owner: owner, ownerInTree: ownerInTree) }) {
-            emit(["event": "restore-target", "pid": Int(owner), "window": id])
+func activate(_ pid: pid_t) -> Bool {  // main
+    guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+    if #available(macOS 14, *) { return app.activate() }
+    return app.activate(options: [.activateIgnoringOtherApps])
+}
+
+/// Gives focus back to Tim's app `pid`, which a tree process took at `stolenAt` (uptime): focuses his restore-
+/// target window by its cached id (no query on this path: a window that is gone fails the focus harmlessly), or,
+/// when there is none or the focus fails, re-activates the app (cooperative on macOS 14+: a slow app answers
+/// late). The target is checked again first. restoreQueue.
+func revert(to pid: pid_t, stolenAt: Double) {
+    tracked("revert to pid \(pid)", final: true) {
+        let began = uptime()
+        var record: [String: Any] = ["event": "restore-call", "to": Int(pid), "method": "none", "window": NSNull(), "ok": false]
+        defer {
+            record["callMs"] = ms(uptime() - began)
+            record["sinceTheftMs"] = ms(uptime() - stolenAt)
+            emit(record)
+        }
+        guard revalidateTarget(pid) else {
+            record["reason"] = "the restore target's app joined the tree or exited"
             return
         }
-    }
-    if attempt < 5 { timQueue.asyncAfter(deadline: .now() + 0.03) { refreshTarget(pid, attempt: attempt + 1) } }
-}
-
-var unrestorableReported: Double?  // timQueue: the theft whose unrestorable Space jump was reported
-var spacePollScheduled = false     // timQueue
-
-func checkSpace() {  // timQueue
-    guard !stopping.value, let visible = timDisplaySpace() else { return }
-    let window = restoreTarget.value.window
-    var windowSpace: Int?
-    if let expected = spacePolicy.value.expected, visible != expected, let window {
-        windowSpace = (windowInfo(window)?["space"] as? NSNumber)?.intValue
-    }
-    let t = uptime() - t0
-    let (decision, theftAt) = spacePolicy.update { ($0.observed(visible, at: t, window: window, windowSpace: windowSpace), $0.theftAt) }
-    switch decision {
-    case .unchanged:
-        break
-    case .user(let shown):
-        emit(["event": "user-space", "space": shown])
-    case .restore(let from, let to, let window):
-        _ = yabai(["window", "--focus", String(window)])
-        var after = timDisplaySpace()
-        for _ in 0..<5 where after != to {
-            usleep(50_000)
-            after = timDisplaySpace()
+        if let window = restoreTarget.value.window(for: pid) {
+            lastRestore.update { $0 = ("window", window) }
+            record["window"] = window
+            switch yabaiReply(["window", "--focus", String(window)], timeout: focusTimeout) {
+            case .exited(0, _):
+                record["method"] = "window"
+                record["ok"] = true
+                return
+            case .exited(let code, _): record["windowError"] = "exit \(code)"
+            case .timedOut: record["windowError"] = "no answer within \(focusTimeout) s"
+            case .refused(let why): record["windowError"] = why
+            }
         }
-        var record: [String: Any] = ["event": "space-restored", "from": from, "to": after ?? NSNull(), "window": window, "ok": after == to]
-        record["latencyMs"] = theftAt.map { ms(uptime() - t0 - $0) } ?? NSNull()
-        spaceEvents.update { $0.append(record) }
-        emit(record)
-    case .unrestorable(let from, let to):
-        guard unrestorableReported != theftAt else { break }
-        unrestorableReported = theftAt
-        let record: [String: Any] = ["event": "space-unrestorable", "from": from, "to": to, "window": window ?? NSNull()]
-        spaceEvents.update { $0.append(record) }
-        emit(record)
+        lastRestore.update { $0 = ("activate", nil) }
+        record["method"] = "activate"
+        record["ok"] = DispatchQueue.main.sync { activate(pid) }
     }
 }
 
-/// Checks Tim's Space every 100 ms while within the grace after a tree activation: macOS switches Spaces some
-/// ms after the activation, possibly after the revert.
+/// After Tim switched to `pid` himself: the window yabai reports focused becomes his restore target, with its
+/// Space, once it is that app's (yabai can lag the switch by some ms, so a few tries). timQueue.
+func refreshTarget(_ pid: pid_t, attempt: Int = 0) {
+    tracked("restore-target refresh for pid \(pid)") {
+        guard restoreTarget.value.pid == pid else { return }
+        if let w = yabai(["query", "--windows", "--window"]) as? [String: Any],
+           let id = (w["id"] as? NSNumber)?.intValue, let owner = (w["pid"] as? NSNumber)?.int32Value {
+            let ownerInTree = tree.adopt(owner, via: "restore-target")
+            let start = processStart(owner)
+            let space = (w["space"] as? NSNumber)?.intValue
+            if restoreTarget.update({ $0.verified(id, owner: owner, ownerStart: start, ownerInTree: ownerInTree, space: space) }) {
+                emit(["event": "restore-target", "pid": Int(owner), "window": id, "space": space ?? NSNull()])
+                return
+            }
+        }
+        if attempt < 5 { timQueue.asyncAfter(deadline: .now() + 0.03) { refreshTarget(pid, attempt: attempt + 1) } }
+    }
+}
+
+/// Reads the restore-target window's owner and Space again (after a Space restore); a window yabai no longer
+/// knows is dropped. timQueue.
+@Sendable func verifyTarget(_ id: Int) {
+    switch yabaiReply(["query", "--windows", "--window", String(id)]) {
+    case .exited(0, let data):
+        guard let w = json(data) as? [String: Any], let owner = (w["pid"] as? NSNumber)?.int32Value else { return }
+        let ownerInTree = tree.adopt(owner, via: "restore-target")
+        let start = processStart(owner)
+        let space = (w["space"] as? NSNumber)?.intValue
+        _ = restoreTarget.update { $0.window == id && $0.verified(id, owner: owner, ownerStart: start, ownerInTree: ownerInTree, space: space) }
+    case .exited:
+        restoreTarget.update { $0.located(id, space: nil) }
+    case .timedOut, .refused:
+        break
+    }
+}
+
+var spaceReported: (kind: String, space: Int)?  // timQueue: the stray Space last reported, until Tim's display is back
+var spacePollScheduled = false                   // timQueue
+
+/// Tim's display, at `t` (seconds since launch) with his last input at `input`: what SpacePolicy decides, done
+/// and recorded. timQueue.
+func checkSpace(at t: Double, input: Double?) {
+    tracked("Space check") {
+        guard let visible = queryTimSpace() else { return }
+        let target = restoreTarget.value
+        let (decision, theftAt) = spacePolicy.update {
+            ($0.observed(visible, at: t, input: input, window: target.window, windowSpace: target.windowSpace), $0.theftAt)
+        }
+        switch decision {
+        case .unchanged:
+            spaceReported = nil
+        case .user(let shown):
+            spaceReported = nil
+            emit(["event": "user-space", "space": shown, "sinceInputMs": input.map { ms(t - $0) } ?? NSNull()])
+        case .restore(let from, let to, let window):
+            spaceReported = nil
+            restoreSpace(from: from, to: to, window: window, theftAt: theftAt)
+        case .unrestorable(let from, let to):
+            guard spaceReported?.kind != "unrestorable" || spaceReported?.space != from else { break }
+            spaceReported = ("unrestorable", from)
+            let record: [String: Any] = ["event": "space-unrestorable", "from": from, "to": to, "expected": to, "window": target.window ?? NSNull()]
+            spaceEvents.update { $0.append(record) }
+            emit(record)
+        case .unexplained(let shown, let expected):
+            guard spaceReported?.kind != "unexplained" || spaceReported?.space != shown else { break }
+            spaceReported = ("unexplained", shown)
+            let record: [String: Any] = ["event": "space-unexplained", "from": expected, "to": shown, "expected": expected,
+                                         "sinceInputMs": input.map { ms(t - $0) } ?? NSNull()]
+            spaceEvents.update { $0.append(record) }
+            emit(record)
+        }
+    }
+}
+
+/// The tree moved Tim's display to `from`: focusing his restore-target window (checked again first) brings `to`,
+/// the expected Space, back. Recorded either way: `ok` only when his display shows `to` again.
+@Sendable func restoreSpace(from: Int, to: Int, window: Int, theftAt: Double?) {  // timQueue, in a Space check
+    var focused = false
+    if let pid = restoreTarget.value.pid, revalidateTarget(pid), restoreTarget.value.window == window,
+       case .exited(0, _) = yabaiReply(["window", "--focus", String(window)], timeout: focusTimeout) {
+        focused = true
+    }
+    var after = queryTimSpace()
+    let until = uptime() + 1
+    while after != to && uptime() < until {
+        usleep(50_000)
+        after = queryTimSpace()
+    }
+    var record: [String: Any] = ["event": "space-restored", "from": from, "to": after ?? NSNull(), "expected": to,
+                                 "window": window, "focused": focused, "ok": after == to]
+    record["latencyMs"] = theftAt.map { ms(uptime() - t0 - $0) } ?? NSNull()
+    spaceEvents.update { $0.append(record) }
+    emit(record)
+    verifyTarget(window)
+}
+
+/// Checks Tim's Space every 100 ms within the grace of a theft or its return: macOS switches Spaces some ms after
+/// an activation, possibly after the revert.
 func pollSpace() {  // timQueue
     guard !spacePollScheduled else { return }
     spacePollScheduled = true
     timQueue.asyncAfter(deadline: .now() + 0.1) {
         spacePollScheduled = false
-        checkSpace()
-        if spacePolicy.value.inGrace(at: uptime() - t0) { pollSpace() }
+        checkSpace(at: uptime() - t0, input: lastInput())
+        if !stopping && spacePolicy.value.polling(at: uptime() - t0) { pollSpace() }
     }
 }
 
 // MARK: - Activations (main thread)
 
-func onActivation(_ app: NSRunningApplication, at t: Double) {
+/// `t`: uptime when the activation arrived; `input`: Tim's last HID input then (seconds since launch).
+func onActivation(_ app: NSRunningApplication, at t: Double, input: Double?) {
     let pid = app.processIdentifier
     let inTree = tree.adopt(pid, via: "activation")
-    let decision = policy.activation(pid: pid, inTree: inTree, at: t - t0)
+    if let userFront = policy.userFront { _ = revalidateTarget(userFront) }
+    let decision = policy.activation(pid: pid, inTree: inTree, at: t - t0, input: input)
     let now = iso()
+    let sinceInput: Any = input.map { ms(t - t0 - $0) } ?? NSNull()
     switch decision {
     case .restore(let to):
-        let result = restoreFocus(to: to)
-        let called = uptime()
-        lastRestore = (result.method, result.window)
-        if theft == nil { theft = ["app": describe(app), "activatedAt": now, "t": t] }
+        if theft == nil {
+            theft = ["app": describe(app), "activatedAt": now, "t": t]
+            theftPending.update { $0 = true }
+        }
         emit(["event": "activation", "app": describe(app), "tree": true, "decision": "restore", "to": Int(to),
-              "restoreMethod": result.method, "restoreWindow": result.window ?? NSNull(), "restoreCallOk": result.ok,
-              "restoreCallMs": ms(called - t), "at": now])
+              "restoreWindow": restoreTarget.value.window(for: to) ?? NSNull(), "at": now])
+        restoreQueue.async { revert(to: to, stolenAt: t) }
         let theftAt = t - t0
         timQueue.async {
             spacePolicy.update { $0.theft(at: theftAt) }
@@ -1029,50 +1581,46 @@ func onActivation(_ app: NSRunningApplication, at t: Double) {
         observe(pid)
         yabaiQueue.async { sweep("activation") }
     case .restored(let latency):
+        let last = lastRestore.value
         var record: [String: Any] = ["event": "reverted", "to": describe(app), "restoredAt": now, "latencyMs": ms(latency),
-                                     "method": lastRestore.method, "window": lastRestore.window ?? NSNull()]
+                                     "method": last.method, "window": last.window ?? NSNull()]
         if let theft {
             record["stolenBy"] = theft["app"]
             record["activatedAt"] = theft["activatedAt"]
         }
         theft = nil
+        theftPending.update { $0 = false }
         reverted.append(record)
         emit(record)
-        timQueue.async { checkSpace() }
+        let at = t - t0
+        timQueue.async {
+            spacePolicy.update { $0.givenBack(at: at) }
+            checkSpace(at: at, input: input)
+        }
     case .user:
         if theft != nil { emit(["event": "restore-superseded", "by": describe(app), "at": now]) }
         theft = nil
-        restoreTarget.update { $0.userSwitched(to: pid) }
-        timQueue.async { refreshTarget(pid) }
-        emit(["event": "activation", "app": describe(app), "tree": false, "decision": "user", "at": now])
+        theftPending.update { $0 = false }
+        let start = processStart(pid)
+        restoreTarget.update { $0.userSwitched(to: pid, start: start) }
+        let at = t - t0
+        timQueue.async {
+            spacePolicy.update { $0.timActivated(at: at) }
+            refreshTarget(pid)
+        }
+        emit(["event": "activation", "app": describe(app), "tree": false, "decision": "user", "sinceInputMs": sinceInput, "at": now])
+    case .system:
+        emit(["event": "activation", "app": describe(app), "tree": false, "decision": "system", "sinceInputMs": sinceInput, "at": now])
     case .unrestorable:
         emit(["event": "activation", "app": describe(app), "tree": true, "decision": "unrestorable", "at": now])
         let theftAt = t - t0
-        timQueue.async { spacePolicy.update { $0.theft(at: theftAt) } }
+        timQueue.async {
+            spacePolicy.update { $0.theft(at: theftAt) }
+            pollSpace()
+        }
     case .afterGuard:
         break
     }
-}
-
-let center = workspace.notificationCenter
-center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { note in
-    let t = uptime()
-    guard !finished, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-    onActivation(app, at: t)
-}
-center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: nil) { note in
-    guard !finished, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-    if tree.adopt(app.processIdentifier, via: "launch") { observe(app.processIdentifier) }
-}
-center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: nil) { _ in
-    yabaiQueue.async { sweep("space-change") }
-    timQueue.async { checkSpace() }
-}
-center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil) { _ in
-    if mode != nil && !attaching && tree.hasRoots && !tree.anyAlive { finish("tree-exited") }
-}
-let appsObservation = workspace.observe(\.runningApplications, options: [.new]) { _, change in
-    for app in change.newValue ?? [] where tree.adopt(app.processIdentifier, via: "launch") { observe(app.processIdentifier) }
 }
 
 // MARK: - The scan (scanQueue)
@@ -1083,34 +1631,42 @@ func scanOnce() {
     if !adopted.isEmpty { yabaiQueue.async { sweep("attached") } }
 }
 
-var scanTimer: DispatchSourceTimer?
-if mode == "open" || attaching {
-    let timer = DispatchSource.makeTimerSource(queue: scanQueue)
-    timer.schedule(deadline: .now(), repeating: .milliseconds(150), leeway: .milliseconds(20))
-    timer.setEventHandler { if !stopping.value { scanOnce() } }
-    timer.resume()
-    scanTimer = timer
-}
-
 // MARK: - End
 
-/// Ends the guard promptly: queued yabai work is abandoned (only the final sweep runs), and nothing waits on
-/// another queue.
-var finishing = false
+/// Ends the guard (main): no new work starts; on endQueue, work in flight settles (bounded), the final scan and
+/// sweep run (unless gui-launch is gone), the helpers still running are killed; then the summary and guard-end.
+/// The main thread keeps serving events meanwhile.
 func finish(_ reason: String) {  // main
     guard !finishing else { return }
     finishing = true
-    stopping.update { $0 = true }
+    inFlight.close()
     scanTimer?.cancel()
     let orphaned = reason == "parent-exited"
-    if !orphaned {
-        if mode == "open" || attaching { _ = tree.scan() }
-        sweep("final", final: true)
-        // Let a restore issued just now land before reading the frontmost app.
-        let wait = Date().addingTimeInterval(0.2)
-        while theft != nil && Date() < wait { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+    let launched = started
+    endQueue.async {
+        var focusAtEnd: [String: Any] = [:]
+        _ = endWork {
+            guard launched && !orphaned else { return }
+            // Let a revert issued just now land before the frontmost app is read.
+            let landBy = uptime() + 0.2
+            while theftPending.value && uptime() < landBy { usleep(5_000) }
+            if mode == "open" || attaching { _ = tree.scan() }
+            sweep("final", final: true)
+            focusAtEnd = windowFields(yabai(["query", "--windows", "--window"]) as? [String: Any])
+        }
+        DispatchQueue.main.async { conclude(reason, orphaned: orphaned, focusAtEnd: focusAtEnd) }
     }
+}
+
+func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  // main
     finished = true
+    if orphaned { unlink(summaryPath) }  // gui-launch is gone: nobody reads it
+    guard started else {
+        let message = "the guard ended (\(reason)) before it launched anything"
+        complain(message)
+        emit(["event": "error", "message": message], last: true)
+        exit(2)
+    }
     var reason = reason
     var fault: String?
     if mode == "open" && launchFailure == nil && !tree.hasRoots {
@@ -1122,17 +1678,16 @@ func finish(_ reason: String) {  // main
         reason = "error"
         emit(["event": "error", "message": launchFailure])
     }
-    if orphaned {
-        unlink(summaryPath)  // gui-launch is gone: nobody reads it
-    } else {
-        let focusAtEnd = focusContext()
+    if !orphaned {
+        var end = focusAtEnd
+        end["mainScreen"] = NSScreen.main?.localizedName ?? NSNull()
         var summary = tree.summary
         summary.merge([
             "space": space, "guardSeconds": guardSeconds, "endReason": reason, "error": launchFailure ?? NSNull(),
             "fault": fault ?? NSNull(), "token": tokenHash,
             "frontAtLaunch": describe(frontAtLaunch), "frontAtEnd": describe(workspace.frontmostApplication),
             "userFront": describe(policy.userFront.flatMap { NSRunningApplication(processIdentifier: $0) }),
-            "restorePending": theft != nil, "focusAtLaunch": focusAtLaunch, "focusAtEnd": focusAtEnd,
+            "restorePending": theft != nil, "focusAtLaunch": focusAtLaunch, "focusAtEnd": end,
             "timSpace": ["atLaunch": timSpaceAtLaunch ?? NSNull(), "expected": spacePolicy.value.expected ?? NSNull()] as [String: Any],
             "reverted": reverted, "moves": moves.value, "spaceRestores": spaceEvents.value, "problems": problems.value,
         ]) { _, new in new }
@@ -1140,7 +1695,7 @@ func finish(_ reason: String) {  // main
         FileManager.default.createFile(atPath: summaryPath, contents: data)
     }
     emit(["event": "guard-end", "reason": reason, "seconds": decimal(uptime() - t0, 3), "reverted": reverted.count,
-          "moved": moves.value.filter { $0["moved"] as? Bool == true }.count])
+          "moved": moves.value.filter { $0["moved"] as? Bool == true }.count], last: true)
     if let launchFailure {
         complain(launchFailure)
         exit(2)
@@ -1148,6 +1703,9 @@ func finish(_ reason: String) {  // main
     exit(0)
 }
 
+// MARK: - Start
+
+// From here the main thread serves SIGTERM/SIGINT and gui-launch's exit, and never waits on a child process.
 var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGTERM, SIGINT] {
     signal(sig, SIG_IGN)
@@ -1166,17 +1724,159 @@ if let parentWatch {
     if processStart(parentWatch) == nil { fail("gui-launch (pid \(parentWatch)) exited before the guard was up") }
 }
 
-// MARK: - Launch
-
 // The guard is up: a caller may watch or signal it (it runs as the caller's user, in sudo's process group).
 emit(["event": "guard", "pid": Int(getpid()), "pgid": Int(getpgrp()), "start": processStart(getpid()).map { NSNumber(value: $0) } ?? NSNull()])
 
+let axReady = DispatchSemaphore(value: 0)
+Thread {
+    axLoop = CFRunLoopGetCurrent()
+    let keepAlive = CFRunLoopTimerCreateWithHandler(nil, .greatestFiniteMagnitude, 0, 0, 0) { _ in }
+    CFRunLoopAddTimer(axLoop, keepAlive, .defaultMode)
+    axReady.signal()
+    CFRunLoopRun()
+}.start()
+axReady.wait()
+
+/// Runs `work` on startQueue while the main thread keeps serving its queue. nil: the guard began to end.
+func awaitOffMain<T>(_ work: @escaping () -> T) -> T? {
+    let result = Locked<T?>(nil)
+    startQueue.async {
+        let value = work()
+        result.update { $0 = value }
+        DispatchQueue.main.async {}  // wakes the loop below
+    }
+    while !finishing {
+        if let value = result.value { return value }
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    return nil
+}
+
+struct Baseline {
+    var adopted: [pid_t] = []
+    var frontIsTims = false
+    var focused: [String: Any] = windowFields(nil)
+    var target = RestoreTarget(pid: nil, start: nil)
+    var timSpace: Int?
+    var error: String?
+}
+
+/// Before anything launches (startQueue): attach members already running join the tree; then Tim's front app
+/// (outside the tree), his focused window and its Space (the restore target, if it is that app's and outside the
+/// tree), and the Space his display shows. A yabai call that fails or misses its deadline is an error.
+func takeBaseline(front: NSRunningApplication?) -> Baseline {
+    var b = Baseline()
+    tracked("the baseline", final: true) {
+        if attaching { b.adopted = tree.scan() }
+        if let front {
+            let pid = front.processIdentifier
+            let start = processStart(pid)
+            b.frontIsTims = start != nil && !tree.adopt(pid, via: "baseline")
+            if b.frontIsTims { b.target = RestoreTarget(pid: pid, start: start) }
+        }
+        switch yabaiReply(["query", "--windows", "--window"]) {
+        case .exited(0, let data):
+            guard let w = json(data) as? [String: Any] else { b.error = "yabai's focused window is unreadable"; return }
+            b.focused = windowFields(w)
+            if let id = (w["id"] as? NSNumber)?.intValue, let owner = (w["pid"] as? NSNumber)?.int32Value {
+                _ = b.target.verified(id, owner: owner, ownerStart: processStart(owner), ownerInTree: tree.adopt(owner, via: "baseline"),
+                                      space: (w["space"] as? NSNumber)?.intValue)
+            }
+        case .exited:
+            break  // no window has focus
+        case .timedOut:
+            b.error = "yabai -m query --windows --window did not answer within \(queryTimeout) s"
+            return
+        case .refused(let why):
+            b.error = why
+            return
+        }
+        switch yabaiReply(["query", "--spaces"]) {
+        case .exited(0, let data):
+            b.timSpace = timDisplaySpace(json(data))
+            if b.timSpace == nil { b.error = "yabai shows no Space on Tim's display" }
+        case .exited(let code, _): b.error = "yabai -m query --spaces exited \(code)"
+        case .timedOut: b.error = "yabai -m query --spaces did not answer within \(queryTimeout) s"
+        case .refused(let why): b.error = why
+        }
+    }
+    return b
+}
+
+let launchFront = workspace.frontmostApplication
+guard let baseline = awaitOffMain({ takeBaseline(front: launchFront) }) else { dispatchMain() }
+if let error = baseline.error { fail("no baseline, so nothing was launched: \(error)") }
+frontAtLaunch = launchFront
+focusAtLaunch = baseline.focused
+focusAtLaunch["mainScreen"] = NSScreen.main?.localizedName ?? NSNull()
+timSpaceAtLaunch = baseline.timSpace
+policy = RestorePolicy(userFront: baseline.frontIsTims ? launchFront?.processIdentifier : nil, guardUntil: guardSeconds)
+restoreTarget.update { $0 = baseline.target }
+spacePolicy.update { $0 = SpacePolicy(expected: baseline.timSpace) }
+
+// Parking windows needs Accessibility events; without them a window could sit on Tim's Space unseen.
+guard AXIsProcessTrusted() else {
+    fail("this process is not trusted for Accessibility, so it cannot see new windows: run it from a terminal app " +
+         "listed in System Settings > Privacy & Security > Accessibility")
+}
+// macOS reports activations only to a process in a GUI session: in launchd's Background session the guard
+// would see no theft and revert none.
+var sessionID = SecuritySessionId(0)
+var sessionBits = SessionAttributeBits(rawValue: 0)
+guard SessionGetInfo(callerSecuritySession, &sessionID, &sessionBits) == errSecSuccess,
+      sessionBits.contains(.sessionHasGraphicAccess) else {
+    fail("this process is not in a GUI session, where activations are reported: start it through gui-launch")
+}
+
+let center = workspace.notificationCenter
+center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { note in
+    let t = uptime()
+    let input = lastInput()
+    guard !finished, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+    onActivation(app, at: t, input: input)
+}
+center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: nil) { note in
+    guard !finished, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+    if tree.adopt(app.processIdentifier, via: "launch") { observe(app.processIdentifier) }
+}
+center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: nil) { _ in
+    let t = uptime() - t0
+    let input = lastInput()
+    yabaiQueue.async { sweep("space-change") }
+    timQueue.async { checkSpace(at: t, input: input) }
+}
+center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil) { _ in
+    if mode != nil && !attaching && tree.hasRoots && !tree.anyAlive { finish("tree-exited") }
+}
+let appsObservation = workspace.observe(\.runningApplications, options: [.new]) { _, change in
+    for app in change.newValue ?? [] where tree.adopt(app.processIdentifier, via: "launch") { observe(app.processIdentifier) }
+}
+
+for pid in baseline.adopted { observe(pid) }
+if !baseline.adopted.isEmpty { yabaiQueue.async { sweep("attached") } }
+if mode == "open" || attaching {
+    let timer = DispatchSource.makeTimerSource(queue: scanQueue)
+    timer.schedule(deadline: .now(), repeating: .milliseconds(150), leeway: .milliseconds(20))
+    timer.setEventHandler { if !stopping { scanOnce() } }
+    timer.resume()
+    scanTimer = timer
+}
+
+// MARK: - Launch
+
+// A signal or gui-launch's exit that arrived during the startup ends the guard before anything launches.
+RunLoop.main.run(mode: .default, before: Date())
+if finishing { dispatchMain() }
+
 let attachRecord: Any = matcher.map { ["exe": $0.exe, "needle": attachNeedle ?? ""] as [String: Any] } ?? NSNull()
-var spawnedPid: pid_t = 0
+let startRecord: [String: Any] = [
+    "space": space, "guardSeconds": guardSeconds, "front": describe(frontAtLaunch), "focus": focusAtLaunch,
+    "timSpace": timSpaceAtLaunch ?? NSNull(), "restoreWindow": baseline.target.window ?? NSNull(),
+    "restoreWindowSpace": baseline.target.windowSpace ?? NSNull(), "attach": attachRecord,
+]
 if launchArgv.isEmpty {
-    emit(["event": "guarding", "space": space, "guardSeconds": guardSeconds, "front": describe(frontAtLaunch),
-          "focus": focusAtLaunch, "timSpace": timSpaceAtLaunch ?? NSNull(), "restoreWindow": restoreTarget.value.window ?? NSNull(),
-          "attach": attachRecord])
+    started = true
+    emit(startRecord.merging(["event": "guarding"]) { $1 })
 } else {
     let entry = "GUI_LAUNCH_TOKEN=\(token)"
     var spawnArgv = launchArgv
@@ -1185,24 +1885,25 @@ if launchArgv.isEmpty {
     var fileActions: posix_spawn_file_actions_t?
     posix_spawn_file_actions_init(&fileActions)
     posix_spawn_file_actions_addopen(&fileActions, 0, "/dev/null", O_RDONLY, 0)
+    posix_spawn_file_actions_addinherit_np(&fileActions, 2)
     posix_spawn_file_actions_adddup2(&fileActions, 2, 1)  // stdout carries only our events
-    var attributes: posix_spawnattr_t?
-    posix_spawnattr_init(&attributes)
-    posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))  // a Ctrl-C on gui-launch spares the app
-    posix_spawnattr_setpgroup(&attributes, 0)
+    // Its own process group (a Ctrl-C on gui-launch spares the app), the signals the guard ignores at their
+    // defaults, and no descriptor but these three (none of a yabai helper's pipes, which would hold it open).
+    var attributes = childAttributes(onlyListedFds: true)
     let cArgs = spawnArgv.map { strdup($0) } + [nil]
     let cEnv = environment.map { strdup($0) } + [nil]
     let spawned = posix_spawnp(&spawnedPid, spawnArgv[0], &fileActions, &attributes, cArgs, cEnv)
     guard spawned == 0 else { fail("cannot run \(spawnArgv[0]): \(String(cString: strerror(spawned)))") }
+    started = true
     launchedAt = uptime()
     if mode == "exec" {
         tree.addRoot(spawnedPid)
         observe(spawnedPid)
     }
-    emit(["event": "launched", "argv": spawnArgv.map { $0 == entry ? "GUI_LAUNCH_TOKEN=<sha256 \(tokenHash)>" : $0 },
-          "pid": Int(spawnedPid), "token": tokenHash, "space": space, "guardSeconds": guardSeconds,
-          "front": describe(frontAtLaunch), "focus": focusAtLaunch, "timSpace": timSpaceAtLaunch ?? NSNull(),
-          "restoreWindow": restoreTarget.value.window ?? NSNull(), "attach": attachRecord])
+    emit(startRecord.merging([
+        "event": "launched", "argv": spawnArgv.map { $0 == entry ? "GUI_LAUNCH_TOKEN=<sha256 \(tokenHash)>" : $0 },
+        "pid": Int(spawnedPid), "token": tokenHash,
+    ]) { $1 })
     // Reap the spawned process on its own thread (a dispatch exit source can miss a fast `open`).
     DispatchQueue.global().async {
         var status: Int32 = 0
@@ -1218,7 +1919,7 @@ if launchArgv.isEmpty {
                 launchFailure = "open exited \(code)"
                 finish("error")
             }
-            scanQueue.async { if !stopping.value { scanOnce() } }
+            scanQueue.async { if !stopping { scanOnce() } }
         }
     }
     if mode == "open" {

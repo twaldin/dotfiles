@@ -10,18 +10,23 @@ environment and then runs the command after its `--`, or fails. The machine: Tim
 pid 100.
 
 The guard's decisions are tested on the real Swift source, built into a temp dir: synthetic processes,
-activations and Spaces through --decide, live processes (a compiled probe) through --resolve.
+activations, Tim's input and Spaces through --decide, live processes (a compiled probe) through --resolve, its
+yabai calls and its end through --helpers, its startup with stand-in yabais that never answer. None of these
+touches a window.
 """
 import hashlib
 import json
 import os
 import platform
 import pwd
+import queue
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -74,9 +79,11 @@ print(json.dumps({'event': 'guard-end', 'reason': 'tree-exited'}), flush=True)
 sys.exit(config.get('exit', 0))
 '''
 
+# With <swap> present, `managername` (which gui-launch asks between reading the guard and starting it) first
+# changes the guard.
 FAKE_LAUNCHCTL = '''#!/bin/sh
 case "$1" in
-  managername) cat '%(manager)s' ;;
+  managername) if [ -e '%(swap)s' ]; then printf '\\n# swapped\\n' >> '%(guard)s'; fi; cat '%(manager)s' ;;
   asuser) shift 2; exec "$@" ;;
   *) exit 2 ;;
 esac
@@ -139,6 +146,26 @@ int main(int argc, char **argv) {
 }
 '''
 
+# Stand-in yabais (sh); %(pids)s is where they record their pids. For --helpers the word after -m picks the
+# behaviour: answer at once, answer after 0.4 s, never answer (it and its child ignore SIGTERM), or exit at once
+# leaving a child that holds its output open.
+HELPER_YABAI = '''#!/bin/sh
+case "$2" in
+  quick) echo '{"ok": 1}' ;;
+  slow) sleep 0.4; echo '{"slow": 1}' ;;
+  stuck) trap '' TERM; echo $$ >> '%(pids)s'; sleep 30 & echo $! >> '%(pids)s'; wait ;;
+  leaky) sleep 30 & echo $! >> '%(pids)s'; exit 0 ;;
+esac
+'''
+STUCK_YABAI = "trap '' TERM; echo $$ >> '%(pids)s'; sleep 30 & echo $! >> '%(pids)s'; wait\n"
+LEAKY_YABAI = "sleep 30 & echo $! >> '%(pids)s'; exit 0\n"
+# Answers the guard's baseline: no window has focus, Tim's display (display 1) shows Space 2.
+ANSWERING_YABAI = '''case "$3" in
+  --spaces) echo '[{"index": 1, "display": 1, "is-visible": false}, {"index": 2, "display": 1, "is-visible": true}]' ;;
+  *) exit 1 ;;
+esac
+'''
+
 
 def build_c(source, out):
     src = Path(str(out) + '.c')
@@ -155,6 +182,40 @@ def summary(tree=(500,), front=TERMINAL, user=TERMINAL, reverted=(), **more):
 
 def events(stdout):
     return [json.loads(line) for line in stdout.splitlines()]
+
+
+def warm(stand_in):
+    """Runs a new stand-in yabai once: macOS assesses a new executable on its first run (0.2-0.6 s here), and
+    the guard's deadlines should time the stand-in, not that."""
+    subprocess.run([str(stand_in), '-m', 'warm'], capture_output=True, timeout=30)
+
+
+class Lines:
+    """A process's stdout, read as JSON lines on a thread, for waits with a deadline."""
+
+    def __init__(self, stream):
+        self.rows = queue.Queue()
+        self.thread = threading.Thread(target=self.read, args=(stream,), daemon=True)
+        self.thread.start()
+
+    def read(self, stream):
+        for line in stream:
+            self.rows.put(json.loads(line))
+        self.rows.put(None)
+
+    def until(self, done, timeout):
+        """The rows up to and including the first for which done(row) holds."""
+        seen, deadline = [], time.monotonic() + timeout
+        while True:
+            try:
+                row = self.rows.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                raise AssertionError('no such line within %s s; got %r' % (timeout, seen))
+            if row is None:
+                raise AssertionError('the output ended; got %r' % seen)
+            seen.append(row)
+            if done(row):
+                return seen
 
 
 @unittest.skipUnless(CC, 'needs cc for the stand-in sudo')
@@ -179,7 +240,8 @@ class GuiLaunch(unittest.TestCase):
         self.manager = self.root / 'manager'
         self.guard_argv = self.root / 'guard-argv.json'
         names = {'python': sys.executable, 'state': str(self.state), 'config': str(self.config),
-                 'argv_out': str(self.guard_argv), 'manager': str(self.manager)}
+                 'argv_out': str(self.guard_argv), 'manager': str(self.manager), 'swap': str(self.root / 'swap'),
+                 'guard': str(stubs / 'gui-launch-guard')}
         for name, body in (('yabai', FAKE_YABAI), ('gui-launch-guard', FAKE_GUARD), ('launchctl', FAKE_LAUNCHCTL)):
             (stubs / name).write_text(body % names)
             (stubs / name).chmod(0o755)
@@ -382,6 +444,21 @@ class GuiLaunch(unittest.TestCase):
         self.assertEqual(events(result.stdout)[-1]['event'], 'error')
         self.assertNotIn('"check"', result.stdout)
 
+    def test_a_guard_that_changes_between_its_check_and_its_start_is_refused(self):
+        program, marker = self.marker_program()
+        (self.root / 'swap').touch()
+        before = hashlib.sha256(self.guard.read_bytes()).hexdigest()
+        result = self.run_gui_launch('--space', '7', '--', str(program), spawn=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertNotEqual(hashlib.sha256(self.guard.read_bytes()).hexdigest(), before, 'the stand-in launchctl changed it')
+        error = events(result.stdout)[-1]
+        self.assertEqual(error['event'], 'error')
+        self.assertIn('the guard changed between its check and its start', error['message'])
+        self.assertIn(before, error['message'])
+        self.assertEqual([e['event'] for e in events(result.stdout)], ['error'], 'no sudo event: nothing was started')
+        self.assertFalse(self.guard_argv.exists())
+        self.assertFalse(marker.exists())
+
     def test_guard_only_mode_runs_until_sigterm_then_checks(self):
         self.stage(wait_signal=True)
         process = subprocess.Popen([str(self.gui_launch), '--space', '7', '--attach-exe', '/bin/sleep', '--attach-argv', '-Dsky.run=7'],
@@ -416,13 +493,15 @@ class GuiLaunch(unittest.TestCase):
         self.machine(windows=[{'id': 9001, 'pid': 500, 'app': 'Probe', 'title': 'probe', 'space': 7},
                               {'id': 42, 'pid': 100, 'app': 'Ghostty', 'title': 'zsh', 'space': 2}])
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app),
-                                     summary=summary(reverted=[{'latencyMs': 3.4}, {'latencyMs': 1.2}]))
+                                     summary=summary(reverted=[{'latencyMs': 3.4, 'method': 'window'}, {'latencyMs': 1.2, 'method': 'activate'},
+                                                               {'latencyMs': 2.0, 'method': 'window'}]))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         check = self.check_event(result)
         self.assertTrue(check['ok'])
         self.assertEqual(check['windows'], [{'id': 9001, 'pid': 500, 'app': 'Probe', 'title': 'probe', 'space': 7}])
-        self.assertEqual(check['reverted'], 2)
-        self.assertIn('2 activation(s) reverted (max 3.4 ms); frontmost Ghostty (pid 100)', result.stderr)
+        self.assertEqual(check['reverted'], 3)
+        self.assertEqual(check['revertLatencyMs'], {'window': [3.4, 2.0], 'activate': [1.2]})
+        self.assertIn('3 activation(s) reverted (max 3.4 ms); frontmost Ghostty (pid 100)', result.stderr)
 
     def test_adopted_processes_count_in_the_check(self):
         self.machine(windows=[{'id': 9003, 'pid': 700, 'app': 'java', 'title': 'Minecraft', 'space': 3}])
@@ -450,7 +529,7 @@ class GuiLaunch(unittest.TestCase):
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), shows_after=6)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("Tim's display shows Space 6, not Space 2", result.stderr)
-        self.assertEqual(self.check_event(result)['timSpace'], {'before': 2, 'expected': None, 'after': 6})
+        self.assertEqual(self.check_event(result)['timSpace'], {'before': 2, 'expected': None, 'after': 6, 'breaches': []})
         # The guard saw Tim switch to Space 3 himself: that Space is the one to show.
         self.machine(windows=[])
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), shows_after=3,
@@ -461,6 +540,29 @@ class GuiLaunch(unittest.TestCase):
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), shows_after=6,
                                      summary=summary(timSpace={'atLaunch': 2, 'expected': 2}))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_a_space_breach_fails_the_check_even_when_the_guard_brought_tims_space_back(self):
+        restored = {'event': 'space-restored', 'from': 6, 'to': 2, 'expected': 2, 'window': 42, 'focused': True, 'ok': True, 'latencyMs': 81.5}
+        cases = [
+            (restored, "the tree moved Tim's display to Space 6: a breach, although the guard brought Space 2 back (81.5 ms after the theft)"),
+            # The counter-ball run: brought back to Space 3, not the expected Space 2, is no restore.
+            (dict(restored, to=3, ok=False), "the tree moved Tim's display to Space 6 and the guard did not bring Space 2 back (it showed Space 3)"),
+            ({'event': 'space-unrestorable', 'from': 6, 'to': 2, 'expected': 2, 'window': None},
+             "the tree moved Tim's display to Space 6 and no window of his could bring Space 2 back"),
+            ({'event': 'space-unexplained', 'from': 2, 'to': 5, 'expected': 2}, "Tim's display moved from Space 2 to Space 5 without his input"),
+        ]
+        for record, message in cases:
+            with self.subTest(record=record['event'], ok=record.get('ok')):
+                self.machine(windows=[])
+                result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app),
+                                             summary=summary(timSpace={'atLaunch': 2, 'expected': 2}, spaceRestores=[record]))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                check = self.check_event(result)
+                self.assertFalse(check['ok'])
+                self.assertEqual(check['problems'], [message])
+                # The receipt shows both: the restore the guard recorded, and the breach.
+                self.assertEqual(check['timSpace'], {'before': 2, 'expected': 2, 'after': 2, 'breaches': [record]})
+                self.assertEqual(check['spaceRestored'], int(record['event'] == 'space-restored'))
 
     def test_a_guard_fault_or_yabai_timeout_fails_the_check(self):
         fault = 'no process carrying this launch\'s GUI_LAUNCH_TOKEN (sha256 0123456789ab) appeared in 30.0 s: the launch may be running unguarded'
@@ -493,8 +595,9 @@ class GuiLaunch(unittest.TestCase):
 
 @unittest.skipUnless(SWIFTC and CC and ARM_MAC, 'needs swiftc and cc on an arm64 Mac')
 class Guard(unittest.TestCase):
-    """The real guard. --decide: t is seconds since launch; pids 100 (Tim's terminal) and 300/400 (apps he
-    switches to) run outside the tree. --resolve: live probe processes."""
+    """The real guard. --decide: t is seconds since launch, and so is "input", when Tim's last HID input came
+    (the stubbed input clock); pids 100 (Tim's terminal) and 300/400 (apps he switches to) run outside the tree.
+    --resolve: live probe processes. --helpers: yabai calls and the guard's end, with stand-in yabais."""
 
     @classmethod
     def setUpClass(cls):
@@ -527,11 +630,12 @@ class Guard(unittest.TestCase):
         return events(done.stdout)
 
     def restore(self, front, guard_seconds, activations):
-        """Activations (t, pid, in the tree) of plain processes: the restore decisions."""
+        """Activations (t, pid, in the tree) of plain processes, each outside the tree with Tim's input at that
+        moment (his click): the restore decisions."""
         pids = sorted({pid for _, pid, _ in activations} | {front or 100})
         header = {'front': front, 'guardSeconds': guard_seconds, 'roots': sorted({pid for _, pid, tree in activations if tree}),
                   'procs': [{'pid': pid, 'exe': '/apps/%d' % pid} for pid in pids]}
-        rows = self.decide(header, [{'t': t, 'activate': pid} for t, pid, _ in activations])
+        rows = self.decide(header, [dict({'t': t, 'activate': pid}, **({} if tree else {'input': t})) for t, pid, tree in activations])
         return [(row['decision'], row.get('to'), round(row['latencyMs'], 1) if 'latencyMs' in row else None) for row in rows]
 
     # Restore decisions -------------------------------------------------------------------------------
@@ -562,10 +666,10 @@ class Guard(unittest.TestCase):
         rows = self.decide(header, [
             {'t': 1.0, 'activate': 500, 'focused': {'id': 77, 'pid': 500}},  # yabai sees the thief's window: not taken
             {'t': 1.003, 'activate': 100},
-            {'t': 2.0, 'activate': 300, 'focused': {'id': 55, 'pid': 300}},  # Tim switches to 300: its window is taken
+            {'t': 2.0, 'activate': 300, 'input': 1.98, 'focused': {'id': 55, 'pid': 300}},  # Tim switches to 300: its window is taken
             {'t': 3.0, 'activate': 500},
             {'t': 3.002, 'activate': 300},
-            {'t': 4.0, 'activate': 400, 'focused': {'id': 55, 'pid': 300}},  # yabai still shows 300's window: not taken
+            {'t': 4.0, 'activate': 400, 'input': 3.98, 'focused': {'id': 55, 'pid': 300}},  # yabai still shows 300's window: not taken
             {'t': 5.0, 'activate': 500, 'focused': {'id': 77, 'pid': 500}},
         ])
         self.assertEqual([(r['decision'], r.get('to'), r.get('window'), r['target']) for r in rows], [
@@ -573,24 +677,65 @@ class Guard(unittest.TestCase):
             ('restore', 300, 55, 55), ('restored', None, None, 55), ('user', None, None, None),
             ('restore', 400, None, None)])  # no window known for 400: re-activate the app
 
-    def test_a_space_jump_after_a_theft_is_restored_and_tims_own_switch_is_not(self):
-        header = {'front': 100, 'frontWindow': 42, 'guardSeconds': 60, 'roots': [500], 'timSpace': 2,
-                  'procs': [{'pid': p, 'exe': '/apps/%d' % p} for p in (100, 500)]}
+    def test_a_space_jump_after_a_theft_is_restored_and_only_tims_own_input_moves_his_space(self):
+        header = {'front': 100, 'frontWindow': 42, 'frontWindowSpace': 2, 'guardSeconds': 60, 'roots': [500], 'timSpace': 2,
+                  'procs': [{'pid': p, 'exe': '/apps/%d' % p} for p in (100, 300, 500)]}
         rows = self.decide(header, [
             {'t': 1.0, 'activate': 500},
             {'t': 1.002, 'activate': 100},
-            {'t': 1.3, 'space': 6, 'windowSpace': 2},   # macOS followed Studio to Space 6: restore
+            {'t': 1.3, 'space': 6},                        # macOS followed Studio to Space 6: restore
             {'t': 1.4, 'space': 2},
-            {'t': 10.0, 'space': 3},                    # Tim's own switch, nowhere near a theft
+            {'t': 10.0, 'space': 3, 'input': 9.7},         # Tim's own switch: his input, nowhere near a theft
             {'t': 20.0, 'activate': 500},
             {'t': 20.1, 'space': 6, 'windowSpace': None},  # his window is gone: cannot restore
-            {'t': 40.0, 'space': 6, 'windowSpace': None},  # still the thief's Space, long after: not his choice
-            {'t': 41.0, 'space': 4},                    # he leaves it himself
+            {'t': 40.0, 'space': 6},                       # still the thief's Space, long after: not his choice
+            {'t': 40.5, 'space': 4, 'input': 40.4},        # his input, but no app switch of his since the theft
+            {'t': 41.0, 'activate': 300, 'input': 40.95},  # he switches apps himself
+            {'t': 41.2, 'space': 4, 'input': 41.1},
+            {'t': 50.0, 'space': 1},                       # no input, no theft: not his, nothing to restore
         ])
         spaces = [(r['space'], r.get('from'), r.get('to'), r.get('window'), r.get('expected')) for r in rows if 'space' in r]
         self.assertEqual(spaces, [('restore', 6, 2, 42, None), ('unchanged', None, None, None, None),
                                   ('user', None, None, None, 3), ('unrestorable', 6, 3, None, None),
-                                  ('unrestorable', 6, 3, None, None), ('user', None, None, None, 4)])
+                                  ('unrestorable', 6, 3, None, None), ('unrestorable', 4, 3, None, None),
+                                  ('user', None, None, None, 4), ('unexplained', 4, 1, None, None)])
+
+    COUNTER_BALL = {'front': 100, 'frontWindow': 42, 'frontWindowSpace': 2, 'guardSeconds': 1800, 'roots': [500], 'timSpace': 2,
+                    'input': -600.0, 'procs': [{'pid': p, 'exe': '/apps/%d' % p} for p in (100, 500, 600)]}
+
+    def test_after_a_theft_an_app_macos_activates_and_the_space_it_shows_are_never_tims(self):
+        # The counter-ball run (receipt 20261006T040054Z, Tim idle): Superwhisper (100) frontmost, its window 42 on
+        # Space 2; Studio (500) steals it; macOS activates Discord (600, window 59 on Space 3) and his display
+        # follows Discord to Space 3.
+        rows = self.decide(self.COUNTER_BALL, [
+            {'t': 2.45, 'activate': 500},
+            {'t': 2.99, 'activate': 600, 'focused': {'id': 59, 'pid': 600, 'space': 3}},
+            {'t': 3.69, 'activate': 100},
+            {'t': 4.23, 'activate': 600, 'focused': {'id': 59, 'pid': 600, 'space': 3}},
+            {'t': 4.27, 'space': 3},
+            {'t': 5.97, 'activate': 500},
+            {'t': 6.1, 'space': 3},
+            {'t': 30.0, 'space': 3},
+        ])
+        self.assertEqual([(r.get('decision'), r.get('to'), r.get('window'), r.get('target')) for r in rows if 'activate' in r or 'pid' in r], [
+            ('restore', 100, 42, 42), ('system', None, None, 42), ('restored', None, None, 42), ('system', None, None, 42),
+            ('restore', 100, 42, 42)])
+        self.assertEqual([(r['space'], r.get('from'), r.get('to'), r.get('window')) for r in rows if 'space' in r], [
+            ('restore', 3, 2, 42), ('restore', 3, 2, 42), ('restore', 3, 2, 42)])
+
+    def test_tims_input_counts_only_after_the_last_theft_and_within_a_second(self):
+        rows = self.decide(self.COUNTER_BALL, [
+            {'t': 2.0, 'activate': 600, 'input': 0.5},                   # input 1.5 s before: not his
+            {'t': 3.0, 'activate': 600, 'input': 2.2, 'focused': {'id': 59, 'pid': 600, 'space': 3}},  # his click
+            {'t': 3.3, 'space': 3, 'input': 3.25},
+            {'t': 10.0, 'activate': 500, 'input': 9.95},                 # a theft right after his input
+            {'t': 10.2, 'activate': 100, 'input': 9.95},                 # that input came before the theft: not his
+            {'t': 10.3, 'space': 2, 'input': 9.95},
+        ])
+        self.assertEqual([(r.get('decision') or r.get('space'), r.get('target'), r.get('expected')) for r in rows], [
+            ('system', 42, None), ('user', 59, None), ('user', None, 3), ('restore', 59, None), ('system', 59, None),
+            ('restore', None, None)])
+        self.assertEqual((rows[5]['from'], rows[5]['to'], rows[5]['window']), (2, 3, 59))
 
     # Tree decisions ----------------------------------------------------------------------------------
 
@@ -610,7 +755,7 @@ class Guard(unittest.TestCase):
 
     def test_an_exe_match_without_the_needle_or_the_needle_under_another_exe_is_not_adopted(self):
         rows = self.decide(self.attach_header(), [
-            {'t': 1.0, 'activate': 701, 'procs': [{'pid': 701, 'exe': '/rt/bin/java', 'argv': ['java', '-Dsky.run=r2']}]},
+            {'t': 1.0, 'activate': 701, 'input': 1.0, 'procs': [{'pid': 701, 'exe': '/rt/bin/java', 'argv': ['java', '-Dsky.run=r2']}]},
             {'t': 1.1, 'launch': 702, 'procs': [{'pid': 702, 'exe': '/usr/bin/python3', 'argv': ['python3', '-Dsky.run=r1']}]},
             {'t': 1.2, 'launch': 703, 'procs': [{'pid': 703, 'exe': '/rt/bin/java', 'argv': ['java'], 'env': ['X=-Dsky.run=r1']}]},
         ])
@@ -620,7 +765,7 @@ class Guard(unittest.TestCase):
     def test_an_app_with_the_same_name_but_another_exe_is_never_adopted(self):
         same_name = {'pid': 704, 'exe': '/Users/x/other-runtime/bin/java', 'argv': ['java', '-Dsky.run=r1'],
                      'name': 'java', 'bundle': 'net.minecraft.java'}
-        rows = self.decide(self.attach_header(), [{'t': 1.0, 'activate': 704, 'procs': [same_name]},
+        rows = self.decide(self.attach_header(), [{'t': 1.0, 'activate': 704, 'input': 1.0, 'procs': [same_name]},
                                                   {'t': 1.1, 'launch': 704}, {'t': 1.2, 'move': 704}])
         self.assertEqual([r['tree'] for r in rows], [False] * 3)
         self.assertEqual(rows[0]['decision'], 'user')
@@ -661,9 +806,9 @@ class Guard(unittest.TestCase):
         studio = '/Applications/RobloxStudio.app/Contents/MacOS/RobloxStudio'
         rows = self.decide(self.token_header(), [
             {'t': 2.0, 'launch': 810, 'procs': [{'pid': 810, 'exe': studio, 'env': ['GUI_LAUNCH_TOKEN=another-launch']}]},
-            {'t': 2.5, 'activate': 810},
-            {'t': 3.0, 'activate': 811, 'procs': [{'pid': 811, 'exe': studio, 'env': [], 'argv': [self.TOKEN]}]},
-            {'t': 4.0, 'activate': 850},  # it carries the token but ran before the launch
+            {'t': 2.5, 'activate': 810, 'input': 2.5},
+            {'t': 3.0, 'activate': 811, 'input': 3.0, 'procs': [{'pid': 811, 'exe': studio, 'env': [], 'argv': [self.TOKEN]}]},
+            {'t': 4.0, 'activate': 850, 'input': 4.0},  # it carries the token but ran before the launch
         ])
         self.assertEqual([(r['tree'], r.get('decision')) for r in rows], [(False, None), (False, 'user'), (False, 'user'), (False, 'user')])
 
@@ -681,7 +826,7 @@ class Guard(unittest.TestCase):
         rows = self.decide(header, [
             {'t': 1.0, 'move': 510, 'procs': [{'pid': 510, 'ppid': 500, 'start': 1100, 'exe': '/apps/helper'}]},
             {'t': 2.0, 'procs': [{'pid': 500, 'start': 2000, 'exe': '/bin/zsh'}]},  # 500 exits; the pid is reused
-            {'t': 2.1, 'activate': 500},
+            {'t': 2.1, 'activate': 500, 'input': 2.1},
             {'t': 3.0, 'procs': [{'pid': 510, 'ppid': 1, 'start': 3000, 'exe': '/bin/ls'}]},
             {'t': 3.1, 'move': 510},
             {'t': 3.2, 'move': 510},
@@ -690,6 +835,51 @@ class Guard(unittest.TestCase):
         self.assertEqual((rows[1]['tree'], rows[1]['dropped'], rows[1]['decision']), (False, [500], 'user'))
         self.assertEqual((rows[2]['tree'], rows[2]['dropped']), (False, [510]))
         self.assertEqual((rows[3]['tree'], 'dropped' in rows[3]), (False, False))
+
+    def test_a_token_carrying_launch_on_a_pid_the_snapshot_saw_is_adopted(self):
+        studio = '/Applications/RobloxStudio.app/Contents/MacOS/RobloxStudio'
+        rows = self.decide(self.token_header(), [
+            # 300 ran before the launch and exited; its pid now names the launch, started at another time.
+            {'t': 5.0, 'launch': 300, 'procs': [{'pid': 300, 'start': 5000, 'exe': studio, 'env': [self.TOKEN]}]},
+            {'t': 5.1, 'activate': 300},
+            {'t': 5.2, 'activate': 850, 'input': 5.2},  # the snapshot's own process (same start) still is not
+        ])
+        self.assertEqual((rows[0]['tree'], rows[0]['attached']), (True, {'pid': 300, 'rule': 'launch-token'}))
+        self.assertEqual((rows[1]['decision'], rows[1]['to']), ('restore', 100))
+        self.assertEqual((rows[2]['tree'], rows[2]['decision']), (False, 'user'))
+
+    # The restore target --------------------------------------------------------------------------------
+
+    def test_an_attached_program_frontmost_at_launch_is_never_the_restore_target(self):
+        java = {'pid': 700, 'exe': '/rt/bin/java', 'argv': ['java', '-Dsky.run=r1']}
+        header = self.attach_header(front=700, frontWindow=77, frontWindowSpace=2, timSpace=2,
+                                    procs=[{'pid': 100, 'exe': '/Applications/Ghostty.app/Contents/MacOS/ghostty'}, java])
+        rows = self.decide(header, [{'t': 1.0, 'activate': 700}, {'t': 1.2, 'space': 6}])
+        self.assertEqual((rows[0]['tree'], rows[0]['decision'], 'attached' in rows[0], rows[0]['target']), (True, 'unrestorable', False, None))
+        self.assertEqual((rows[1]['space'], rows[1].get('window')), ('unrestorable', None))
+
+    def test_tims_app_that_joins_the_tree_later_is_dropped_before_any_focus(self):
+        studio = {'pid': 820, 'exe': '/x/Studio'}
+        rows = self.decide(dict(self.token_header(), frontWindow=None, timSpace=2), [
+            # Its environment is not readable yet: an app outside the tree, which Tim switches to.
+            {'t': 2.0, 'activate': 820, 'input': 1.95, 'focused': {'id': 88, 'pid': 820, 'space': 2}, 'procs': [dict(studio, unreadable=True)]},
+            {'t': 3.0, 'launch': 820, 'procs': [dict(studio, env=[self.TOKEN])]},  # the scan reads its token
+            {'t': 4.0, 'activate': 820},
+            {'t': 4.2, 'space': 6},
+        ])
+        self.assertEqual((rows[0]['tree'], rows[0]['decision'], rows[0]['target']), (False, 'user', 88))
+        self.assertEqual(rows[1]['attached'], {'pid': 820, 'rule': 'launch-token'})
+        self.assertEqual((rows[2]['decision'], rows[2]['targetDropped'], rows[2]['target']), ('unrestorable', 820, None))
+        self.assertEqual((rows[3]['space'], rows[3].get('window')), ('unrestorable', None))
+
+    def test_a_restore_target_whose_pid_names_another_process_is_dropped(self):
+        header = {'front': 100, 'frontWindow': 42, 'frontWindowSpace': 2, 'guardSeconds': 60, 'roots': [500], 'timSpace': 2,
+                  'procs': [{'pid': p, 'exe': '/apps/%d' % p} for p in (100, 500)]}
+        rows = self.decide(header, [
+            {'t': 1.0, 'procs': [{'pid': 100, 'start': 900, 'exe': '/apps/other'}]},  # Tim's app exited; its pid is reused
+            {'t': 1.1, 'activate': 500},
+        ])
+        self.assertEqual((rows[0]['decision'], rows[0]['targetDropped'], rows[0]['target']), ('unrestorable', 100, None))
 
     # Live processes ----------------------------------------------------------------------------------
 
@@ -758,6 +948,96 @@ class Guard(unittest.TestCase):
             with self.subTest(pid=pid):
                 self.assertEqual(self.ask(resolver, str(pid))[1], {'pid': pid, 'tree': False})
 
+    # yabai helpers and the guard's end ---------------------------------------------------------------
+
+    def helpers(self):
+        """A --helpers guard driving HELPER_YABAI: the process, its stdout lines, and the file the stand-in
+        records its pids in."""
+        root = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        pids = root / 'pids'
+        yabai = root / 'yabai'
+        yabai.write_text(HELPER_YABAI % {'pids': pids})
+        yabai.chmod(0o755)
+        warm(yabai)
+        process = subprocess.Popen([str(self.binary), '--helpers', '--yabai', str(yabai)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, text=True)
+        lines = Lines(process.stdout)
+        self.addCleanup(lambda: (process.kill(), process.wait(), lines.thread.join(5), process.stdin.close(), process.stdout.close()))
+        self.assertEqual(lines.until(lambda row: True, 10), [{'ready': True}])
+        return process, lines, pids
+
+    def send(self, process, *commands):
+        process.stdin.write(''.join(command + '\n' for command in commands))
+        process.stdin.flush()
+
+    def recorded(self, pids, count):
+        """The first `count` pids the stand-in yabai recorded, once it has."""
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            found = [int(p) for p in pids.read_text().split()] if pids.exists() else []
+            if len(found) >= count:
+                return found[:count]
+            time.sleep(0.01)
+        self.fail('the stand-in yabai recorded no %d pids' % count)
+
+    def assert_gone(self, pids):
+        """Each pid is gone: killed and reaped (a zombie still answers signal 0)."""
+        for pid in pids:
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() > deadline:
+                    self.fail('pid %d still exists' % pid)
+                time.sleep(0.01)
+
+    def test_the_end_settles_work_in_flight_then_kills_and_reaps_what_did_not_settle(self):
+        # endWork is the end on every path of the guard: timeout, signal, gui-launch's exit, the tree's exit.
+        process, lines, pids = self.helpers()
+        self.send(process, 'call stuck 30 stuck')
+        stuck = self.recorded(pids, 2)  # the stand-in and its child, both ignoring SIGTERM
+        began = time.monotonic()
+        self.send(process, 'call slow 2 slow', 'end')
+        seen = lines.until(lambda row: 'end' in row, 15)
+        took = time.monotonic() - began
+        replies = {row['call']: row for row in seen if 'call' in row}
+        self.assertEqual(replies['slow'], {'call': 'slow', 'reply': 'exit', 'code': 0, 'out': '{"slow": 1}\n'},
+                         'work that finishes within the bound is waited for: its result comes before the end')
+        self.assertEqual(replies['stuck'], {'call': 'stuck', 'reply': 'refused', 'why': "yabai -m stuck was killed at the guard's end"})
+        end = seen[-1]['end']
+        self.assertEqual((end['unsettled'], end['killed']), (['call stuck'], ['yabai -m stuck']))
+        self.assertEqual(end['problems'], ["call stuck was still running 3.0 s into the guard's end",
+                                           "yabai -m stuck was still running at the guard's end: killed"])
+        self.assertTrue(2.9 < took < 6, took)
+        self.assert_gone(stuck)
+
+    def test_a_yabai_call_has_one_deadline_over_its_exit_and_its_output(self):
+        process, lines, pids = self.helpers()
+        began = time.monotonic()
+        self.send(process, 'call leaky 2 leaky')  # it exits at once; its child holds its output open for 30 s
+        child = self.recorded(pids, 1)
+        seen = lines.until(lambda row: row.get('call') == 'leaky', 10)
+        took = time.monotonic() - began
+        self.assertEqual(seen[-1], {'call': 'leaky', 'reply': 'timeout'})
+        self.assertEqual([(e['event'], e['args']) for e in seen[:-1]], [('yabai-timeout', ['leaky'])])
+        self.assertTrue(took < 3.5, took)
+        self.assert_gone(child)
+        self.send(process, 'end')
+        self.assertEqual(lines.until(lambda row: 'end' in row, 10)[-1]['end']['problems'], ['yabai -m leaky did not answer within 2.0 s'])
+
+    def test_no_yabai_call_runs_on_the_main_thread(self):
+        process, lines, _ = self.helpers()
+        self.send(process, 'main on-main quick')
+        seen = lines.until(lambda row: row.get('call') == 'on-main', 10)
+        message = 'yabai -m quick was asked for on the main thread, which never waits on a child process: refused'
+        self.assertEqual(seen[-1], {'call': 'on-main', 'reply': 'refused', 'why': message})
+        self.assertEqual([(e['event'], e['message']) for e in seen[:-1]], [('problem', message)])
+        self.send(process, 'call off-main 2 quick')
+        self.assertEqual(lines.until(lambda row: row.get('call') == 'off-main', 10)[-1],
+                         {'call': 'off-main', 'reply': 'exit', 'code': 0, 'out': '{"ok": 1}\n'})
+
     # Failing closed ----------------------------------------------------------------------------------
 
     def test_the_attach_flags_come_as_a_pair_for_the_guard_too(self):
@@ -767,15 +1047,38 @@ class Guard(unittest.TestCase):
             self.assertEqual(done.returncode, 2)
             self.assertEqual(events(done.stdout), [dict(events(done.stdout)[0], event='error', message='--attach-exe and --attach-argv go together')])
 
-    @unittest.skipIf(subprocess.run(['/bin/launchctl', 'managername'], capture_output=True, text=True).stdout.strip() == 'Aqua',
-                     'from a GUI session the guard would really run')
-    def test_outside_a_gui_session_the_guard_refuses_and_launches_nothing(self):
-        marker = Path(self.tmp.name) / 'launched'
-        program = Path(self.tmp.name) / 'launchme'
+    def launch_with(self, yabai_body):
+        """Runs the guard to launch a marker program, with a stand-in yabai: (result, seconds, marker, pids file)."""
+        root = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        pids, marker, program, yabai = root / 'pids', root / 'launched', root / 'launchme', root / 'yabai'
         program.write_text('#!/bin/sh\ntouch %s\n' % marker)
-        program.chmod(0o755)
-        done = subprocess.run([str(self.binary), '--space', '7', '--guard-seconds', '5', '--yabai', '/usr/bin/false',
-                               '--summary', '/dev/null', '--exec', '--', str(program)], capture_output=True, text=True, timeout=30)
+        yabai.write_text('#!/bin/sh\n[ "$2" = warm ] && exit 0\n' + yabai_body % {'pids': pids})
+        for path in (program, yabai):
+            path.chmod(0o755)
+        warm(yabai)
+        began = time.monotonic()
+        done = subprocess.run([str(self.binary), '--space', '7', '--guard-seconds', '5', '--yabai', str(yabai),
+                               '--summary', str(root / 'summary.json'), '--exec', '--', str(program)],
+                              capture_output=True, text=True, timeout=20)
+        return done, time.monotonic() - began, marker, pids
+
+    def test_a_yabai_that_does_not_answer_before_the_launch_launches_nothing(self):
+        for name, body, count in (('stuck', STUCK_YABAI, 2), ('leaky', LEAKY_YABAI, 1)):
+            with self.subTest(yabai=name):
+                done, took, marker, pids = self.launch_with(body)
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                seen = events(done.stdout)
+                self.assertEqual([e['event'] for e in seen], ['guard', 'yabai-timeout', 'error'])
+                self.assertEqual(seen[-1]['message'],
+                                 'no baseline, so nothing was launched: yabai -m query --windows --window did not answer within 2.0 s')
+                self.assertTrue(took < 6, took)
+                self.assertFalse(marker.exists())
+                self.assert_gone(self.recorded(pids, count))
+
+    def test_outside_a_gui_session_the_guard_refuses_and_launches_nothing(self):
+        if subprocess.run(['/bin/launchctl', 'managername'], capture_output=True, text=True).stdout.strip() == 'Aqua':
+            self.skipTest('from a GUI session the guard would really run')
+        done, _, marker, _ = self.launch_with(ANSWERING_YABAI)
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
         error = events(done.stdout)[-1]
         self.assertEqual(error['event'], 'error')

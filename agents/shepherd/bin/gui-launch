@@ -19,27 +19,42 @@ and/or guards one that something else starts, then checks that nothing took it.
     real path is <path> and one of whose arguments contains <needle>, with its descendants. This covers a
     client that an app starts through LaunchServices (its parent is launchd, so it descends from no launch).
     Never by app name or bundle id. The word after --attach-argv is the needle even when it starts with -.
-    Without `--` and a launch, gui-launch only guards: until --guard-seconds pass or SIGTERM/SIGINT.
+    Processes it matches that already run are adopted before anything else, so the app Tim is in at launch is
+    never one of them. Without `--` and a launch, gui-launch only guards: until --guard-seconds pass or
+    SIGTERM/SIGINT.
+- Before it launches anything the guard takes its baseline: Tim's front app, his focused window and its Space,
+  and the Space his display shows. A yabai query there that fails or misses its 2 s deadline launches
+  nothing: exit 2.
 - Guard, until --guard-seconds pass, the launched tree exits (without attach), or SIGTERM/SIGINT:
   gui-launch-guard (src/gui-launch-guard.swift) adopts processes as they activate or launch and in a scan
-  of all processes every 150 ms. When a tree process becomes frontmost, it gives focus back by focusing
-  Tim's window by id through yabai (the one he had focused at launch or after his last own app switch), or
-  by re-activating his app if that window is gone or yabai fails. If his display then shows another Space,
-  focusing that window brings it back. That is all it does to his windows. It moves every tree window to
-  the target Space by id as Accessibility reports it created or focused (and again whenever the tree
-  activates or the active Space changes). macOS still lets an app activate itself and opens its new windows
-  on the Space Tim is viewing: the guard undoes both within milliseconds, it cannot prevent them. The guard
-  exits when gui-launch does, even by SIGKILL, and bounds every yabai call (2 s; a timeout fails the check).
+  of all processes every 150 ms. An activation or a Space change is Tim's own only with his HID input
+  (keyboard, mouse) after the last theft and within 1 s before it: an app macOS activates on its own never
+  becomes his, and his expected Space never moves without him. When a tree process becomes frontmost, the
+  guard gives focus back by focusing Tim's restore-target window by its cached id through yabai (the one he
+  had focused at launch or after his last own app switch; never a window of the tree, and its app is checked
+  again before every focus), or by re-activating his app if there is none or the focus fails (1 s). If his
+  display shows another Space while the theft is open or within 2 s after, focusing that window brings his
+  Space back. That is all it does to his windows. It moves every tree window to the target Space by id as
+  Accessibility reports it created or focused (and again whenever the tree activates or the active Space
+  changes). macOS still lets an app activate itself and opens its new windows on the Space Tim is viewing:
+  the guard undoes both within milliseconds, it cannot prevent them. The guard exits when gui-launch does,
+  even by SIGKILL. It bounds every yabai call over its exit and its output (2 s; a timeout fails the check)
+  and runs none on its main thread. At its end, work in flight gets 3 s to finish (what does not fails the
+  check), then any yabai helper still running is killed, with what it started.
 - Check: no tree window on Spaces 1-4; Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
-  himself); the active display unchanged, by both yabai's focused display and AppKit's main screen; no fault
-  and no yabai timeout. The guard gives focus back without moving the active display, so a theft from
-  another display can leave it there (yabai still reported it after Superwhisper got focus back): that fails
-  the check, and a click on his display clears it.
+  himself); no Space change of his display caused by the tree (a breach even when the guard brought his
+  Space back: the check shows both) or without his input; the active display unchanged, by both yabai's
+  focused display and AppKit's main screen; no fault, no yabai timeout, no unsettled or killed work. The
+  guard gives focus back without moving the active display, so a theft from another display can leave it
+  there (yabai still reported it after Superwhisper got focus back): that fails the check, and a click on his
+  display clears it. A reverted activation alone does not fail it: the check lists the revert latencies by
+  method (window focus, re-activation).
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
-launched or guarding, attached, dropped, activation, reverted, space-restored, window, fault, guard-end),
-then `check`; `error` before exit 2. The launched program's own output goes to stderr. gui-launch never
-quits what it launched: the caller tears it down.
+launched or guarding, attached, dropped, activation, restore-call, reverted, restore-target, user-space,
+space-restored, space-unrestorable, space-unexplained, window, yabai-timeout, problem, fault, guard-end), then
+`check`; `error` before exit 2. The launched program's own output goes to stderr. gui-launch never quits
+what it launched: the caller tears it down.
 Agent shells live in launchd's Background session, where macOS reports no frontmost app and no activations,
 so from there the guard runs in Tim's GUI (Aqua) session through the fixed root step
   /usr/bin/sudo -n -E -- /bin/launchctl asuser <uid> /usr/bin/sudo -n -E -u <user> -- <guard> <guard args>
@@ -47,6 +62,10 @@ so from there the guard runs in Tim's GUI (Aqua) session through the fixed root 
 HOME, USER and LOGNAME (Tim's, from the password database) and LANG=C.UTF-8 in its environment. Caller values
 reach only the guard's arguments, after the second `--`. The `sudo` event records that argv, the
 environment's keys and the guard's real path and sha256 (from Aqua: the guard's argv, "wrapper": "none").
+The guard's identity (real path, then device, inode, size, mtime and sha256 read through one O_NOFOLLOW
+descriptor) is read when its argv is built and again immediately before it is started; any change is
+refused. sudo then executes the path by name, so a swap after that second read is the residual: no
+fexecve passes through sudo.
 If sudo or the guard fails, nothing is launched: exit 2.
 Exit 0 ok; 1 the check failed (a fault included); 2 usage, launch, sudo or guard error.
 """
@@ -167,13 +186,15 @@ def hop(guard_argv):
 
 
 def identify(path):
-    """The guard's real path and sha256, read just before it is started."""
+    """The guard's identity: {'path': real path, 'sha256': …}, and its file's (device, inode, size, mtime), all
+    read through one O_NOFOLLOW descriptor."""
     real = os.path.realpath(path)
     digest = hashlib.sha256()
     with os.fdopen(os.open(real, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as f:
         for block in iter(lambda: f.read(1 << 16), b''):
             digest.update(block)
-    return {'path': real, 'sha256': digest.hexdigest()}
+        st = os.fstat(f.fileno())
+    return {'path': real, 'sha256': digest.hexdigest()}, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
 
 def tims_display(spaces):
@@ -228,10 +249,38 @@ def name(app):
     return '%s (pid %s)' % (app.get('name') or app.get('bundle') or '?', app.get('pid')) if app else 'none'
 
 
+def space_breaches(summary):
+    """Each change of Tim's display that the guard recorded as not his: one the tree caused (a breach even when
+    the guard brought his Space back) or one without his input."""
+    found = []
+    for e in summary.get('spaceRestores') or []:
+        kind, shown, expected = e.get('event'), e.get('from'), e.get('expected', e.get('to'))
+        if kind == 'space-restored' and e.get('ok') and e.get('to') == expected:
+            found.append('the tree moved Tim\'s display to Space %s: a breach, although the guard brought Space %s back (%s ms after the theft)'
+                         % (shown, expected, e.get('latencyMs')))
+        elif kind == 'space-restored':
+            found.append('the tree moved Tim\'s display to Space %s and the guard did not bring Space %s back (it showed Space %s)'
+                         % (shown, expected, e.get('to')))
+        elif kind == 'space-unrestorable':
+            found.append('the tree moved Tim\'s display to Space %s and no window of his could bring Space %s back' % (shown, expected))
+        else:
+            found.append('Tim\'s display moved from Space %s to Space %s without his input' % (e.get('from'), e.get('to')))
+    return found
+
+
+def revert_latencies(summary):
+    """The reverts' latencies (ms from theft to Tim's app frontmost again), by how focus was given back."""
+    by_method = {}
+    for r in summary.get('reverted') or []:
+        by_method.setdefault(r.get('method') or 'unknown', []).append(r.get('latencyMs'))
+    return by_method
+
+
 def problems(summary, windows, focus_before, focus_after, shown_before, shown_after):
     """Why the launch took Tim's screen, or can't vouch that it didn't: tree windows on Spaces 1-4, a changed
-    frontmost app, his display showing another Space, the active display moved (yabai's focused display, or
-    AppKit's main screen: the two can disagree, so both count), the guard's fault or its yabai timeouts."""
+    frontmost app, his display showing another Space or moved off his Space by the tree (even if brought back),
+    the active display moved (yabai's focused display, or AppKit's main screen: the two can disagree, so both
+    count), the guard's fault or its problems (yabai timeouts, work unsettled or killed at its end)."""
     tree = set(summary.get('tree') or [])
     found = []
     if summary.get('fault'):
@@ -252,6 +301,7 @@ def problems(summary, windows, focus_before, focus_after, shown_before, shown_af
     expected = (summary.get('timSpace') or {}).get('expected') or shown_before
     if expected and shown_after != expected:
         found.append('Tim\'s display shows Space %s, not Space %s' % (shown_after, expected))
+    found.extend(space_breaches(summary))
     if focus_before and (not focus_after or focus_after['display'] != focus_before['display']):
         found.append('yabai\'s focused display moved from display %s (Space %s) to %s'
                      % (focus_before['display'], focus_before['space'],
@@ -275,7 +325,7 @@ def main():
     os.close(fd)
     try:
         try:
-            guard = identify(GUARD)
+            guard, guard_file = identify(GUARD)
         except OSError as error:
             die('cannot read the guard: %s' % error)
         guard_argv = [guard['path'], '--space', str(space), '--guard-seconds', str(args.guard_seconds),
@@ -286,11 +336,18 @@ def main():
         if launch:
             guard_argv += [launch, '--'] + spawn
         if in_aqua():
-            argv, env = guard_argv, None
-            emit({'event': 'sudo', 'wrapper': 'none', 'argv': argv, 'env_keys': None, 'guard': guard})
+            argv, env, wrapper = guard_argv, None, 'none'
         else:
-            argv, env = hop(guard_argv)
-            emit({'event': 'sudo', 'wrapper': 'launchctl asuser', 'argv': argv, 'env_keys': sorted(env), 'guard': guard})
+            (argv, env), wrapper = hop(guard_argv), 'launchctl asuser'
+        # Its identity again, immediately before it starts: a guard that changed since it was read is refused.
+        try:
+            again = identify(GUARD)
+        except OSError as error:
+            die('cannot read the guard again before starting it: %s' % error)
+        if again != (guard, guard_file):
+            die('the guard changed between its check and its start (%s, sha256 %s, then %s, sha256 %s): refused'
+                % (guard['path'], guard['sha256'], again[0]['path'], again[0]['sha256']))
+        emit({'event': 'sudo', 'wrapper': wrapper, 'argv': argv, 'env_keys': sorted(env) if env is not None else None, 'guard': guard})
         # A new session keeps sudo from wrapping the guard in a pty; Ctrl-C reaches it through the handler below.
         try:
             process = subprocess.Popen(argv, env=env, start_new_session=True)
@@ -323,10 +380,12 @@ def main():
           'frontAtLaunch': summary.get('frontAtLaunch'), 'frontAtEnd': summary.get('frontAtEnd'),
           'focusBefore': dict(focus_before or {}, **(summary.get('focusAtLaunch') or {})),
           'focusAfter': dict(focus_after or {}, **(summary.get('focusAtEnd') or {})),
-          'timSpace': {'before': shown_before, 'expected': (summary.get('timSpace') or {}).get('expected'), 'after': shown_after},
+          'timSpace': {'before': shown_before, 'expected': (summary.get('timSpace') or {}).get('expected'), 'after': shown_after,
+                       'breaches': summary.get('spaceRestores') or []},
           'attached': [{k: a.get(k) for k in ('pid', 'rule', 'via')} for a in attached],
           'dropped': len(summary.get('dropped') or []), 'reverted': len(summary.get('reverted') or []),
-          'spaceRestored': len(summary.get('spaceRestores') or [])})
+          'revertLatencyMs': revert_latencies(summary),
+          'spaceRestored': len([e for e in summary.get('spaceRestores') or [] if e.get('event') == 'space-restored'])})
     if found:
         die('FAILED: ' + '; '.join(found), 1)
     latencies = [r['latencyMs'] for r in summary.get('reverted') or []]
