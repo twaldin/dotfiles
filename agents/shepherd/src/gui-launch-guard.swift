@@ -2505,7 +2505,7 @@ func readWindowLooks(_ ids: [Int]) -> Never {
     exit(0)
 }
 
-/// GR2: a tree window's first sighting by Accessibility: when (uptime), SkyLight's place then (nil: unreadable), why
+/// A tree window's first sighting by Accessibility, WindowServer or a yabai list: when, SkyLight's place, why
 /// it was exempt then (WindowLook.exempt; nil: it counted), and whether it was on Tim's screen (false: exempt, or
 /// elsewhere; nil: SkyLight could not say, which counts as on it).
 struct FirstSighting {
@@ -2522,10 +2522,9 @@ let firstSightings = Locked([Int: FirstSighting]())
 typealias Unresolved = (seen: Double, via: String, why: String, offTims: Bool, reported: Bool)
 let unresolved = Locked([Int: Unresolved]())
 
-/// GR2 (bench's ruling): the tree windows exempt at their last sample, enrolled at first sighting before any yabai
-/// query. `recorded` distinguishes that enrollment from the first window-exempt record of the stretch. The
-/// windows-on-screen poll samples each again; one that counts then is parked, judged from that first counting sample.
-let exemptNow = Locked([Int: (at: Double, recorded: Bool)]())
+/// The tree windows exempt at their last sample, enrolled and recorded at first sighting before any yabai query.
+/// The windows-on-screen poll samples each again; one that counts then is parked, judged from that first counting sample.
+let exemptNow = Locked([Int: Double]())
 /// The window-exempt records (the summary's exemptWindows): the first sample of each exempt stretch, and the final
 /// sweep's.
 let exemptRecords = Locked([[String: Any]]())
@@ -2533,17 +2532,20 @@ let exemptRecords = Locked([[String: Any]]())
 /// on Tim's screen then (false: not known before yabai's answer).
 let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
 
-/// Accessibility reported tree window `id` at `seen` (uptime): on its first sighting, a sample of it (WindowLook).
-/// Any thread; no child process.
-@Sendable func sighted(_ id: Int, at seen: Double) {
+/// A tree window was reported at `seen` (`via`): its first direct sample, before queued yabai work. An exempt sample
+/// is recorded and enrolled for the 100 ms resampler immediately. Any thread; no child process.
+@Sendable func sighted(_ id: Int, at seen: Double, via: String) {
     guard firstSightings.value[id] == nil else { return }
     let look = WindowLook(id)
     let exempt = look.exempt
     let sighting = FirstSighting(at: seen, place: look.place, exempt: exempt, onTims: exempt != nil ? false : look.spaceOnTims)
-    firstSightings.update { (all: inout [Int: FirstSighting]) -> Void in
-        guard all[id] == nil else { return }
+    let fresh = firstSightings.update { (all: inout [Int: FirstSighting]) -> Bool in
+        guard all[id] == nil else { return false }
         all[id] = sighting
-        if exempt != nil { exemptNow.update { $0[id] = (at: seen, recorded: false) } }
+        return true
+    }
+    if fresh, let exempt {
+        exempted(id, look, at: seen, reason: exempt, via: via, found: nil, why: "yabai not queried at first sighting", final: false)
     }
 }
 
@@ -2563,9 +2565,9 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
 /// it counts again only from a sample that finds it so. `found`: yabai's answer about it (nil: none, `why`).
 @Sendable func exempted(_ id: Int, _ look: WindowLook, at sampled: Double, reason: String, via: String, found: [String: Any]?,
                         why: String?, final: Bool) {
-    let fresh = exemptNow.update { (now: inout [Int: (at: Double, recorded: Bool)]) -> Bool in
-        defer { now[id] = (at: sampled, recorded: true) }
-        return now[id]?.recorded != true
+    let fresh = exemptNow.update { (now: inout [Int: Double]) -> Bool in
+        defer { now[id] = sampled }
+        return now[id] == nil
     }
     countingSince.update { $0[id] = nil }
     windowsUnknown.update { $0[id] = nil }
@@ -2882,13 +2884,12 @@ func sweep(_ via: String, final: Bool = false) {
                 unresolved.update { $0[w.id] = nil }
                 continue
             }
-            sighted(w.id, at: seen)
+            sighted(w.id, at: seen, via: via)
             park(w.id, seen: seen, via: via, final: final)
         }
         let listed = Set(windows.map { $0.id })
-        let known = Set(firstSightings.value.keys).union(windowSpaces.value.keys).union(windowsUnknown.value.keys)
-            .union(unresolved.value.keys).union(exemptNow.value.keys)
-        for id in known.sorted() where !listed.contains(id) {
+        // Every AX, listed and newly shown window is sighted before its first park: this is the complete known set.
+        for id in firstSightings.value.keys.sorted() where !listed.contains(id) {
             let look = WindowLook(id)
             if look.gone {
                 windowsUnknown.update { $0[id] = nil }
@@ -2918,7 +2919,7 @@ let axCallback: AXObserverCallback = { _, element, notification, _ in
     guard axWindowID(element, &id) == .success, id != 0 else { return }
     let name = notification as String
     let via = name == kAXWindowCreatedNotification ? "ax-created" : name == kAXMainWindowChangedNotification ? "ax-main" : "ax-focused"
-    sighted(Int(id), at: seen)
+    sighted(Int(id), at: seen, via: via)
     yabaiQueue.async { park(Int(id), seen: seen, via: via) }
 }
 
@@ -2951,7 +2952,7 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
             for window in windows {
                 var id: CGWindowID = 0
                 guard axWindowID(window, &id) == .success, id != 0 else { continue }
-                sighted(Int(id), at: seen)
+                sighted(Int(id), at: seen, via: "ax-existing")
                 yabaiQueue.async { park(Int(id), seen: seen, via: "ax-existing") }
             }
         }
@@ -3014,7 +3015,7 @@ final class ShownWindows {
             if member[pid] == true {
                 shown = true
                 let seen = uptime()
-                sighted(row.id, at: seen)
+                sighted(row.id, at: seen, via: "window-shown")
                 yabaiQueue.async { park(row.id, seen: seen, via: "window-shown") }
             }
         }
@@ -4265,7 +4266,7 @@ func rigCommand(_ words: [String]) {
     case ("window", 2):
         guard let id = Int(words[1]) else { return }
         let seen = uptime()
-        sighted(id, at: seen)
+        sighted(id, at: seen, via: "ax-created")
         yabaiQueue.async { park(id, seen: seen, via: "ax-created") }
     case ("sweep", 1):
         yabaiQueue.async { sweep("activation") }

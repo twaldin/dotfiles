@@ -216,8 +216,10 @@ case "$2 $3" in
       wait
     fi
     if [ -n "$5" ]; then
+      delay=0
+      [ -f "$dir/window-delay" ] && delay="$(cat "$dir/window-delay")"
       : > "$dir/window-$5-asked"
-      [ -f "$dir/window-delay" ] && sleep "$(cat "$dir/window-delay")"
+      [ "$delay" != 0 ] && sleep "$delay"
       cat "$dir/window-$5.json" 2>/dev/null || exit 1
     elif [ "$4" = --window ]; then exit 1
     else cat "$dir/windows.json"; fi ;;
@@ -2603,7 +2605,8 @@ class Guard(unittest.TestCase):
         exempt = lines.until(lambda r: r.get('event') == 'window-exempt', 10)[-1]
         self.assertEqual({k: exempt[k] for k in ('window', 'pid', 'reason', 'via', 'final', 'bounds', 'onScreen', 'ordered', 'spaceIds', 'yabai')},
                          {'window': 89261, 'pid': easl, 'reason': 'ordered out', 'via': 'ax-created', 'final': False,
-                          'bounds': [0, 0, 500, 500], 'onScreen': False, 'ordered': 'out', 'spaceIds': [], 'yabai': {'space': 4, 'pid': easl}})
+                          'bounds': [0, 0, 500, 500], 'onScreen': False, 'ordered': 'out', 'spaceIds': [],
+                          'yabai': {'error': 'yabai not queried at first sighting'}})
         time.sleep(0.3)  # the poll samples it again: still exempt, nothing more is recorded
         seen, result = self.end_rig(process, lines, root)
         self.assertEqual((result['problems'], result['moves'], result['windowFaults']), ([], [], []))
@@ -2621,7 +2624,7 @@ class Guard(unittest.TestCase):
         self.assertEqual({k: exempt[k] for k in ('window', 'pid', 'reason', 'bounds', 'onScreen', 'ordered', 'spaces', 'spaceIds', 'yabai')},
                          {'window': 89263, 'pid': easl, 'reason': '2x2 px or less', 'bounds': [0, 0, 1, 1], 'onScreen': True,
                           'ordered': 'in', 'spaces': [4], 'spaceIds': [104],
-                          'yabai': {'error': 'yabai -m query --windows --window 89263 exited 1'}})
+                          'yabai': {'error': 'yabai not queried at first sighting'}})
         time.sleep(3.2)
         seen, result = self.end_rig(process, lines, root)
         self.assertEqual((result['problems'], result['windowFaults']), ([], []))
@@ -2797,6 +2800,29 @@ class Guard(unittest.TestCase):
                           '89331': {'exists': True, 'pid': 500, 'bounds': None, 'spaceIds': []},
                           '89332': {'exists': False, 'pid': None, 'bounds': None, 'spaceIds': None}})
         self.assertFalse((root / 'summary.json').exists())
+
+    def test_a_sticky_window_reshown_on_tims_space_counts_with_no_yabai_index_change(self):
+        # Review 1: membership changes from [7] to [7,2], while yabai's index remains 7 through both sweeps.
+        wid = 89324
+        probe, _ = self.probe(self.java)
+        process, lines, root = self.rig(onscreen=True, skylight={wid: {'spaces': [107], 'display': 'D1'}})
+        self.send(process, 'root %d' % probe.pid)
+        row = {'id': wid, 'pid': probe.pid, 'app': 'Probe', 'space': 7, 'has-focus': False}
+        put(root / ('window-%d.json' % wid), json.dumps(row))
+        put(root / 'windows.json', json.dumps([row]))
+        put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, False]]))
+        self.send(process, 'sweep')
+        deadline = time.monotonic() + 5
+        while not (root / ('window-%d-asked' % wid)).exists():
+            self.assertLess(time.monotonic(), deadline, 'the first sweep never sampled the on-target window')
+            time.sleep(0.01)
+        time.sleep(0.1)  # the fast query's reply has established its off-Tim sample
+        put(root / 'skylight-windows.json', json.dumps({str(wid): {'spaces': [107, 102], 'display': 'D1'}}))
+        self.send(process, 'notify')
+        event = lines.until(lambda r: r.get('event') == 'problem' and 'macOS showed it to him again' in r.get('message', ''), 10)[-1]
+        self.assertIn("was on Tim's Space 2 (found by space-change) after the guard had seen it on Space 7", event['message'])
+        _, result = self.end_rig(process, lines, root)
+        self.assertTrue(any(m.get('id') == wid and m.get('seenBefore') == 7 for m in result['moves']), result['moves'])
 
 
 if __name__ == '__main__':
