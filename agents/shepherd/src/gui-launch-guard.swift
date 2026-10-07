@@ -110,11 +110,12 @@
 //     SkyLight puts on no Space (ordered out; kCGWindowIsOnscreen is no test, it is false for a window ordered in on a
 //     Space no display shows too, and such a window on one of Tim's Spaces counts, in the end-state check too), and a
 //     window whose bounds are 2×2 px or less (width and height both: a 1×500 strip counts). A state, Spaces or bounds
-//     that cannot be read count as on his screen. An exempt window is recorded (window-exempt: id, pid, bounds,
+//     that cannot be read count as on his screen, with neither exemption: both require readable membership and
+//     bounds and WindowServer presence. An exempt window is recorded (window-exempt: id, pid, bounds,
 //     ordered state, Spaces; at the first sample of each exempt stretch and at the final sweep), never moved, never a
 //     problem, and not unknown (its window-unknown is that record, never a fault). Each is sampled again every 100 ms
-//     (with the windows on screen): one that orders in or grows past 2×2 px is judged from that sample on (parked,
-//     window-counted; its time on his screen counts from that sample); one gone is dropped. A window that counted
+//     from its first sighting, before any yabai query finishes: one that orders in or grows past 2×2 px is judged from
+//     the first sample that finds it counting (parked, window-counted; its exposure starts there); one gone is dropped. A window that counted
 //     before it went exempt is still judged on that stretch (window-unknown and the never-placed rule).
 //     --allow-caller-placement, for a caller that moves the tree's windows itself afterwards, changes only the
 //     window-off-target verdict: a window off --space is still moved and recorded, but no problem when it is on a
@@ -2419,8 +2420,9 @@ struct WindowLook {
     /// counts, and so does one whose state, Spaces or bounds cannot be read. kCGWindowIsOnscreen is no test: a window
     /// ordered in on a Space no display shows is off screen too, and counts.
     var exempt: String? {
-        if let bounds = server?.window?.bounds, bounds.width <= 2, bounds.height <= 2 { return "2x2 px or less" }
-        if server?.exists == true, let place, place.spaces.isEmpty { return "ordered out" }
+        guard server?.exists == true, let bounds = server?.window?.bounds, let place else { return nil }
+        if bounds.width <= 2, bounds.height <= 2 { return "2x2 px or less" }
+        if place.spaces.isEmpty { return "ordered out" }
         return nil
     }
 
@@ -2428,7 +2430,7 @@ struct WindowLook {
     /// say: unreadable, or on no Space for a window not shown to exist (ordered out is exempt; gone, or WindowServer
     /// unreadable, proves nothing).
     var spaceOnTims: Bool? {
-        guard let place, !place.spaces.isEmpty else { return nil }
+        guard server?.exists == true, server?.window?.bounds != nil, let place, !place.spaces.isEmpty else { return nil }
         return place.spaces.contains { spaceWatch.showsTim(spaceId: $0) }
     }
 
@@ -2471,10 +2473,10 @@ let firstSightings = Locked([Int: FirstSighting]())
 typealias Unresolved = (seen: Double, via: String, why: String, offTims: Bool, reported: Bool)
 let unresolved = Locked([Int: Unresolved]())
 
-/// GR2 (bench's ruling): the tree windows exempt at their last sample, by id (uptime of that sample). The windows-on-
-/// screen poll samples each again (ShownWindows); one that counts then is parked (window-counted), judged from that
-/// sample on.
-let exemptNow = Locked([Int: Double]())
+/// GR2 (bench's ruling): the tree windows exempt at their last sample, enrolled at first sighting before any yabai
+/// query. `recorded` distinguishes that enrollment from the first window-exempt record of the stretch. The
+/// windows-on-screen poll samples each again; one that counts then is parked, judged from that first counting sample.
+let exemptNow = Locked([Int: (at: Double, recorded: Bool)]())
 /// The window-exempt records (the summary's exemptWindows): the first sample of each exempt stretch, and the final
 /// sweep's.
 let exemptRecords = Locked([[String: Any]]())
@@ -2489,7 +2491,11 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
     let look = WindowLook(id)
     let exempt = look.exempt
     let sighting = FirstSighting(at: seen, place: look.place, exempt: exempt, onTims: exempt != nil ? false : look.spaceOnTims)
-    firstSightings.update { (all: inout [Int: FirstSighting]) -> Void in if all[id] == nil { all[id] = sighting } }
+    firstSightings.update { (all: inout [Int: FirstSighting]) -> Void in
+        guard all[id] == nil else { return }
+        all[id] = sighting
+        if exempt != nil { exemptNow.update { $0[id] = (at: seen, recorded: false) } }
+    }
 }
 
 /// The first-sighting fields of window `id`'s records: firstAt (seconds since launch), firstSpace (its index; null:
@@ -2508,9 +2514,9 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
 /// it counts again only from a sample that finds it so. `found`: yabai's answer about it (nil: none, `why`).
 @Sendable func exempted(_ id: Int, _ look: WindowLook, at sampled: Double, reason: String, via: String, found: [String: Any]?,
                         why: String?, final: Bool) {
-    let fresh = exemptNow.update { (now: inout [Int: Double]) -> Bool in
-        defer { now[id] = sampled }
-        return now[id] == nil
+    let fresh = exemptNow.update { (now: inout [Int: (at: Double, recorded: Bool)]) -> Bool in
+        defer { now[id] = (at: sampled, recorded: true) }
+        return now[id]?.recorded != true
     }
     countingSince.update { $0[id] = nil }
     windowsUnknown.update { $0[id] = nil }

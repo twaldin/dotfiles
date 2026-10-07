@@ -96,7 +96,9 @@ and/or guards one that something else starts, then checks that nothing took it.
   SkyLight puts on no Space (ordered out; not merely off screen: a window on one of Tim's Spaces that no display
   shows counts, at the end too) and one of 2x2 px or less, such as easl's 1x1 window and its ordered-out 500x500
   helpers. Each is recorded (window-exempt: id, pid, bounds, ordered state, Spaces), never moved, never a problem;
-  the guard samples it every 100 ms and judges one that orders in or grows past 2x2 px from that sample on.
+  the guard samples it every 100 ms from its first sighting, before any yabai query finishes, and judges one that
+  orders in or grows past 2x2 px from the first sample that finds it counting. Both exemptions require readable
+  membership and bounds and WindowServer presence; an incomplete sample counts, never exempts.
   A window yabai will not place or name the owner of, a window list
   that fails, and a tree window still off the target after its move are recorded as they happen; the tree's
   windows the final sweep cannot locate are a problem, and so is a tree window still off the target after its move

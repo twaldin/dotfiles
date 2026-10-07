@@ -206,12 +206,49 @@ case "$2 $3" in
     mode="$(cat "$dir/windows-mode")"
     if [ "$mode" = hang ]; then [ -n "$5" ] && : > "$dir/window-$5-asked"; exec sleep 30; fi
     if [ "$mode" = hang-once ] && [ -z "$4" ]; then echo answer > "$dir/windows-mode"; exec sleep 30; fi
-    if [ -n "$5" ]; then cat "$dir/window-$5.json" 2>/dev/null || exit 1
+    if [ -n "$5" ]; then
+      : > "$dir/window-$5-asked"
+      [ -f "$dir/window-delay" ] && sleep "$(cat "$dir/window-delay")"
+      cat "$dir/window-$5.json" 2>/dev/null || exit 1
     elif [ "$4" = --window ]; then exit 1
     else cat "$dir/windows.json"; fi ;;
   "window "*)
     if [ "$4" = --space ] && [ "$(cat "$dir/moves" 2>/dev/null)" = apply ] && [ -f "$dir/window-$3.json" ]; then
-      sed -i '' "s/\\"space\\": *-*[0-9]*/\\"space\\": $5/" "$dir/window-$3.json"
+      [ -f "$dir/move-delay" ] && sleep "$(cat "$dir/move-delay")"
+      destination="$5"
+      [ -f "$dir/move-destination" ] && destination="$(cat "$dir/move-destination")"
+      '%(python)s' - "$dir" "$3" "$destination" <<'PY'
+import json, os, sys
+from pathlib import Path
+root, wid, destination = Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+def put(path, value):
+    part = Path(str(path) + '.part')
+    part.write_text(json.dumps(value))
+    os.replace(str(part), str(path))
+path = root / ('window-%%d.json' %% wid)
+row = json.loads(path.read_text())
+row['space'] = destination
+put(path, row)
+path = root / 'windows.json'
+rows = json.loads(path.read_text())
+for w in rows:
+    if w['id'] == wid:
+        w['space'] = destination
+put(path, rows)
+path = root / 'skylight-windows.json'
+if path.exists():
+    places = json.loads(path.read_text())
+    if str(wid) in places:
+        places[str(wid)] = {'spaces': [100 + destination], 'display': 'D1' if destination < 10 else 'D2'}
+        put(path, places)
+path = root / 'onscreen.json'
+if path.exists():
+    rows = json.loads(path.read_text())
+    for w in rows:
+        if w[0] == wid and len(w) >= 5:
+            w[4] = False
+    put(path, rows)
+PY
     else exit 1; fi ;;
   *) exit 1 ;;
 esac
@@ -1835,7 +1872,7 @@ class Guard(unittest.TestCase):
         "display"}}), skylight-windows.json stands for SkyLight's read of windows. Its argv, and the directory."""
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))
         yabai = root / 'yabai'
-        yabai.write_text(RIG_YABAI % {'dir': root})
+        yabai.write_text(RIG_YABAI % {'dir': root, 'python': sys.executable})
         yabai.chmod(0o755)
         warm(yabai)
         put(root / 'spaces-delay', '0.6')
@@ -2570,6 +2607,42 @@ class Guard(unittest.TestCase):
                 _, result = self.end_rig(process, lines, root)
                 self.assertTrue(any(p.startswith("window 89275 of the tree (easl, pid %d) was on Tim's screen for " % easl)
                                     for p in result['problems']), result['problems'])
+
+    def test_incomplete_samples_never_exempt_tiny_or_ordered_out_windows(self):
+        # Review 1: tiny bounds do not excuse unreadable membership, nor does an empty Space list excuse unreadable bounds.
+        for wid, bounds, skylight in ((89310, (1, 1), {}),
+                                     (89311, (None, None), {89311: {'spaces': [], 'display': None}})):
+            with self.subTest(window=wid):
+                process, lines, root, easl = self.late_rig(onscreen=True, skylight=skylight)
+                put(root / 'onscreen.json', json.dumps([[wid, easl, bounds[0], bounds[1], False]]))
+                self.send(process, 'window %d' % wid)
+                time.sleep(0.5)
+                put(root / 'onscreen.json', '[]')
+                seen, result = self.end_rig(process, lines, root)
+                self.assertEqual(result['exemptWindows'], [], result)
+                self.assertTrue(any(p.startswith('window %d ' % wid) for p in result['problems']), result['problems'])
+
+    def test_an_exempt_first_sighting_is_resampled_while_its_yabai_query_is_slow(self):
+        # Review 1: the helper grows during a 1.2 s owner query. Its first counting sample, not the reply, starts exposure.
+        wid = 89312
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+        row = {'id': wid, 'pid': easl, 'app': 'easl', 'title': 'helper', 'space': 4}
+        put(root / ('window-%d.json' % wid), json.dumps(row))
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
+        put(root / 'window-delay', '1.2')
+        self.send(process, 'window %d' % wid)
+        deadline = time.monotonic() + 5
+        while not (root / ('window-%d-asked' % wid)).exists():
+            self.assertLess(time.monotonic(), deadline, 'the first park never asked yabai')
+            time.sleep(0.01)
+        put(root / 'window-delay', '0')
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False]]))
+        moved = lines.until(lambda r: r.get('event') == 'window' and r.get('id') == wid, 10)[-1]
+        self.assertEqual((moved['firstExempt'], moved['firstOnTimsScreen']), ('2x2 px or less', False))
+        self.assertGreater(moved['onTimSpaceMs'], 800, moved)
+        _, result = self.end_rig(process, lines, root)
+        self.assertTrue(any(p.startswith('window %d ' % wid) and 'more than 250 ms' in p for p in result['problems']),
+                        result['problems'])
 
 
 if __name__ == '__main__':
