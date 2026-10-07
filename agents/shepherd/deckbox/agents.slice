@@ -3,6 +3,9 @@ Description=Agent hosts (herdr, easld tiles): one CPU and memory budget
 Before=slices.target
 
 [Slice]
-AllowedCPUs=0 6-7 9 11-12 18-19 21 23
+# Every CPU except the ones a running measured job holds (Tim 2026-10-07: nothing reserved while idle).
+# Hutter's calibrations hold 1-4 13-16 while they run (hone). A sky deckbox ARM takes 6-11 18-23 at runtime
+# for its minutes only and gives them back.
+AllowedCPUs=0 5-12 17-23
 MemoryHigh=28G
 MemoryMax=32G
