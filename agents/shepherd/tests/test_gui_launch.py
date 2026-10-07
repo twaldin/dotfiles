@@ -2433,6 +2433,19 @@ class Guard(unittest.TestCase):
         self.assertIn("window 89280 of the tree (reported by ax-created) was never placed before it went: yabai -m query --windows "
                       "--window 89280 exited 1; nothing showed it off Tim's screen, so its time there cannot be bounded", result['problems'])
 
+    def test_a_window_skylight_puts_on_no_space_that_windowserver_does_not_have_proves_nothing_and_fails_the_check(self):
+        # GR2 (bench's ruling: what cannot be read counts): SkyLight puts window 89285 on no Space, and WindowServer does
+        # not have it (gone, or not yet listed). Only a window WindowServer has on no Space is ordered out (exempt); this
+        # one proves nothing, so it is not off Tim's screen. yabai never lists it, and the guard ends 0.5 s later: never
+        # placed, a problem. Before, an empty Space list read as off his screen and the check passed.
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={89285: {'spaces': [], 'display': None}})
+        self.send(process, 'window 89285')
+        time.sleep(0.5)
+        seen, result = self.end_rig(process, lines, root)
+        self.assertNotIn('window-exempt', [e.get('event') for e in seen])
+        self.assertIn("window 89285 of the tree (reported by ax-created) was never placed before it went: yabai -m query --windows "
+                      "--window 89285 exited 1; nothing showed it off Tim's screen, so its time there cannot be bounded", result['problems'])
+
     # Helper windows (GR2, bench's ruling, GR1 addendum 4 note 3). perf's 06:50Z proof launch
     # (~/dev/easl-lanes/perf-lead/window-watch.log and gui-launch.jsonl): every easl launch has a 1x1 window at (0,981),
     # on screen for ~1 s, that yabai never lists (window-unknown in every GR1 launch), and 500x500 helpers that are
