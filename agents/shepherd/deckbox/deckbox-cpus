@@ -34,9 +34,13 @@ give removes the owner's reservation, cancels its timer and restores agents.slic
 other owner's CPUs, and no CPUQuota once nothing is held. Giving when nothing is held exits 0 with a note.
 take and give message hone (as hone@twaldin-home; see RECIPIENTS) and hutter-v2@deckbox through
 ~/.local/bin/agent-msg; a send that fails is appended to ~/hutter/run/arm-windows.ndjson instead.
-State: ~/.local/state/deckbox-cpus/holds.json. The audit is log.jsonl: every take and give (the expiry timer's
-too) appends its row, with takenAtUtc and gaveAtUtc, under the lock with the holds update and fsync'd before any
-message goes out; a take-messages or give-messages row with the send outcomes follows. Refusals are logged too.
+State: ~/.local/state/deckbox-cpus/holds.json. The audit is log.jsonl. Every take and give (the expiry timer's
+too) appends its row under the lock with the holds update, fsync'd, before any message goes out (sends can take
+2 x 60 s). sliceChangedAtUtc is stamped (ms) immediately before agents.slice changes, so the reservation is
+[take's sliceChangedAtUtc, give's sliceChangedAtUtc]; take rows also carry takenAtUtc, give rows the take's
+takeSliceChangedAtUtc and takenAtUtc and their own gaveAtUtc. The messages and the arm-windows fallback rows
+carry the same stamps; a take-messages or give-messages row with the send outcomes follows. A take rolled back
+after its slice change is logged with that interval (take-rolled-back); refusals are logged too.
 """
 import datetime as dt
 import fcntl
@@ -110,6 +114,11 @@ def now():
 
 def iso(t):
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def stamp_ms():
+    """Now, to the millisecond: the audit stamps Hutter checks its evals against."""
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def base_cpus():
@@ -276,8 +285,9 @@ def lock():
     return fd
 
 
-def notify(event, owner, cpus, expires, text):
-    """Message each recipient; a failed send goes to Hutter's arm-windows file instead. Returns the outcomes."""
+def notify(event, owner, cpus, stamps, text):
+    """Message each recipient; a failed send goes to Hutter's arm-windows file instead, with the event's stamps.
+    Returns the outcomes."""
     out = []
     for to in RECIPIENTS:
         try:
@@ -291,7 +301,7 @@ def notify(event, owner, cpus, expires, text):
             os.makedirs(os.path.dirname(ARM_WINDOWS), exist_ok=True)
             with open(ARM_WINDOWS, "a") as f:
                 f.write(json.dumps({"ts": iso(now()), "source": "deckbox-cpus", "event": event, "owner": owner,
-                                    "cpus": cpus, "expiresAtUtc": expires, "undelivered_to": to, "exit": code,
+                                    "arm": owner != SMOKE, "cpus": cpus, **stamps, "undelivered_to": to, "exit": code,
                                     "error": err, "text": text}) + "\n")
             row["fallback"] = ARM_WINDOWS
         out.append(row)
@@ -345,6 +355,7 @@ def take(owner, cpus_text, expires):
         before = slice_now()
         allowed = base - others - cpus
         quota = quota_for(allowed, True)
+        changed = stamp_ms()  # immediately before agents.slice changes: where the reservation starts for Hutter
         set_slice(allowed, quota)
         try:
             moved = move_offload(cpus, allowed)
@@ -358,26 +369,35 @@ def take(owner, cpus_text, expires):
                               f" (limit {BUSY_PCT}% over {SAMPLE_S:g}s)")
             old = holds.get(owner, {}).get("timer")
             timer = start_timer(owner, expires)
-        except BaseException:
-            restore_slice(before)
+        except BaseException as e:
+            restored = None
+            try:
+                restore_slice(before)
+                restored = stamp_ms()
+            finally:  # the slice did change, however briefly: the audit gets that interval
+                log({"ts": iso(now()), "event": "take-rolled-back", "owner": owner, "arm": owner != SMOKE,
+                     "cpus": fmt_cpus(cpus), "sliceChangedAtUtc": changed, "sliceRestoredAtUtc": restored,
+                     "error": str(e)})
             raise
         stop_timer(old)
-        taken = iso(now())
-        holds[owner] = {"cpus": sorted(cpus), "takenAtUtc": taken, "expiresAtUtc": iso(expires), "timer": timer}
+        taken = stamp_ms()
+        holds[owner] = {"cpus": sorted(cpus), "sliceChangedAtUtc": changed, "takenAtUtc": taken,
+                        "expiresAtUtc": iso(expires), "timer": timer}
         save_holds(holds)
         after = slice_now()
-        row = {"ok": True, "event": "take", "owner": owner, "arm": owner != SMOKE, "cpus": fmt_cpus(cpus),
-               "takenAtUtc": taken, "expiresAtUtc": iso(expires), **power(cpus),
-               "agentsSlice": {"before": before, "after": after}, "busyPct": {str(c): p for c, p in pct.items()},
-               "busyLimitPct": BUSY_PCT, "offloadMoved": moved, "timer": timer}
+        stamps = {"sliceChangedAtUtc": changed, "takenAtUtc": taken, "expiresAtUtc": iso(expires)}
+        row = {"ok": True, "event": "take", "owner": owner, "arm": owner != SMOKE, "cpus": fmt_cpus(cpus), **stamps,
+               **power(cpus), "agentsSlice": {"before": before, "after": after},
+               "busyPct": {str(c): p for c, p in pct.items()}, "busyLimitPct": BUSY_PCT, "offloadMoved": moved,
+               "timer": timer}
         log({"ts": iso(now()), **row})  # under the lock with the holds update, before any message goes out
     finally:
         os.close(fd)
-    text = (f"deckbox-cpus: {owner} took deckbox CPUs {fmt_cpus(cpus)} at {taken} until {iso(expires)} (auto-give "
-            f"timer){SMOKE_NOTE if owner == SMOKE else ''}. agents.slice now {after['AllowedCPUs']}, "
-            f"CPUQuota {after['CPUQuota']}.")
-    row["messages"] = notify("take", owner, row["cpus"], row["expiresAtUtc"], text)
-    log({"ts": iso(now()), "event": "take-messages", "owner": owner, "takenAtUtc": taken, "messages": row["messages"]})
+    text = (f"deckbox-cpus: {owner} took deckbox CPUs {fmt_cpus(cpus)}: agents.slice changed at {changed}, taken at "
+            f"{taken}, until {iso(expires)} (auto-give timer){SMOKE_NOTE if owner == SMOKE else ''}. agents.slice "
+            f"now {after['AllowedCPUs']}, CPUQuota {after['CPUQuota']}.")
+    row["messages"] = notify("take", owner, row["cpus"], stamps, text)
+    log({"ts": iso(now()), "event": "take-messages", "owner": owner, **stamps, "messages": row["messages"]})
     return row
 
 
@@ -394,24 +414,26 @@ def give(owner, expired=False):
             others |= set(h["cpus"])
         before = slice_now()
         allowed = base - others
+        changed = stamp_ms()  # immediately before agents.slice gets the CPUs back: where the reservation ends
         set_slice(allowed, quota_for(allowed, bool(holds)))
         stop_timer(held.get("timer"))
         save_holds(holds)
         after = slice_now()
         cpus = fmt_cpus(held["cpus"])
-        row = {"ok": True, "event": "give", "owner": owner, "arm": owner != SMOKE, "cpus": cpus,
-               "takenAtUtc": held.get("takenAtUtc"), "gaveAtUtc": iso(now()), "expiresAtUtc": held["expiresAtUtc"],
+        stamps = {"takeSliceChangedAtUtc": held.get("sliceChangedAtUtc"), "takenAtUtc": held.get("takenAtUtc"),
+                  "sliceChangedAtUtc": changed, "gaveAtUtc": stamp_ms(), "expiresAtUtc": held["expiresAtUtc"]}
+        row = {"ok": True, "event": "give", "owner": owner, "arm": owner != SMOKE, "cpus": cpus, **stamps,
                "expired": expired, "agentsSlice": {"before": before, "after": after},
                "baseRestored": parse_cpus(after["AllowedCPUs"] or "") == base and not holds}
         log({"ts": iso(now()), **row})  # under the lock with the holds update, before any message goes out
     finally:
         os.close(fd)
     text = (f"deckbox-cpus: {owner} {'reservation expired; gave back' if expired else 'gave back'} deckbox CPUs "
-            f"{cpus} at {row['gaveAtUtc']}{SMOKE_NOTE if owner == SMOKE else ''}. agents.slice now "
-            f"{after['AllowedCPUs']}, CPUQuota {after['CPUQuota'] or 'none'}.")
-    row["messages"] = notify("give", owner, cpus, held["expiresAtUtc"], text)
-    log({"ts": iso(now()), "event": "give-messages", "owner": owner, "takenAtUtc": row["takenAtUtc"],
-         "gaveAtUtc": row["gaveAtUtc"], "messages": row["messages"]})
+            f"{cpus}: agents.slice changed back at {changed} (it changed for the take at "
+            f"{stamps['takeSliceChangedAtUtc']}; taken at {stamps['takenAtUtc']}){SMOKE_NOTE if owner == SMOKE else ''}. "
+            f"agents.slice now {after['AllowedCPUs']}, CPUQuota {after['CPUQuota'] or 'none'}.")
+    row["messages"] = notify("give", owner, cpus, stamps, text)
+    log({"ts": iso(now()), "event": "give-messages", "owner": owner, **stamps, "messages": row["messages"]})
     return row
 
 

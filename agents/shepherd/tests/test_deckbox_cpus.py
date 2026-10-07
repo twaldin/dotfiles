@@ -20,7 +20,7 @@ from pathlib import Path
 TOOL = Path(__file__).resolve().parent.parent / 'deckbox' / 'deckbox-cpus'
 
 SYSTEMCTL = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 argv = sys.argv[1:]
 d = os.environ['FAKE_DIR']
 with open(os.path.join(d, 'systemctl.jsonl'), 'a') as f:
@@ -32,6 +32,8 @@ if argv[:2] == ['show', 'agents.slice']:
     print('AllowedCPUs=' + state['AllowedCPUs'])
     print('CPUQuotaPerSecUSec=' + ('infinity' if not q else '%gs' % (int(q.rstrip('%')) / 100)))
 elif argv[:3] == ['set-property', '--runtime', 'agents.slice']:
+    with open(os.path.join(d, 'slice-changes.jsonl'), 'a') as f:
+        f.write(json.dumps({'t': time.time(), 'props': argv[3:]}) + '\n')
     for kv in argv[3:]:
         k, v = kv.split('=', 1)
         state[k] = v or None
@@ -81,6 +83,11 @@ def stat_text(busy=None):
         idle = 9000 + 100 - busy.get(c, 0) if busy else 9000
         lines.append(f'cpu{c} {user} 0 0 {idle} 0 0 0 0 0 0')
     return '\n'.join(lines) + '\nintr 0\n'
+
+
+def ms(stamp):
+    """Epoch seconds of an audit stamp such as 2026-10-07T17:25:53.123Z."""
+    return dt.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=dt.timezone.utc).timestamp()
 
 
 class CpusCase(unittest.TestCase):
@@ -139,6 +146,10 @@ class CpusCase(unittest.TestCase):
         path = self.home / '.local' / 'state' / 'deckbox-cpus' / 'holds.json'
         return json.loads(path.read_text()) if path.exists() else {}
 
+    def log(self):
+        path = self.home / '.local' / 'state' / 'deckbox-cpus' / 'log.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
     def arm_windows(self):
         path = self.home / 'hutter' / 'run' / 'arm-windows.ndjson'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
@@ -168,7 +179,8 @@ class Take(CpusCase):
         self.assertEqual([m['exit'] for m in row['messages']], [0, 0])
         sent = self.records('agent-msg.jsonl')
         self.assertEqual([s[0] for s in sent], ['hone@twaldin-home', 'hutter-v2@deckbox'])
-        self.assertIn(f'smoke took deckbox CPUs 6-11,18-23 at {row["takenAtUtc"]} until {row["expiresAtUtc"]}', sent[0][1])
+        self.assertIn(f'smoke took deckbox CPUs 6-11,18-23: agents.slice changed at {row["sliceChangedAtUtc"]}, taken '
+                      f'at {row["takenAtUtc"]}, until {row["expiresAtUtc"]}', sent[0][1])
         self.assertIn('owner smoke: a reservation-only tool test, nothing runs on these CPUs; not an ARM', sent[0][1])
         self.assertEqual(sent[0][2:], ['--from', 'deckbox-cpus'])
         self.assertEqual(self.holds()['smoke']['cpus'], [6, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23])
@@ -240,6 +252,10 @@ class Take(CpusCase):
         self.assertEqual(self.slice_state(), {'AllowedCPUs': BASE, 'CPUQuota': None})
         self.assertEqual(self.holds(), {})
         self.assertEqual(self.records('systemd-run.jsonl') + self.records('agent-msg.jsonl'), [])
+        (rolled,) = [r for r in self.log() if r['event'] == 'take-rolled-back']
+        changes = self.records('slice-changes.jsonl')
+        self.assertLessEqual(ms(rolled['sliceChangedAtUtc']), changes[0]['t'])
+        self.assertLessEqual(changes[1]['t'], ms(rolled['sliceRestoredAtUtc']))
 
     def test_sudo_refusal_fails_the_take_cleanly(self):
         code, row = self.cpus('take', 'smoke', '6', '--for', '5', env={'FAKE_SUDO_FAIL': '1'})
@@ -263,6 +279,9 @@ class Take(CpusCase):
         (line,) = self.arm_windows()
         self.assertEqual((line['event'], line['owner'], line['cpus'], line['undelivered_to'], line['exit']),
                          ('take', 'smoke', '6', 'hone@twaldin-home', 75))
+        self.assertEqual((line['sliceChangedAtUtc'], line['takenAtUtc'], line['expiresAtUtc']),
+                         (row['sliceChangedAtUtc'], row['takenAtUtc'], row['expiresAtUtc']))
+        self.assertIn(row['sliceChangedAtUtc'], line['text'])
 
     def test_a_second_take_by_the_same_owner_replaces_its_reservation(self):
         self.assertEqual(self.cpus('take', 'smoke', '6-7', '--for', '10')[0], 0)
@@ -279,6 +298,26 @@ class Take(CpusCase):
         self.assertEqual(self.cpus('take', 'smoke', '6', '--for', '5')[0], 0)
         self.assertEqual(self.cpus('give', 'smoke')[0], 0)
         self.assertEqual({p: p.read_text() for p in self.sys.rglob('*') if p.is_file()}, before)
+
+    def test_the_log_alone_yields_the_exact_slice_change_interval(self):
+        self.cpus('take', 'smoke', '12', '--for', '5')
+        time.sleep(0.3)
+        self.cpus('give', 'smoke', '--expired')
+        self.assertEqual(self.holds(), {})  # give popped the hold; the log still has the take's start
+        take, give = [r for r in self.log() if r['event'] in ('take', 'give')]
+        start, end = ms(take['sliceChangedAtUtc']), ms(give['sliceChangedAtUtc'])
+        self.assertEqual(give['takeSliceChangedAtUtc'], take['sliceChangedAtUtc'])
+        self.assertEqual(give['takenAtUtc'], take['takenAtUtc'])
+        # Each stamp is taken immediately before agents.slice changes: within a second, never after.
+        changed = [c['t'] for c in self.records('slice-changes.jsonl')]
+        self.assertEqual(len(changed), 2)
+        self.assertTrue(start <= changed[0] < start + 1, (start, changed[0]))
+        self.assertTrue(end <= changed[1] < end + 1, (end, changed[1]))
+        self.assertLessEqual(ms(take['sliceChangedAtUtc']), ms(take['takenAtUtc']))
+        self.assertLessEqual(ms(give['sliceChangedAtUtc']), ms(give['gaveAtUtc']))
+        give_text = self.records('agent-msg.jsonl')[-1][1]
+        for stamp in (give['sliceChangedAtUtc'], take['sliceChangedAtUtc'], take['takenAtUtc']):
+            self.assertIn(stamp, give_text)
 
     def test_each_take_and_give_row_is_logged_with_its_times_before_any_message(self):
         _, take = self.cpus('take', 'smoke', '12', '--for', '5')
