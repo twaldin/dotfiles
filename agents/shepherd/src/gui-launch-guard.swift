@@ -77,10 +77,18 @@
 //     checks out, brings that Space back, if a fresh read still wants it before each owner query and the focus;
 //     each restore is recorded too. A change taken for Tim's is undone when a theft turns out to have come within
 //     2 s of it;
-//   - parks windows: each tree window that Accessibility reports created or focused, and each tree window
-//     yabai lists when the tree activates or the active Space changes, is moved by id to --space. A window whose
-//     location or owner yabai will not give, a window list that fails, and a tree window still off --space after
-//     its move are recorded as they happen; the tree's windows that the final sweep still cannot locate are a
+//   - parks windows: each tree window that Accessibility reports created, focused or made main, and each tree
+//     window yabai lists when the tree activates, the active Space changes, or (GR2, addendum 2) a tree window comes
+//     on screen, is moved by id to --space. So every Space notification, and every tree window the guard sees come on
+//     screen (the windows on screen, read every 100 ms from the launch on: a window not on screen at the read before),
+//     re-checks all of the tree's windows: macOS can show an existing window again (a native tab selected again) on
+//     the Space Tim is viewing with no create event and no Space change. The guard keeps the Space it last saw each
+//     tree window on. A tree window found on Tim's screen (his Spaces 1-4, or the Space his display shows or should
+//     show, if not --space) after the guard saw it on another Space, or found there by the final sweep, is a
+//     problem, created or not; a window's first sighting there, where macOS opens new windows, is only a move
+//     (a known flash, recorded with onTimSpaceMs). A read of the windows on screen that fails is a problem. A window
+//     whose location or owner yabai will not give, a window list that fails, and a tree window still off --space
+//     after its move are recorded as they happen; the tree's windows that the final sweep still cannot locate are a
 //     problem, and so is each tree window still off --space after its move (window-off-target; GR2, addendum 1).
 //     --allow-caller-placement, for a caller that moves the tree's windows itself afterwards, changes only that
 //     verdict: a window off --space is still moved and recorded, but no problem when it is on a Space and off Tim's
@@ -107,7 +115,8 @@
 // process (a yabai call there is refused, and is a problem); reverts run on restoreQueue, Accessibility calls on
 // axQueue (observer callbacks on their own run loop thread), window moves on yabaiQueue, Tim's restore target
 // and Space restores on timQueue, the theft-window reads of his display on watchQueue, yabai's Space map on
-// mapQueue, the process scan on scanQueue, the baseline on startQueue and the end on endQueue.
+// mapQueue, the process scan on scanQueue, the windows on screen on shownQueue, the baseline on startQueue and the
+// end on endQueue.
 // Every yabai call has one absolute deadline over its exit and the drain of its output (an output that reaches
 // 16 MiB is refused, and a problem, whether or not the helper exits), runs in its own process group, and ends with
 // that group: whatever it started is killed, and the leader reaped only once a whole listing of the group, every
@@ -124,9 +133,10 @@
 //        gui-launch-guard --helpers --yabai PATH
 //                                     yabai calls and the guard's end, driven from stdin (tests)
 //        gui-launch-guard --rig --space N --yabai PATH --displays PATH --summary PATH [--guard-seconds S]
-//            [--allow-caller-placement]
+//            [--allow-caller-placement] [--onscreen PATH]
 //                                     the guard in a session without a GUI: a stand-in yabai, a file standing in
-//                                     for SkyLight's displays, and its events driven from stdin (tests)
+//                                     for SkyLight's displays (and one for the windows on screen, or none on
+//                                     screen), and its events driven from stdin (tests)
 // build: swiftc -O -swift-version 5 -target arm64-apple-macos13 \
 //          -o ~/.local/bin/gui-launch-guard src/gui-launch-guard.swift
 import AppKit
@@ -2106,6 +2116,7 @@ var resolving = false, helperTest = false, rigTest = false
 /// off --space after the guard's move is no problem, but only when it is off Tim's screen (onTimsScreen) and on a Space.
 var allowCallerPlacement = false
 var displaysPath: String?
+var onscreenPath: String?  // --onscreen (rig): the file standing in for the windows on screen
 var parentWatch: pid_t?
 var attachExe: String?, attachNeedle: String?, givenToken: String?
 var launchArgv: [String] = []
@@ -2130,6 +2141,7 @@ while !argv.isEmpty {
     case "--attach-argv": attachNeedle = value
     case "--token": givenToken = value
     case "--displays": displaysPath = value
+    case "--onscreen": onscreenPath = value
     default: fail("unknown flag \(flag)")
     }
 }
@@ -2146,10 +2158,12 @@ guard givenToken == nil else { fail("--token is for --resolve; a launch makes it
 if rigTest {
     guard space > 0, guardSeconds > 0, guardSeconds.isFinite, !yabaiPath.isEmpty, !summaryPath.isEmpty, displaysPath != nil,
           mode == nil, matcher == nil, parentWatch == nil else {
-        fail("usage: --rig --space N --yabai PATH --displays PATH --summary PATH [--guard-seconds S] [--allow-caller-placement]")
+        fail("usage: --rig --space N --yabai PATH --displays PATH --summary PATH [--guard-seconds S] [--allow-caller-placement] " +
+             "[--onscreen PATH]")
     }
 } else {
     guard displaysPath == nil else { fail("--displays is for --rig: the guard reads Tim's display from SkyLight") }
+    guard onscreenPath == nil else { fail("--onscreen is for --rig: the guard reads the windows on screen from WindowServer") }
     guard space > 0, guardSeconds > 0, guardSeconds.isFinite, adoptTimeout > 0, adoptTimeout.isFinite,
           !yabaiPath.isEmpty, !summaryPath.isEmpty, (mode == nil) == launchArgv.isEmpty, mode != nil || matcher != nil else {
         fail("usage: --space N --guard-seconds S --yabai PATH --summary PATH [--parent-pid P] [--adopt-timeout S] " +
@@ -2191,6 +2205,9 @@ let windowsUnknown = Locked([Int: String]())
 let windowListFailure = Locked(String?.none)
 /// window-unknown, window-list-failed and window-off-target, as recorded.
 let windowFaults = Locked([[String: Any]]())
+/// GR2: the Space the guard last saw each tree window on, by id (kept for the guard's whole run: a list may leave out a
+/// window, a hidden tab, that macOS shows again later).
+let windowSpaces = Locked([Int: Int]())
 let spaceWatch = SpaceWatch()
 var theft: [String: Any]?          // the tree activation not yet given back (main thread)
 let theftPending = Locked(false)   // theft != nil, for the end
@@ -2214,6 +2231,7 @@ let startQueue = DispatchQueue(label: "gui-launch.start")
 let endQueue = DispatchQueue(label: "gui-launch.end")
 let watchQueue = DispatchQueue(label: "gui-launch.watch", qos: .userInteractive)
 let mapQueue = DispatchQueue(label: "gui-launch.map")
+let shownQueue = DispatchQueue(label: "gui-launch.shown")
 
 // MARK: - Tim's input
 
@@ -2318,7 +2336,10 @@ func windowFields(_ w: [String: Any]?) -> [String: Any] {
 /// about again for up to a second, without holding up the queue. Nothing ends unrecorded: a window yabai will not
 /// place, or whose answer does not say whose it is, is window-unknown (only an answer naming an owner outside the
 /// tree clears it), and a tree window still off the target after its move (or on no Space, which a move by Space
-/// cannot reach) is window-off-target.
+/// cannot reach) is window-off-target. GR2: each sighting's Space is kept (windowSpaces); a tree window found on Tim's
+/// screen (onTimsScreen) after the guard saw it on another Space came back to him, and one found there by the final
+/// sweep is there at the end: each is a problem, created or not. Its first sighting there, where macOS opens new
+/// windows, is only a move.
 func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
     tracked("park of window \(id) (\(via))", final: final) {
         let (found, why) = windowQuery(id)
@@ -2343,6 +2364,17 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
             return
         }
         windowsUnknown.update { $0[id] = nil }
+        let before = windowSpaces.update { (spaces: inout [Int: Int]) -> Int? in
+            defer { spaces[id] = from }
+            return spaces[id]
+        }
+        let onTims = from != 0 && onTimsScreen(from)
+        let back = onTims && before != nil && before != from
+        if back || (onTims && final) {
+            let app = w["app"] as? String ?? "?"
+            problem(back ? "window \(id) of the tree (\(app), pid \(pid)) was on Tim's Space \(from) (found by \(via)) after the guard had seen it on Space \(before.map { String($0) } ?? "?"): macOS showed it to him again"
+                         : "window \(id) of the tree (\(app), pid \(pid)) was on Tim's Space \(from) at the guard's end")
+        }
         if from == space { return }
         if from == 0 {
             windowOffTarget(id, w, at: 0, via: via, why: "yabai places it on no Space, where a move by Space cannot reach it")
@@ -2358,6 +2390,8 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
             "latencyMs": ms(done - seen),
         ]
         if timSpaces.contains(from) { record["onTimSpaceMs"] = ms(done - seen) }
+        if back, let before { record["seenBefore"] = before }
+        if let after { windowSpaces.update { $0[id] = after } }
         moves.update { $0.append(record) }
         emit(record)
         guard let after else {
@@ -2377,9 +2411,10 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
     }
 }
 
-/// Parks every tree window yabai lists off the target. A list that fails, or has a row without an id or pid, is
-/// window-list-failed: where the tree's windows are is unknown until a list answers. A list that answers places or
-/// drops every window that was unknown (park records again those it still cannot place).
+/// Parks every tree window yabai lists off the target, and keeps the Space of each it lists on it (windowSpaces). A
+/// list that fails, or has a row without an id or pid, is window-list-failed: where the tree's windows are is unknown
+/// until a list answers. A list that answers places or drops every window that was unknown (park records again those
+/// it still cannot place).
 func sweep(_ via: String, final: Bool = false) {
     tracked("sweep (\(via))", final: final) {
         let seen = uptime()
@@ -2402,8 +2437,15 @@ func sweep(_ via: String, final: Bool = false) {
         }
         windowListFailure.update { $0 = nil }
         windowsUnknown.update { $0.removeAll() }
-        for w in windows where w.space != space && tree.contains(w.pid) {
-            park(w.id, seen: seen, via: via, final: final)
+        var member: [pid_t: Bool] = [:]
+        for w in windows {
+            if member[w.pid] == nil { member[w.pid] = tree.contains(w.pid) }
+            guard member[w.pid] == true else { continue }
+            if w.space == space {
+                windowSpaces.update { $0[w.id] = space }
+            } else {
+                park(w.id, seen: seen, via: via, final: final)
+            }
         }
     }
 }
@@ -2420,13 +2462,15 @@ let axCallback: AXObserverCallback = { _, element, notification, _ in
     let seen = uptime()
     var id: CGWindowID = 0
     guard axWindowID(element, &id) == .success, id != 0 else { return }
-    let via = notification as String == kAXWindowCreatedNotification ? "ax-created" : "ax-focused"
+    let name = notification as String
+    let via = name == kAXWindowCreatedNotification ? "ax-created" : name == kAXMainWindowChangedNotification ? "ax-main" : "ax-focused"
     yabaiQueue.async { park(Int(id), seen: seen, via: via) }
 }
 
-/// Subscribes to a tree process's window events. A just-launched app answers Accessibility only once its run
-/// loop is up, so a refused subscription is retried, every 20 ms for the first 5 s (an adopted client may take
-/// that long to become an app), then every 250 ms, until the guard ends.
+/// Subscribes to a tree process's window events: a window created, focused, or made main (GR2: a native tab selected
+/// makes its window main, and may show it again on the active Space). A just-launched app answers Accessibility only
+/// once its run loop is up, so a refused subscription is retried, every 20 ms for the first 5 s (an adopted client may
+/// take that long to become an app), then every 250 ms, until the guard ends.
 func observe(_ pid: pid_t, attempt: Int = 0) {
     axQueue.async {
         guard observers[pid] == nil, processStart(pid) != nil, !stopping else { return }
@@ -2439,6 +2483,7 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
             return
         }
         AXObserverAddNotification(observer, app, kAXFocusedWindowChangedNotification as CFString, nil)
+        AXObserverAddNotification(observer, app, kAXMainWindowChangedNotification as CFString, nil)
         CFRunLoopAddSource(axLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
         CFRunLoopWakeUp(axLoop)
         observers[pid] = observer
@@ -2455,6 +2500,72 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
         }
     }
 }
+
+// MARK: - Windows on screen (GR2; shownQueue)
+
+/// The windows on screen now (WindowServer's list, every display's current Space), by id with their owner's pid; nil:
+/// unreadable. The rig reads its stand-in file (--onscreen: `[[id, pid], …]`), and without one has none on screen.
+func shownWindows() -> [(id: Int, pid: pid_t)]? {
+    if rigTest {
+        guard let onscreenPath else { return [] }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: onscreenPath)),
+              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[Any]] else { return nil }
+        return rows.compactMap { row -> (id: Int, pid: pid_t)? in
+            guard row.count == 2, let id = (row[0] as? NSNumber)?.intValue, let pid = (row[1] as? NSNumber)?.int32Value else { return nil }
+            return (id: id, pid: pid)
+        }
+    }
+    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+        return nil
+    }
+    return list.compactMap { row -> (id: Int, pid: pid_t)? in
+        guard let id = (row[kCGWindowNumber as String] as? NSNumber)?.intValue,
+              let pid = (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value else { return nil }
+        return (id: id, pid: pid)
+    }
+}
+
+/// GR2 (addendum 2): the tree's windows are re-checked whenever one comes on screen: macOS can show an existing window
+/// again (a native tab selected again) on the Space Tim is viewing, with no create event and no Space change (bench's
+/// copy 542d177d: ~20 s on his Space, and the check said ok). Every `interval` the windows on screen are read; a tree
+/// window that was not on screen at the read before starts a sweep (window-shown), which re-checks all of the tree's
+/// windows. A read that fails is a problem, once: a window shown then could go unseen until the next Space change.
+/// From the launch until the guard's end; shownQueue.
+final class ShownWindows {
+    static let interval = 0.1
+    private var last = Set<Int>()
+    private var failed = false
+    private var timer: DispatchSourceTimer?  // main
+
+    func start() {  // main
+        let ticker = DispatchSource.makeTimerSource(queue: shownQueue)
+        ticker.schedule(deadline: .now(), repeating: ShownWindows.interval, leeway: .milliseconds(20))
+        ticker.setEventHandler { [unowned self] in if !stopping { self.poll() } }
+        ticker.resume()
+        timer = ticker
+    }
+
+    func stop() { timer?.cancel() }  // main
+
+    private func poll() {
+        guard let rows = shownWindows() else {
+            if !failed {
+                failed = true
+                problem(String(format: "the windows on screen could not be read %.3f s after launch: a tree window shown again on Tim's Space could go unseen until a Space change", uptime() - t0))
+            }
+            return
+        }
+        var member: [pid_t: Bool] = [:]
+        var shown = false
+        for row in rows where !last.contains(row.id) {
+            if member[row.pid] == nil { member[row.pid] = tree.contains(row.pid) }
+            if member[row.pid] == true { shown = true }
+        }
+        last = Set(rows.map { $0.id })
+        if shown { yabaiQueue.async { sweep("window-shown") } }
+    }
+}
+let shownWatch = ShownWindows()
 
 // MARK: - Tim's focus and Space
 
@@ -3151,6 +3262,7 @@ func finish(_ reason: String) {  // main
     finishing = true
     inFlight.close()
     scanTimer?.cancel()
+    shownWatch.stop()
     let orphaned = reason == "parent-exited"
     let launched = started
     endQueue.async {
@@ -3572,6 +3684,8 @@ if launchArgv.isEmpty {
         DispatchQueue.main.asyncAfter(deadline: .now() + adoptTimeout) { if !tree.hasRoots { finish("no-launch") } }
     }
 }
+// GR2: from the launch on, a tree window that comes on screen has the tree's windows re-checked.
+shownWatch.start()
 
 // MARK: - The rig (tests)
 

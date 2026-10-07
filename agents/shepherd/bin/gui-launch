@@ -78,8 +78,13 @@ and/or guards one that something else starts, then checks that nothing took it.
   change; and [INFERENCE] a notification that comes more than 0.5 s after the change SkyLight shows fails the
   check. In a theft window, reads more than 100 ms apart, or a read that fails, are a problem. That is all it does
   to his windows. It moves
-  every tree window to the target Space by id as Accessibility reports it created or focused (and again whenever the
-  tree activates or the active Space changes); a window yabai will not place or name the owner of, a window list
+  every tree window to the target Space by id as Accessibility reports it created, focused or made main, and again
+  whenever the tree activates, the active Space changes, or a tree window comes on screen (it reads the windows on
+  screen every 100 ms: macOS can show an existing window again, a native tab selected again, on the Space Tim is
+  viewing with no create event and no Space change). A tree window found on Tim's screen (Spaces 1-4, or the Space
+  his display shows, unless that is the target) after the guard saw it elsewhere, or at the guard's end, fails the
+  check, created or not; a new window's first moments there, where macOS opens it, are only a move (onTimSpaceMs).
+  A window yabai will not place or name the owner of, a window list
   that fails, and a tree window still off the target after its move are recorded as they happen; the tree's
   windows the final sweep cannot locate are a problem, and so is a tree window still off the target after its move
   (window-off-target). --allow-caller-placement is for a caller that moves the tree's windows itself afterwards:
@@ -98,7 +103,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   displays stops polling, and in one turn of its main queue takes its last read, is sealed and has the summary's
   records taken (a change still waiting for its notification then fails the check, however young; a Space
   notification after the seal is a problem, never dropped unrecorded).
-- Check: no tree window on Spaces 1-4 and no tree window off the target after the guard's move (but as
+- Check: no tree window on Spaces 1-4 or on the Space his display shows (unless it is the target), none the guard
+  found back on his screen, and no tree window off the target after the guard's move (but as
   --allow-caller-placement excuses); Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
   himself); no Space the tree showed his display in a theft window, each one a breach even when the guard brought
@@ -370,19 +376,25 @@ def revert_latencies(summary):
     return by_method
 
 
-def problems(summary, windows, focus_before, focus_after, shown_before, shown_after):
-    """Why the launch took Tim's screen, or can't vouch that it didn't: tree windows on Spaces 1-4, a changed
-    frontmost app, his display showing another Space or moved off his Space by the tree (even if brought back),
-    the active display moved (yabai's focused display, or AppKit's main screen: the two can disagree, so both
-    count), the guard's fault or its problems (yabai timeouts, work unsettled or killed at its end)."""
+def problems(summary, windows, focus_before, focus_after, shown_before, shown_after, target):
+    """Why the launch took Tim's screen, or can't vouch that it didn't: tree windows on Spaces 1-4 or on the Space his
+    display shows (unless that is the target), a changed frontmost app, his display showing another Space or moved
+    off his Space by the tree (even if brought back), the active display moved (yabai's focused display, or AppKit's
+    main screen: the two can disagree, so both count), the guard's fault or its problems (yabai timeouts, work
+    unsettled or killed at its end, tree windows back on his screen or off the target)."""
     tree = set(summary.get('tree') or [])
     found = []
     if summary.get('fault'):
         found.append(summary['fault'])
     found.extend(summary.get('problems') or [])
     for w in windows:
-        if w.get('pid') in tree and w.get('space') in TIM_SPACES:
+        if w.get('pid') not in tree:
+            continue
+        if w.get('space') in TIM_SPACES:
             found.append('window %s of %s (pid %s, "%s") is on Space %s'
+                         % (w.get('id'), w.get('app'), w.get('pid'), w.get('title', ''), w.get('space')))
+        elif w.get('space') == shown_after and shown_after != target:
+            found.append('window %s of %s (pid %s, "%s") is on Space %s, the one Tim\'s display shows'
                          % (w.get('id'), w.get('app'), w.get('pid'), w.get('title', ''), w.get('space')))
     front, user = summary.get('frontAtEnd'), summary.get('userFront')
     if not front:
@@ -469,7 +481,7 @@ def main():
     windows = [w for w in yabai('query', '--windows') if w.get('pid') in tree]
     spaces_after = yabai('query', '--spaces')
     focus_after, shown_after = focus(spaces_after), shown_space(spaces_after)
-    found = problems(summary, windows, focus_before, focus_after, shown_before, shown_after)
+    found = problems(summary, windows, focus_before, focus_after, shown_before, shown_after, space)
     attached = summary.get('attached') or []
     emit({'event': 'check', 'ok': not found, 'problems': found, 'space': space, 'guard': guard,
           'windows': [{k: w.get(k) for k in ('id', 'pid', 'app', 'title', 'space')} for w in windows],

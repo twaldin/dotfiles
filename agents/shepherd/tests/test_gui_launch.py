@@ -190,17 +190,24 @@ int main(int argc, char **argv) {
 '''
 # The rig's yabai, reading the files in %(dir)s: `query --spaces` answers spaces.json after spaces-delay seconds
 # (yabai answering late); `query --windows` answers windows.json, `--window N` window-N.json (none: exit 1), and
-# never answers while windows-mode says hang; anything else (a move, a focus) exits 1.
+# never answers while windows-mode says hang (with hang-once, the next whole list only); `window N --space S` sets
+# the Space in window-N.json while the file moves says apply, else exits 1, as anything else (a focus) does.
 RIG_YABAI = '''#!/bin/sh
 [ "$2" = warm ] && exit 0
 dir='%(dir)s'
 case "$2 $3" in
   "query --spaces") sleep "$(cat "$dir/spaces-delay")"; cat "$dir/spaces.json" ;;
   "query --windows")
-    if [ "$(cat "$dir/windows-mode")" = hang ]; then exec sleep 30; fi
+    mode="$(cat "$dir/windows-mode")"
+    if [ "$mode" = hang ]; then exec sleep 30; fi
+    if [ "$mode" = hang-once ] && [ -z "$4" ]; then echo answer > "$dir/windows-mode"; exec sleep 30; fi
     if [ -n "$5" ]; then cat "$dir/window-$5.json" 2>/dev/null || exit 1
     elif [ "$4" = --window ]; then exit 1
     else cat "$dir/windows.json"; fi ;;
+  "window "*)
+    if [ "$4" = --space ] && [ "$(cat "$dir/moves" 2>/dev/null)" = apply ] && [ -f "$dir/window-$3.json" ]; then
+      sed -i '' "s/\\"space\\": *-*[0-9]*/\\"space\\": $5/" "$dir/window-$3.json"
+    else exit 1; fi ;;
   *) exit 1 ;;
 esac
 '''
@@ -249,10 +256,10 @@ def put(path, text):
     os.replace(str(part), str(path))
 
 
-def rig_spaces(extra=()):
+def rig_spaces(extra=(), shown=1):
     """yabai's Spaces for the rig: display 1 holds Spaces 1-9 (SkyLight ids 101-109) and then `extra` ids, display
-    2 one more (id 110); Tim's display shows Space 1."""
-    rows = [{'index': i, 'id': 100 + i, 'display': 1, 'is-visible': i == 1} for i in range(1, 10)]
+    2 one more (id 110); Tim's display shows Space `shown`."""
+    rows = [{'index': i, 'id': 100 + i, 'display': 1, 'is-visible': i == shown} for i in range(1, 10)]
     rows += [{'index': 10 + n, 'id': sid, 'display': 1, 'is-visible': False} for n, sid in enumerate(extra)]
     return rows + [{'index': 10 + len(extra), 'id': 110, 'display': 2, 'is-visible': True}]
 
@@ -647,6 +654,16 @@ class GuiLaunch(unittest.TestCase):
         # An app Tim switched to himself during the guard is his choice, not a change.
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(front=other, user=other))
         self.assertEqual(result.returncode, 0)
+
+    def test_a_tree_window_on_the_space_tims_display_shows_fails_the_check_though_it_is_not_one_of_his(self):
+        # GR2 (addendum 2): Tim switched his display to Space 6 himself, where a tree window is: on his screen at the end.
+        self.machine(windows=[{'id': 9004, 'pid': 500, 'app': 'Probe', 'title': 'tab', 'space': 6},
+                              {'id': 9005, 'pid': 500, 'app': 'Probe', 'title': 'other', 'space': 7}])
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), shows_after=6,
+                                     summary=summary(timSpace={'atLaunch': 2, 'expected': 6}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.check_event(result)['problems'],
+                         ['window 9004 of Probe (pid 500, "tab") is on Space 6, the one Tim\'s display shows'])
 
     def test_the_check_fails_when_tims_display_shows_another_space_unless_he_switched_himself(self):
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), shows_after=6)
@@ -1730,29 +1747,32 @@ class Guard(unittest.TestCase):
 
     # The rig: the guard without a GUI ---------------------------------------------------------------------
 
-    def rig_argv(self, windows=(), flags=()):
-        """What a --rig guard (--space 7, and `flags`) reads, in a directory of its own: RIG_YABAI, with yabai's Spaces
-        as rig_spaces() says, answered 0.6 s late, and `windows` its window list; Tim's display on Space 1. Its argv,
-        and the directory."""
+    def rig_argv(self, windows=(), flags=(), space=7, shown=1, onscreen=False):
+        """What a --rig guard (--space `space`, and `flags`) reads, in a directory of its own: RIG_YABAI, with yabai's
+        Spaces as rig_spaces() says, answered 0.6 s late, and `windows` its window list; Tim's display on Space `shown`;
+        with `onscreen`, onscreen.json stands for the windows on screen (none at first). Its argv, and the directory."""
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))
         yabai = root / 'yabai'
         yabai.write_text(RIG_YABAI % {'dir': root})
         yabai.chmod(0o755)
         warm(yabai)
         put(root / 'spaces-delay', '0.6')
-        put(root / 'spaces.json', json.dumps(rig_spaces()))
+        put(root / 'spaces.json', json.dumps(rig_spaces(shown=shown)))
         put(root / 'windows-mode', 'answer')
         put(root / 'windows.json', json.dumps(list(windows)))
         for w in windows:
             put(root / ('window-%d.json' % w['id']), json.dumps(w))
-        show(root, 101)
-        return [str(self.binary), '--rig', '--space', '7', '--guard-seconds', '60', '--yabai', str(yabai),
+        show(root, 100 + shown)
+        if onscreen:
+            put(root / 'onscreen.json', '[]')
+            flags = list(flags) + ['--onscreen', str(root / 'onscreen.json')]
+        return [str(self.binary), '--rig', '--space', str(space), '--guard-seconds', '60', '--yabai', str(yabai),
                 '--displays', str(root / 'displays.json'), '--summary', str(root / 'summary.json')] + list(flags), root
 
-    def rig(self, windows=(), flags=()):
+    def rig(self, windows=(), flags=(), space=7, shown=1, onscreen=False):
         """A --rig guard as rig_argv() sets it up. The process, its stdout lines, and its directory; its start event
         (guarding) is self.rig_start."""
-        argv, root = self.rig_argv(windows, flags)
+        argv, root = self.rig_argv(windows, flags, space, shown, onscreen)
         process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         lines = Lines(process.stdout)
         self.addCleanup(lambda: (process.kill(), process.wait(), lines.thread.join(5), process.stdin.close(), process.stdout.close()))
@@ -2181,6 +2201,67 @@ class Guard(unittest.TestCase):
                 self.assertEqual({int(p.split()[1]) for p in moved}, failing, result['problems'])
                 self.assertIn("window 9002 of the tree (Probe, pid %d) is on Tim's Space 2, not on --space 7, after the guard's move "
                               "(activation): yabai -m window 9002 --space 7 exited 1" % probe.pid, moved)
+
+    # gui-launch.jsonl (sha256 542d177d46be4eebf9ba1e987d2d358e3f5438aa7345f02c28b0b65e211694a2, bench's copy of the
+    # 05:09Z run: --space 5, Tim's display on Space 3): the launched easl (41478) opened tab windows 88295 and 88296 on
+    # his Space 3 and the guard moved each to Space 5 (its two window events, below); then easl selected a tab again
+    # and macOS showed window 88296 on Space 3 for ~20 s, with no create event and no Space change: the guard recorded
+    # nothing, and the check said ok.
+    TAB_WINDOWS = [
+        {'at': '05:08:59.060', 'event': 'window', 'id': 88295, 'app': 'easl', 'title': 'easl-lanes-yt-b', 'from': 3, 'to': 5,
+         'moved': True, 'via': 'ax-created'},
+        {'at': '05:09:00.734', 'event': 'window', 'id': 88296, 'app': 'easl', 'title': 'easl-lanes-yt-c', 'from': 3, 'to': 5,
+         'moved': True, 'via': 'ax-created'},
+    ]
+
+    def tab_rig(self, onscreen=False):
+        """The tab receipt's run in the rig (--space 5, Tim's display on Space 3; this yabai applies moves): the tree's
+        two tab windows created on his Space and moved to Space 5, as there. Then window 88296 is back on Space 3 in
+        yabai's answers. The rig, its lines, its directory, and the tree's pid."""
+        easl, _ = self.probe(self.java)
+        process, lines, root = self.rig(space=5, shown=3, onscreen=onscreen)
+        put(root / 'moves', 'apply')
+        self.send(process, 'root %d' % easl.pid)
+        rows = []
+        for e in self.TAB_WINDOWS:
+            row = {'id': e['id'], 'pid': easl.pid, 'app': e['app'], 'title': e['title'], 'space': e['from'], 'has-focus': False}
+            put(root / ('window-%d.json' % e['id']), json.dumps(row))
+            rows.append(row)
+            self.send(process, 'window %d' % e['id'])
+            moved = lines.until(lambda r, wid=e['id']: r.get('event') == 'window' and r.get('id') == wid, 10)[-1]
+            self.assertEqual({k: moved[k] for k in ('id', 'app', 'title', 'from', 'to', 'moved', 'via')},
+                             {k: e[k] for k in ('id', 'app', 'title', 'from', 'to', 'moved', 'via')})
+        again = dict(rows[1], space=3)
+        put(root / 'window-88296.json', json.dumps(again))
+        put(root / 'windows.json', json.dumps([dict(rows[0], space=5), again]))
+        return process, lines, root, easl.pid
+
+    def back_on_tims_space(self, easl, via):
+        return ("window 88296 of the tree (easl, pid %d) was on Tim's Space 3 (found by %s) after the guard had seen it on "
+                "Space 5: macOS showed it to him again" % (easl, via))
+
+    def test_a_tree_window_shown_again_on_tims_space_is_found_at_the_next_space_change_and_fails_the_check(self):
+        # GR2 (addendum 2): every Space notification re-checks all of the tree's windows. Window 88296, which the guard
+        # moved to Space 5, is on Tim's Space 3 again: it is moved back, and that it was there is a problem, though it
+        # was not created there.
+        process, lines, root, easl = self.tab_rig()
+        self.send(process, 'notify')
+        moved = lines.until(lambda r: r.get('event') == 'window' and r.get('via') == 'space-change', 10)[-1]
+        self.assertEqual((moved['id'], moved['from'], moved['to'], moved['seenBefore']), (88296, 3, 5, 5))
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual([p for p in result['problems'] if p.startswith('window ')], [self.back_on_tims_space(easl, 'space-change')])
+
+    def test_a_tree_window_shown_again_with_no_event_at_all_is_found_on_screen_and_fails_the_check(self):
+        # GR2 (addendum 2), the receipt's case: no create event, no Space change. The guard reads the windows on screen
+        # (here the rig's stand-in file) every 100 ms; window 88296 comes on screen, and the tree's windows are re-checked.
+        process, lines, root, easl = self.tab_rig(onscreen=True)
+        began = time.monotonic()
+        put(root / 'onscreen.json', json.dumps([[101, 1], [88296, easl]]))
+        moved = lines.until(lambda r: r.get('event') == 'window' and r.get('via') == 'window-shown', 10)[-1]
+        self.assertLess(time.monotonic() - began, 2)
+        self.assertEqual((moved['id'], moved['from'], moved['to'], moved['seenBefore']), (88296, 3, 5, 5))
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual([p for p in result['problems'] if p.startswith('window ')], [self.back_on_tims_space(easl, 'window-shown')])
 
 
 if __name__ == '__main__':
