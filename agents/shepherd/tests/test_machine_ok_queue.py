@@ -4,6 +4,7 @@ Every test runs real queue processes against a temp HOME (state, slots.json, qui
 poll intervals. Gates are stand-in scripts that record their arguments, except an end-to-end run through
 the real, unchanged machine-ok gate with the stand-in system tools of test_machine_ok.
 """
+import ctypes
 import datetime as dt
 import json
 import os
@@ -147,6 +148,12 @@ class Run(QueueCase):
         code, _, err = self.finish(self.start('/nonexistent/tool'))
         self.assertEqual(code, 127, err)
         self.assertIn('cannot run /nonexistent/tool', err)
+
+    def test_a_file_that_is_not_executable_exits_126(self):
+        (self.work / 'plain').write_text('echo never\n')
+        code, _, err = self.finish(self.start('./plain'))
+        self.assertEqual(code, 126, err)
+        self.assertIn('cannot run ./plain: Permission denied', err)
 
     def test_a_command_killed_by_a_signal_exits_128_plus_its_number(self):
         code, _, err = self.finish(self.start('sh', '-c', 'kill -9 $$'))
@@ -360,6 +367,98 @@ class Gate(QueueCase):
         code, out, err = self.finish(self.start('echo', 'linux', gate=False))
         self.assertEqual((code, out), (0, 'linux\n'), err)
         self.assertFalse((self.root / 'calls').exists())
+
+
+class RusageV6(ctypes.Structure):
+    """struct rusage_info_v6 (sys/resource.h): per-QoS CPU time and P-core time of a live process, no root needed."""
+    _fields_ = [('uuid', ctypes.c_uint8 * 16)] + [(n, ctypes.c_uint64) for n in (
+        'user', 'system', 'pkg_idle_wkups', 'interrupt_wkups', 'pageins', 'wired', 'resident', 'footprint',
+        'start_abstime', 'exit_abstime', 'child_user', 'child_system', 'child_pkg_idle_wkups', 'child_interrupt_wkups',
+        'child_pageins', 'child_elapsed', 'diskio_read', 'diskio_written', 'qos_default', 'qos_maintenance',
+        'qos_background', 'qos_utility', 'qos_legacy', 'qos_user_initiated', 'qos_user_interactive', 'billed_system',
+        'serviced_system', 'logical_writes', 'lifetime_max_footprint', 'instructions', 'cycles', 'billed_energy',
+        'serviced_energy', 'interval_max_footprint', 'runnable', 'flags', 'user_ptime', 'system_ptime',
+        'pinstructions', 'pcycles', 'energy_nj', 'penergy_nj', 'secure_time', 'secure_ptime', 'neural_footprint',
+        'lifetime_max_neural', 'interval_max_neural')] + [('reserved', ctypes.c_uint64 * 9)]
+
+
+def qos_cpu(pid):
+    """CPU time a live process has run at each QoS (mach time units), from proc_pid_rusage(RUSAGE_INFO_V6)."""
+    lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+    lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(RusageV6)]
+    info = RusageV6()
+    if lib.proc_pid_rusage(pid, 6, ctypes.byref(info)) != 0:
+        raise OSError(ctypes.get_errno(), f'proc_pid_rusage({pid})')
+    return {q: getattr(info, 'qos_' + q) for q in ('default', 'legacy', 'user_initiated', 'user_interactive',
+                                                    'utility', 'background', 'maintenance')}
+
+
+class Clamp(QueueCase):
+    """macOS: the admitted command and everything it starts run under the QoS clamp and nice 10, unless --p-cores.
+    QoS is read from the kernel's per-QoS CPU accounting (proc_pid_rusage, RUSAGE_INFO_V6); nice from `ps -o nice=`."""
+    # The child (sh) records its pid, starts a grandchild that spins 0.3 s on one core and then waits for `go`.
+    FAMILY = ('echo $$ > child.pid; python3 -c "import os, time\ne = time.time() + 0.3\nwhile time.time() < e: pass\n'
+              'while not os.path.exists(\'go\'): time.sleep(0.02)" & echo $! > grandchild.pid; wait')
+
+    def family(self, flags=()):
+        p = self.start('sh', '-c', self.FAMILY, flags=flags)
+        self.until(lambda: all((self.work / f).exists() and (self.work / f).read_text().strip()
+                               for f in ('child.pid', 'grandchild.pid')), what='child and grandchild')
+        time.sleep(0.6)  # the grandchild's spin is over
+        pids = [int((self.work / f).read_text()) for f in ('child.pid', 'grandchild.pid')]
+        nice = [subprocess.run(['ps', '-o', 'nice=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+                for pid in pids]
+        qos = [qos_cpu(pid) for pid in pids]
+        (self.work / 'go').touch()
+        code, _, err = self.finish(p)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(pids[0], p.pid, 'taskpolicy execs the command in place: signals reach it directly')
+        return nice, qos, err
+
+    @unittest.skipUnless(platform.system() == 'Darwin', 'the clamp is macOS only')
+    def test_the_child_and_a_grandchild_run_at_utility_qos_and_nice_10(self):
+        nice, (child, grandchild), err = self.family()
+        self.assertEqual(nice, ['10', '10'])
+        self.assertGreater(grandchild['utility'], 0, grandchild)
+        unclamped = sum(grandchild[q] for q in ('default', 'legacy', 'user_initiated', 'user_interactive'))
+        self.assertEqual(unclamped, 0, grandchild)
+        self.assertGreater(child['utility'], 0, child)
+        self.assertEqual(child['legacy'] + child['user_initiated'] + child['user_interactive'], 0, child)
+        self.assertIn('clamp: taskpolicy -c utility, nice 10', err)
+        admit = [e for e in self.events() if e['event'] == 'admit'][-1]
+        self.assertEqual(admit['clamp'], 'taskpolicy -c utility, nice 10')
+
+    @unittest.skipUnless(platform.system() == 'Darwin', 'the clamp is macOS only')
+    def test_p_cores_opts_out_and_says_so_in_the_log_and_status(self):
+        nice, (_, grandchild), _ = self.family(flags=['--memory', '--p-cores'])
+        self.assertEqual(nice, ['0', '0'])
+        self.assertEqual(grandchild['utility'] + grandchild['background'], 0, grandchild)
+        self.assertGreater(grandchild['default'] + grandchild['legacy'], 0, grandchild)
+        admit = [e for e in self.events() if e['event'] == 'admit'][-1]
+        self.assertEqual((admit['clamp'], admit['flags']), ('none: --p-cores opt-out', ['--memory']))
+        self.assertEqual((self.root / 'calls').read_text().splitlines(), ['--memory'], '--p-cores is not a gate flag')
+        holder = self.start(*self.blocker('H'), flags=['--p-cores'])
+        self.until(lambda: (self.work / 'H.pid').exists(), what='holder running')
+        out = subprocess.run([sys.executable, str(QUEUE), 'status'], env=self.env, capture_output=True, text=True).stdout
+        self.assertIn('[clamp: none: --p-cores opt-out]', out)
+        (self.work / 'H.go').touch()
+        self.finish(holder)
+
+    @unittest.skipIf(platform.system() == 'Darwin', 'Linux runs commands as they are')
+    def test_linux_runs_unclamped_and_ignores_p_cores(self):
+        for flags in ((), ('--p-cores',)):
+            with self.subTest(flags=flags):
+                for f in ('child.pid', 'grandchild.pid', 'go'):
+                    (self.work / f).unlink(missing_ok=True)
+                p = self.start('sh', '-c', self.FAMILY, flags=flags)
+                self.until(lambda: (self.work / 'grandchild.pid').exists() and
+                           (self.work / 'grandchild.pid').read_text().strip(), what='grandchild')
+                pid = (self.work / 'grandchild.pid').read_text().strip()
+                nice = subprocess.run(['ps', '-o', 'nice=', '-p', pid], capture_output=True, text=True).stdout.strip()
+                (self.work / 'go').touch()
+                self.assertEqual(self.finish(p)[0], 0)
+                self.assertEqual(nice, '0')
+                self.assertIsNone([e for e in self.events() if e['event'] == 'admit'][-1]['clamp'])
 
 
 class Signals(QueueCase):
