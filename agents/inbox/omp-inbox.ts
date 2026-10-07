@@ -6,8 +6,11 @@
 //   `<name>@<host>` on another machine over ssh) and report success. In an easl tile, easl's own
 //   extension handles easl addresses, so this only adds the herdr agents.
 // - Inbound (herdr panes only; tiles get easl's): messages land in this session's inbox and arrive
-//   as one agent-attributed aside at the next step boundary. They never touch the terminal, so they
-//   can't land in Tim's half-typed draft, answer an open question or stop a run.
+//   as one card per drain: easl's own `easl:message` custom message, drawn as omp draws its IRC
+//   messages and recorded as a custom message, never as a user prompt, so transcripts and retros
+//   tell them from Tim's prompts. They never touch the terminal, so they can't land in Tim's
+//   half-typed draft or answer an open question. A message's file stays in the inbox until omp
+//   records the card carrying it: nothing omp drops is lost.
 // Delete this extension once every agent runs in an easl tile.
 // @ts-nocheck
 
@@ -23,6 +26,19 @@ const PEER = /^agent:\/\/([A-Za-z0-9_.-]+)(?:@([A-Za-z0-9_.-]+))?\/?$/;
 // Bounds a wake loop between two agents: past this many wakes per sender per hour, messages
 // still arrive but wait for the recipient's next turn instead of starting one.
 const WAKES_PER_HOUR = 20;
+// easl's card type (easl `extensions/agent-hooks/messages.ts` EASL_MESSAGE, `card`), not omp's
+// `irc:incoming`: omp's `wait` returns an `irc:incoming` from its queue as a bare text result, and
+// one left over at a run's end wakes the agent even after Esc. Same `details` as easl's cards
+// (`{id, from, message, ids}`), so a session resumed in an easl tile draws them with easl's renderer.
+const EASL_MESSAGE = "easl:message";
+// A card omp hasn't recorded this long after it went, with nothing streaming or queued, was
+// dropped (Esc drops an agent's queued steer; a turn that couldn't start).
+const RECORD_MS = 5_000;
+// The `<` of an `irc` or `system-*` tag (omp's escapeHarnessTags) or of easl's guidance block.
+const HARNESS_TAG = /<(?=\s*\/?\s*(?:irc|easl-guidance|system-[a-z][a-z-]*)(?![\w-]))/gi;
+// Body rows a card shows folded and unfolded, and the widest a body row gets (omp's IRC card's).
+const CARD_ROWS = { folded: 3, unfolded: 12 };
+const CARD_ROW_COLUMNS = 100;
 
 function run(command: string, args: string[]): Promise<{ code: number; out: string }> {
   const { promise, resolve } = Promise.withResolvers<{ code: number; out: string }>();
@@ -42,6 +58,78 @@ function inboxKey(ctx): string | undefined {
     if (typeof id === "string" && id.length > 0) return id;
   } catch {}
   return undefined;
+}
+
+// One drain as one card: steered, starting a turn and recorded as a whole. The content, what the
+// model reads, has each message in an IRC envelope as omp's own.
+function card(messages) {
+  return {
+    customType: EASL_MESSAGE,
+    content: messages.map(envelope).join("\n\n"),
+    display: true,
+    details: {
+      id: messages[0].id,
+      from: [...new Set(messages.map((message) => message.from))].join(", "),
+      message: messages.map((message) => message.text).join("\n\n"),
+      ids: messages.map((message) => message.id),
+    },
+    attribution: "agent",
+  };
+}
+
+function envelope({ from, text }): string {
+  const said = `Message from \`${from}\`:\n\n${text}`.replace(HARNESS_TAG, "&lt;");
+  return `<irc>\n${said}\n\nIf a response is expected, reply via \`write\` (\`path: "agent://${from}"\`, \`content: "…"\`).\n</irc>`;
+}
+
+// A card as omp draws its own incoming IRC messages (pi-tui `createIrcMessageCard`, which omp
+// doesn't export; a copy of easl's `renderCard`): `💬 IRC ← <from>` and the message's age, then its
+// text quoted, three nonblank lines until unfolded (twelve then), each cut at 100 columns.
+function renderCard(message, { expanded }, theme) {
+  const from = message.details?.from?.trim() || "?";
+  const rows = String(message.details?.message ?? "").split("\n").filter((line) => line.trim());
+  const minutes = Math.floor((Date.now() - message.timestamp) / 60_000);
+  const [hours, days] = [Math.floor(minutes / 60), Math.floor(minutes / 1440)];
+  const age = days >= 30 ? `${Math.floor(days / 30)}mo ago` : days >= 7 ? `${Math.floor(days / 7)}w ago` : days ? `${days}d ago` : hours ? `${hours}h ago` : minutes ? `${minutes}m ago` : "just now";
+  let drawn: { width: number; lines: string[] } | undefined;
+  return {
+    render(width: number): string[] {
+      if (drawn?.width === width) return drawn.lines;
+      // One column of padding each side, as omp's card.
+      const inner = Math.max(1, width - 2);
+      const glyph = theme.styledSymbol("tool.irc", "accent");
+      const title = `IRC ${theme.nav.back} ${from}`;
+      const room = inner - Bun.stringWidth(glyph) - 1;
+      const meta = Bun.stringWidth(title) + 1 + Bun.stringWidth(age) <= room ? ` ${theme.fg("dim", age)}` : "";
+      const quote = `  ${theme.fg("dim", theme.md.quoteBorder)} `;
+      const columns = Math.min(CARD_ROW_COLUMNS, inner - Bun.stringWidth(quote));
+      const shown = expanded ? CARD_ROWS.unfolded : CARD_ROWS.folded;
+      const hidden = rows.length - shown;
+      const lines = [
+        `${glyph} ${theme.fg("accent", fit(title, room))}${meta}`,
+        ...rows.slice(0, shown).map((row) => `${quote}${theme.fg("toolOutput", fit(row.trim().replaceAll("\t", "   "), columns))}`),
+        ...(hidden > 0 ? [`${quote}${theme.fg("dim", fit(`… +${hidden} more ${hidden === 1 ? "line" : "lines"}`, columns))}`] : []),
+      ];
+      drawn = { width, lines: lines.map((line) => ` ${line} `) };
+      return drawn.lines;
+    },
+    invalidate() {
+      drawn = undefined;
+    },
+  };
+}
+
+// `text` cut to `columns` terminal columns with an ellipsis, at a character boundary.
+function fit(text: string, columns: number): string {
+  if (Bun.stringWidth(text) <= columns) return text;
+  let kept = "";
+  let used = 0;
+  for (const { segment } of new Intl.Segmenter().segment(text)) {
+    used += Bun.stringWidth(segment);
+    if (used > columns - 1) break;
+    kept += segment;
+  }
+  return columns > 0 ? `${kept}…` : "";
 }
 
 export default function (pi) {
@@ -94,60 +182,119 @@ export default function (pi) {
 
   let dir: string | undefined;
   let watcher: fs.FSWatcher | undefined;
-  let busy = false;
-  pi.on("agent_start", () => {
-    busy = true;
-  });
-  pi.on("agent_end", () => {
-    busy = false;
-  });
+  // The bound root session's context: whether omp streams, what it has queued, its UI.
+  let session;
+  // Messages handed to omp and not recorded yet, by id (their file's name without `.json`): when
+  // they went, and whether as `nextTurn` context, which omp records only with its next prompt.
+  const handed = new Map<string, { at: number; later: boolean }>();
+  // Messages omp dropped unrecorded (`unrecorded`): they ride the next turn that starts.
+  const nextStart = new Set<string>();
+  let recordCheck;
 
-  function drain() {
-    if (!dir) return;
+  // The inbox's messages not handed to omp yet, oldest first. A file that isn't a message goes.
+  function waiting(): { id: string; from: string; text: string }[] {
     let names: string[];
     try {
       names = fs.readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
     } catch {
-      return;
+      return [];
     }
-    // Coalesce everything waiting into one delivery: one wake, not one per message.
-    const parts: string[] = [];
-    const senders = new Set<string>();
+    const messages = [];
     for (const name of names) {
+      const id = name.slice(0, -".json".length);
+      if (handed.has(id)) continue;
       const file = path.join(dir, name);
       let message;
       try {
         message = JSON.parse(fs.readFileSync(file, "utf8"));
-        fs.unlinkSync(file);
-      } catch {
-        continue;
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
       }
       const text = typeof message?.text === "string" ? message.text.trim() : "";
-      if (!text) continue;
+      if (!text) {
+        try {
+          fs.unlinkSync(file);
+        } catch {}
+        continue;
+      }
       const from = typeof message.from === "string" && message.from ? message.from : "an agent";
-      senders.add(from);
-      parts.push(`[message from ${from}; reply with write agent://${from}]\n${text}`);
+      messages.push({ id, from, text });
     }
-    if (parts.length === 0) return;
+    return messages;
+  }
+
+  function drain() {
+    if (!dir || !session) return;
+    // Coalesce everything waiting into one card: one wake, not one per message.
+    const messages = waiting().filter((message) => !nextStart.has(message.id));
+    if (messages.length === 0) return;
     const now = Date.now();
     let overBudget = false;
-    for (const from of senders) {
+    for (const from of new Set(messages.map((message) => message.from))) {
       const recent = (wakes.get(from) ?? []).filter((at) => now - at < 3_600_000);
       overBudget ||= recent.length >= WAKES_PER_HOUR;
       recent.push(now);
       wakes.set(from, recent);
     }
-    // Busy: a steer, which also interrupts a long `wait` (an aside would sit until it returned).
-    // Idle: an aside, which starts a turn and leaves Tim's half-typed draft alone.
-    pi.sendUserMessage(parts.join("\n\n"), {
-      deliverAs: overBudget ? "nextTurn" : busy ? "steer" : "aside",
-      attribution: "agent",
-    });
+    send(messages, overBudget ? "later" : "now");
+  }
+
+  // `now`: a steer while omp streams (it joins the turn at the next step, cutting a `wait` short),
+  // else a new turn (`triggerTurn`: an idle custom steer without it is only appended). `later`,
+  // past the wake bound: context for omp's next turn, never a wake (`nextTurn`). `aside`: joins
+  // the turn that just started without interrupting it.
+  function send(messages, how: "now" | "later" | "aside") {
+    const idle = session.isIdle();
+    pi.sendMessage(
+      card(messages),
+      how === "later" ? { deliverAs: "nextTurn" } : how === "aside" ? { deliverAs: "aside" } : { deliverAs: "steer", triggerTurn: true },
+    );
+    if (how === "later" && idle) {
+      // omp appends an idle `nextTurn` message to the session at once, with no message_end.
+      for (const message of messages) acked(message.id);
+      return;
+    }
+    const at = Date.now();
+    for (const message of messages) handed.set(message.id, { at, later: how === "later" });
+    recordCheck ??= setTimeout(unrecorded, RECORD_MS);
+  }
+
+  // omp recorded it: its file goes.
+  function acked(id: string) {
+    handed.delete(id);
+    try {
+      fs.unlinkSync(path.join(dir, `${id}.json`));
+    } catch {}
+  }
+
+  // A card omp never recorded (Esc drops an agent's queued steer; a turn it couldn't start, as
+  // with no model): once nothing streams or waits in omp's queues, its messages ride the next turn
+  // that starts, and Tim is told.
+  function unrecorded() {
+    recordCheck = undefined;
+    if (!session) return;
+    if (session.isIdle() && !session.hasPendingMessages()) {
+      const due = Date.now() - RECORD_MS;
+      const lost = [...handed].filter(([, sent]) => !sent.later && sent.at <= due).map(([id]) => id);
+      for (const id of lost) {
+        handed.delete(id);
+        nextStart.add(id);
+      }
+      if (lost.length > 0) {
+        const what = lost.length === 1 ? "a message" : `${lost.length} messages`;
+        session.ui.notify(`omp-inbox: omp started no turn with ${what}; ${lost.length === 1 ? "it rides" : "they ride"} the next turn that starts`, "warning");
+      }
+    }
+    if ([...handed.values()].some((sent) => !sent.later)) recordCheck = setTimeout(unrecorded, RECORD_MS);
   }
 
   function unbind() {
     watcher?.close();
     watcher = undefined;
+    clearTimeout(recordCheck);
+    recordCheck = undefined;
+    handed.clear();
+    nextStart.clear();
     if (dir) {
       try {
         if (fs.readFileSync(path.join(dir, ".pid"), "utf8") === String(process.pid)) {
@@ -156,6 +303,7 @@ export default function (pi) {
       } catch {}
     }
     dir = undefined;
+    session = undefined;
   }
 
   // Only the pane's root session gets an inbox; subagents have no UI.
@@ -169,12 +317,27 @@ export default function (pi) {
     fs.mkdirSync(next, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(next, ".pid"), String(process.pid));
     dir = next;
+    session = ctx;
     watcher = fs.watch(dir, () => drain());
     drain();
   }
 
   if (!inHerdr) return;
+  pi.registerMessageRenderer(EASL_MESSAGE, renderCard);
   pi.on("session_start", (_event, ctx) => bind(ctx));
   pi.on("session_switch", (_event, ctx) => bind(ctx));
   pi.on("session_shutdown", () => unbind());
+  // omp recorded a card: the messages it carries are delivered.
+  pi.on("message_end", (event) => {
+    const message = event.message;
+    if (handed.size === 0 || message?.role !== "custom" || message.customType !== EASL_MESSAGE) return;
+    for (const id of message.details?.ids ?? []) if (handed.has(id)) acked(id);
+  });
+  // Messages omp dropped ride the turn that starts, without interrupting it.
+  pi.on("agent_start", () => {
+    if (nextStart.size === 0 || !dir) return;
+    const riding = waiting().filter((message) => nextStart.has(message.id));
+    nextStart.clear();
+    if (riding.length > 0) send(riding, "aside");
+  });
 }
