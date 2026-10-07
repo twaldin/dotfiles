@@ -157,6 +157,15 @@ class AgentMsg(unittest.TestCase):
         self.assertEqual(self.told(), [])
         self.assertEqual(len(self.typed_prompts()), 1)
 
+    def test_herdr_only_still_resolves_this_hosts_address_easl_could_not_read(self):
+        # Briefs say `write agent://meta@twaldin-home`; easl's extension reads `@twaldin-home` as a board.
+        local = socket.gethostname().split('.')[0]
+        result = self.send(self.omp_agent(), target=f'target@{local}', tiles=[self.tile()],
+                           sender=('--herdr-only', '--from', 'meta@home'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.told(), [['target@dotfiles', 'status?', '--from', 'meta@home']])
+        self.assertEqual(self.typed_prompts(), [])
+
 
 if __name__ == '__main__':
     unittest.main()

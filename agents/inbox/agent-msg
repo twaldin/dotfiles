@@ -155,8 +155,10 @@ def main():
     name, _, host = args.agent.partition('@')
     local = socket.gethostname().split('.')[0]
     cli, agents = easl_agents()
-    # `name@<this host>` is how herdr agents address everyone here, tiles included.
-    address = None if args.herdr_only else easl_address(agents, name, '' if host == local else host)
+    # `name@<this host>` is how herdr agents address everyone here, tiles included. easl's own
+    # extension can't read that form (it takes `@<host>` for a board), so --herdr-only still tries it.
+    skip_easl = args.herdr_only and host != local
+    address = None if skip_easl else easl_address(agents, name, '' if host == local else host)
     if address:
         # From a tile, easl names the calling tile itself, with a reply address.
         from_tile = args.sender is None and tile_address(agents)

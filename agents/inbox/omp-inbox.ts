@@ -71,8 +71,11 @@ export default function (pi) {
     if (!native.includes("Unknown agent")) return;
     const [, name, host] = match;
     const target = host !== undefined && host !== HOST ? `${name}@${host}` : name;
-    // From a tile, agent-msg names this tile by its easl address itself.
-    const args = inHerdr ? [target, text, "--from", await selfAddress(ctx)] : [target, text, "--herdr-only"];
+    // From a tile, agent-msg names this tile by its easl address itself. It gets the address as
+    // written: easl's extension already tried a bare name, but can't read `name@<this host>`.
+    const args = inHerdr
+      ? [target, text, "--from", await selfAddress(ctx)]
+      : [host !== undefined ? `${name}@${host}` : name, text, "--herdr-only"];
     const sent = await run(SENDER, args);
     if (/agent-msg: (queued for|typed into)/.test(sent.out)) {
       // The IRC card renders from the native receipts, so mark them delivered too.
