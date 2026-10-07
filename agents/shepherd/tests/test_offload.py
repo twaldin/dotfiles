@@ -35,6 +35,8 @@ i = 0
 while argv[i].startswith('-'):
     i += 2 if argv[i] == '-o' else 1
 host, command = argv[i], ' '.join(argv[i + 1:])
+if os.environ.get('FAKE_SSH_KILL'):
+    os.kill(os.getpid(), signal.SIGKILL)
 if os.environ.get('FAKE_SSH_EXIT'):
     sys.stdout.write(os.environ.get('FAKE_SSH_STDOUT', ''))
     sys.stderr.write(os.environ.get('FAKE_SSH_STDERR', ''))
@@ -349,6 +351,12 @@ class ExitAndGit(OffloadCase):
         self.assertIn('NEEDS GIT METADATA', r.stderr)
         self.assertIn('machine-ok-queue run --memory -- bun run stamp', r.stderr)
         self.assertTrue(self.runs()[-1]['git_needed'])
+
+    def test_an_ssh_killed_by_a_signal_exits_255(self):
+        r = self.offload('--', 'true', env={'FAKE_SSH_KILL': '1'})
+        self.assertEqual(r.returncode, 255)
+        self.assertIn('ssh to deckbox was killed by signal 9', r.stderr)
+        self.assertEqual(self.runs()[-1]['exit'], 255)
 
     def test_a_failed_sync_runs_nothing_and_exits_255(self):
         r = self.offload('--', 'true', env={'FAKE_RSYNC_EXIT': '12'})

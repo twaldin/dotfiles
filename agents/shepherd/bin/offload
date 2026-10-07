@@ -266,6 +266,9 @@ def main(argv):
     run_s = round(time.monotonic() - t1, 2)
     if stopped:
         code = 128 + stopped[0]
+    elif code < 0:  # ssh itself was killed: the connection is gone, and offload-run stops the unit
+        say(f"ssh to {a.host} was killed by signal {-code}; the remote step is stopped")
+        code = 255
     elif code == 255:
         say(f"ssh to {a.host} failed or the remote side exited 255")
 
