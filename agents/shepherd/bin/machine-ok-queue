@@ -5,7 +5,9 @@
   machine-ok-queue status
 
 `run` takes a ticket and waits, strictly first come first served, until all four hold:
-  1. its ticket is the oldest live one still waiting (a ticket whose process died is dropped);
+  1. its ticket is the oldest live one still waiting (a ticket whose process died is dropped), not counting
+     tickets an active hold pauses: a hold's owner passes the foreign tickets its own hold paused (the owner
+     lane), and once no hold is active everyone is back in the original order;
   2. a slot is free: slots per host in ~/.config/machine-shepherd/slots.json, e.g. {"twaldin-home": 2};
      built in: twaldin-home 2, twaldin-work 1, deckbox 3, any other host 1;
   3. the gate passes: `machine-ok [--memory] [--gpu]` exits 0. That is the machine-ok next to this file as
@@ -229,9 +231,9 @@ def held_slots(rows):
     return {r.get("slot"): r for _, r in rows if r.get("state") == "running"}
 
 
-def hold_ahead(me):
-    """The first quiet-window booking or hold that runs now or starts within its lead, unless one of `me` owns it."""
-    t = now()
+def active_holds():
+    """Every quiet-window booking or hold that runs now or starts within its lead (10 min, 30 for full quiet)."""
+    t, active = now(), []
     for path in WINDOWS:
         try:
             with open(path) as f:
@@ -245,9 +247,19 @@ def hold_ahead(me):
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue
             lead = dt.timedelta(minutes=FULL_HOLD_LEAD_MIN if w.get("quiet") == "full" else HOLD_LEAD_MIN)
-            if start - lead <= t < end and w.get("owner") not in me:
-                return w
-    return None
+            if start - lead <= t < end:
+                active.append(w)
+    return active
+
+
+def pausing(holds, names):
+    """The first of the active holds that pauses a ticket with these names: one none of them owns."""
+    return next((w for w in holds if w.get("owner") not in names), None)
+
+
+def ticket_names(r):
+    """Every name a ticket's caller goes by (tickets written before names were stored: agent and pane)."""
+    return set(r.get("names") or [x for x in (r.get("agent"), r.get("pane")) if x])
 
 
 def hold_text(w):
@@ -328,8 +340,8 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
 
     os.makedirs(QUEUE, exist_ok=True)
     row = {"pid": os.getpid(), "host": host(), "started": stamp(), "cwd": os.getcwd(), "agent": agent, "pane": pane,
-           "command": cmd, "flags": list(flags), "clamp": clamp and clamp["label"], "state": "waiting", "slot": None,
-           "admitted": None}
+           "names": sorted(me), "command": cmd, "flags": list(flags), "clamp": clamp and clamp["label"],
+           "state": "waiting", "slot": None, "admitted": None}
     with Lock():
         counter = os.path.join(QUEUE, "counter")
         try:
@@ -360,13 +372,18 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
         while True:
             with Lock():
                 live = tickets()
-                ahead = [t for t, r in live if t < n and r.get("state") != "running"]
                 running = held_slots(live)
-            hold = None if ahead else hold_ahead(me)
-            if ahead:
-                why = f"queued as ticket {n}: {len(ahead)} ahead, {len(running)}/{slots} slots busy"
-            elif hold:
+            # A ticket an active hold pauses waits outside the line; the rest keep FIFO order among themselves. So a
+            # hold's owner (the owner lane) passes the foreign tickets its hold paused, and once no hold is active
+            # everyone is back in the original order. Only the head of the eligible line samples the gate.
+            holds = active_holds()
+            hold = pausing(holds, me)
+            ahead = [] if hold else [t for t, r in live if t < n and r.get("state") != "running"
+                                     and not pausing(holds, ticket_names(r))]
+            if hold:
                 why = f"queue paused by {hold_text(hold)}"
+            elif ahead:
+                why = f"queued as ticket {n}: {len(ahead)} ahead, {len(running)}/{slots} slots busy"
             elif time.monotonic() < next_gate:
                 why = said  # the machine was busy at the last sample; keep waiting quietly
             else:
@@ -453,9 +470,9 @@ def listing():
     waiting = [(t, r) for t, r in live if r.get("state") != "running"]
     out = [f"machine-ok queue on {host()}: {len(running)}/{slots} slots busy, "
            + (f"{len(waiting)} waiting" if waiting else "none waiting")]
-    hold = hold_ahead(set())
-    if hold:
-        out.append(f"paused (no new admissions) by {hold_text(hold)}")
+    holds = active_holds()
+    for hold in holds:
+        out.append(f"paused (no new admissions except its owner's) by {hold_text(hold)}")
     if running:
         out.append("running:")
         for t, r in sorted(running, key=lambda x: x[1].get("slot") or 0):
@@ -467,7 +484,9 @@ def listing():
         for i, (t, r) in enumerate(waiting, 1):
             out.append(f"  {i}. ticket {t}  since {r.get('started')} ({span(since(r['started']))})  {r.get('agent') or '?'}"
                        f"  pid {r.get('pid')}  {r.get('cwd')}  $ {shlex.join(r.get('command') or [])}"
-                       f"  [{' '.join(r.get('flags') or []) or 'full gate'}]")
+                       f"  [{' '.join(r.get('flags') or []) or 'full gate'}]"
+                       + ("  (paused by the hold)" if pausing(holds, ticket_names(r)) else
+                          "  (owner lane)" if holds else ""))
     return "\n".join(out)
 
 

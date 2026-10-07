@@ -107,6 +107,15 @@ class QueueCase(unittest.TestCase):
     def tickets(self):
         return sorted(self.queue_dir.glob('*.json')) if self.queue_dir.exists() else []
 
+    def ticket_pids(self):
+        pids = set()
+        for path in self.tickets():
+            try:
+                pids.add(json.loads(path.read_text())['pid'])
+            except (OSError, ValueError, KeyError):  # gone, or mid-write
+                pass
+        return pids
+
     def until(self, cond, timeout=10, what='condition'):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
@@ -326,6 +335,35 @@ class Holds(QueueCase):
                                  env={'EASL_TILE_ID': 'obj_PERF', 'FAKE_EASL_SLEEP': '30'})
         self.assertLess(time.monotonic() - started, 15)
 
+    def test_the_hold_owner_bypasses_foreign_tickets_its_hold_paused_then_fifo_resumes(self):
+        # perf's ticket 255 (2026-10-07 19:41Z) sat inside perf's own hold behind 7 foreign tickets that hold paused.
+        holder = self.start(*self.blocker('H'))
+        self.until(lambda: (self.work / 'H.pid').exists(), what='holder running')
+        foreign = []
+        for i, name in enumerate(('F1', 'F2', 'F3'), start=2):
+            foreign.append(self.start(*self.recorder(name)))
+            self.queued(foreign[-1], i)
+        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure'}])
+        (self.work / 'H.go').touch()
+        self.assertEqual(self.finish(holder)[0], 0)
+        owners = []
+        for name in ('O1', 'O2'):
+            p = self.start(*self.recorder(name), flags=['--agent', 'perf'])
+            owners.append(p)
+            self.until(lambda: p.pid in self.ticket_pids() or p.poll() is not None, what=f'{name} ticket')
+        for p in owners:
+            code, _, err = self.finish(p, timeout=15)
+            self.assertEqual(code, 0, err)
+        time.sleep(0.4)
+        self.assertEqual(self.order(), ['H', 'O1', 'O2'], 'the owner lane runs; the foreign tickets stay paused')
+        self.assertTrue(all(p.poll() is None for p in foreign))
+        self.holds([])
+        for p in foreign:
+            self.assertEqual(self.finish(p)[0], 0)
+        self.assertEqual(self.order(), ['H', 'O1', 'O2', 'F1', 'F2', 'F3'])
+        gate_calls = (self.root / 'calls').read_text().splitlines()
+        self.assertEqual(len(gate_calls), 6, 'one gate sample per admission: only each lane head samples')
+
     def test_a_running_job_keeps_running_when_a_hold_begins(self):
         p = self.start(*self.blocker('H'))
         self.until(lambda: (self.work / 'H.pid').exists(), what='running')
@@ -333,7 +371,7 @@ class Holds(QueueCase):
         time.sleep(0.2)
         self.assertIsNone(p.poll())
         listing = subprocess.run([sys.executable, str(QUEUE), 'status'], env=self.env, capture_output=True, text=True)
-        self.assertIn('paused (no new admissions) by quiet-window hold x', listing.stdout)
+        self.assertIn("paused (no new admissions except its owner's) by quiet-window hold x", listing.stdout)
         (self.work / 'H.go').touch()
         self.assertEqual(self.finish(p)[0], 0)
 
