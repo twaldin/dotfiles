@@ -1075,6 +1075,25 @@ class Guard(unittest.TestCase):
             (1.25, 'tree', None, None, None), (1.5, 'explained', None, 'D2', None), (1.8, 'tim', None, None, None),
             (2.0, 'unchanged', None, None, None)])
 
+    def test_a_second_takeover_keeps_the_first_takeovers_spaces_and_notifications_tims(self):
+        # Review 1: another input-backed app switch in the same grace window must not move the takeover cutoff.
+        header = dict(self.COUNTER_BALL, procs=self.COUNTER_BALL['procs'] + [{'pid': 300, 'exe': '/apps/300'}])
+        rows = self.decide(header, [
+            {'t': 1.0, 'activate': 500},
+            {'t': 1.1, 'activate': 100},
+            {'t': 1.2, 'activate': 600, 'input': 1.19},
+            {'t': 1.3, 'space': 3},
+            {'t': 1.35, 'notice': 1.25},
+            {'t': 1.4, 'activate': 300, 'input': 1.39},
+            {'t': 1.45, 'notice': 1.35, 'others': ['D2']},
+            {'t': 1.5, 'read': 3},
+        ])
+        self.assertEqual([(r['t'], r.get('space'), r.get('notice'), r.get('revoked'), r.get('unseenCharged'))
+                          for r in rows if 'space' in r or 'notice' in r],
+                         [(1.3, 'user', None, None, None), (1.35, None, 'tim', None, None),
+                          (1.45, None, 'explained', None, None), (1.5, 'unchanged', None, None, None)])
+        self.assertEqual([r['pid'] for r in rows if r.get('takeover')], [600, 300])
+
     def test_a_space_answer_is_judged_on_the_theft_windows_as_they_stand_when_it_comes(self):
         # The change was reported at 10.0, outside any theft window; Studio stole focus at 10.1 while yabai took its
         # time to answer, so the answer, Space 3, is the tree's.
@@ -2229,6 +2248,21 @@ class Guard(unittest.TestCase):
         put(root / 'windows-mode', 'answer')
         _, result = self.end_rig(process, lines, root)
         self.assertEqual([r['method'] for r in result['reverted']], ['immediate'])
+
+    def test_an_activation_after_shutdown_begins_is_recorded_but_never_activates_tims_app(self):
+        # Review 1: SIGTERM can begin the end before guardSeconds. Main still serves activations during final work.
+        process, lines, root, tim, thief = self.theft_rig()
+        put(root / 'windows-mode', 'hang-once')  # hold finalization open, without any queued revert
+        self.send(process, 'end', 'activate %d' % thief)
+        seen = lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        self.assertEqual(process.wait(10), 0)
+        result = json.loads((root / 'summary.json').read_text())
+        self.assertNotIn('rig-activate', [e.get('event') for e in seen], seen)
+        activation = [e for e in seen if e.get('event') == 'activation' and e['app']['pid'] == thief]
+        self.assertEqual(len(activation), 1, seen)
+        self.assertEqual(activation[0]['immediate'], {'ok': False, 'reason': "the guard's end began: not run"})
+        self.assertIn("revert to pid %d came after the guard's end began: not run" % tim, result['problems'])
+        self.assertEqual(result['reverted'], [])
 
     def test_tims_takeover_ends_a_theft_and_the_space_his_click_shows_is_his(self):
         # GR2 (addendum 3), live: while the tree has focus, Tim clicks another app of his 5 ms after his input: his

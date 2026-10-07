@@ -29,7 +29,8 @@
 //     back to, and each Space his display shows from then until the next tree activation is his (but one that stays
 //     on the Space the tree took him to), never a breach, and no theft before it revokes it; so is a Space
 //     notification whose interval (since the notification before it) began at or after it: judged as outside a
-//     theft window, never charged to a theft before it. 100 ms: in the
+//     theft window, never charged to a theft before it. Later takeovers keep that first cutoff until a tree
+//     activation resets it. 100 ms: in the
 //     after-dark receipt (e8790f2c) each of his 12 activations came 2.7-47 ms after his input, in the tab receipt
 //     (542d177d) 0.3 and 38.6 ms; it is about twice the slowest. A tree app's activation is never his. The
 //     residual risk: the HID table counts any input, a mouse move or a keystroke too, and a process can feed it (the
@@ -37,9 +38,9 @@
 //     is taken for his, with the Spaces his display shows until the tree next activates: unreverted, no breach, and
 //     the check passes. Conversely, should his activation reach the guard after the Space change it causes, that
 //     change is still the tree's (a breach). Input never decides a Space change on its own;
-//   - reverts activations: when a tree process becomes frontmost, it re-activates Tim's app at once, in the turn
-//     that decides the activation (GR2: it never waits for yabai), after the checks the fallback's final turn makes
-//     (below); then, unless focus is back by then, it focuses his restore-target window by id, or re-activates his
+//   - reverts activations: when a tree process becomes frontmost before shutdown begins, it re-activates Tim's app at
+//     once, in the turn that decides the activation (GR2: it never waits for yabai), after the checks the fallback's
+//     final turn makes (below); then, unless focus is back by then, it focuses his restore-target window by id, or re-activates his
 //     app again when there is none or the focus fails. An app activation cannot hand focus to another process: the
 //     app is checked by pid and start time in the turn that activates it; a window id can pass to another process
 //     unseen, so only a window is vouched for. The target is his focused window at launch
@@ -342,7 +343,7 @@ struct TheftWindow: Equatable {
     private(set) var open = false
     /// When the last window that closed ended: its return, plus `grace`.
     private(set) var closedUntil: Double?
-    /// When Tim last took focus himself (RestorePolicy.userInput), if no tree activation came since.
+    /// When Tim first took focus himself (RestorePolicy.userInput) since the last tree activation.
     private(set) var takenOver: Double?
 
     mutating func theft(at t: Double) {
@@ -357,7 +358,7 @@ struct TheftWindow: Equatable {
         closedUntil = t + TheftWindow.grace
     }
 
-    mutating func takeover(at t: Double) { takenOver = t }
+    mutating func takeover(at t: Double) { if takenOver == nil { takenOver = t } }
 
     /// Whether any moment from `t` until now lies in a theft window. Read after every theft known so far (each one
     /// came before now): a theft that is open, or a window that ended at or after `t`.
@@ -3636,9 +3637,13 @@ func onActivation(_ pid: pid_t, app: Any, running: NSRunningApplication?, at t: 
         // turn; the revert (his window by id once its owner is vouched for, unless focus is back by then) follows.
         let window = restoreTarget.value.window(for: to)
         var atOnce: [String: Any] = ["ok": false, "reason": NSNull()]
-        switch finalActivation(to, method: "immediate") {
-        case .activated(let ok): atOnce["ok"] = ok
-        case .unwanted(let why): atOnce["reason"] = why
+        if stopping {
+            atOnce["reason"] = "the guard's end began: not run"
+        } else {
+            switch finalActivation(to, method: "immediate") {
+            case .activated(let ok): atOnce["ok"] = ok
+            case .unwanted(let why): atOnce["reason"] = why
+            }
         }
         let immediate = atOnce["ok"] as? Bool == true
         emit(context.merging(["event": "activation", "app": app, "tree": true, "decision": "restore", "to": Int(to),
