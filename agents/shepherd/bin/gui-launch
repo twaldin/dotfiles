@@ -61,8 +61,9 @@ and/or guards one that something else starts, then checks that nothing took it.
   Spaces on one display; a display left out of a read or unreadable never counts as changed), and one that is not
   is a change and back unseen: in a theft window a breach (space-unseen), outside one his own, as his changes are.
   In a theft window only a change of Tim's own display explains a notification (sky-lead's decision A): one that
-  coincides with another display's change is a breach too. So callers must not drive other displays (their
-  Spaces) during a guarded launch: doing so produces false failures by design. This rests on an assumption
+  coincides with another display's change is a breach too; but a notification whose interval (since the one before
+  it) began at or after his takeover is judged as outside a theft window. So callers must not drive other displays
+  (their Spaces) during a guarded launch: doing so produces false failures by design. This rests on an assumption
   [INFERENCE, not shown]: macOS posts at least one Space notification after each completed Space change (Apple
   documents only that it is posted "when a Spaces change occurs"). That they arrive at all is checked (GR1: guard
   04448d35 never got one): each change of any display that a read other than a notification's finds (at an

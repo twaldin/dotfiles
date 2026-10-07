@@ -1035,6 +1035,27 @@ class Guard(unittest.TestCase):
         click = [i for i, r in enumerate(out) if r.get('takeover')][0]
         self.assertEqual([(r['space'], r.get('expected')) for r in out[click + 1:]], [('user', 4), ('unchanged', None), ('unchanged', None)])
 
+    def test_after_tims_takeover_a_space_notification_no_read_explains_is_judged_as_outside_a_theft_window(self):
+        # GR2 (addendum 3): from his takeover until the tree next activates, each Space his display shows is his, a change
+        # and back no read saw included. A notification whose interval (since the one before it) began at or after the
+        # takeover is judged as outside a theft window: another display's change explains it, one nothing explains is
+        # his, and the theft before the takeover charges none of them. One whose interval began before it is still the
+        # tree's. (Before this, each was a breach, space-unseen, though the window was his.)
+        rows = self.decide(self.COUNTER_BALL, [
+            {'t': 1.0, 'activate': 500},                    # the tree's theft
+            {'t': 1.1, 'notice': 1.0},                      # nothing explains it, in the theft window: the tree's
+            {'t': 1.2, 'activate': 600, 'input': 1.19},     # his takeover, 10 ms after his input
+            {'t': 1.25, 'notice': 1.1},                     # its interval began before the takeover: the tree's
+            {'t': 1.5, 'notice': 1.25, 'others': ['D2']},   # D2 changed since: explained
+            {'t': 1.8, 'notice': 1.5},                      # nothing explains it: his
+            {'t': 2.0, 'read': 2},                          # within 2 s of the theft at 1.0: charges nothing
+        ])
+        self.assertEqual([(r['t'], r.get('decision') or r.get('notice') or r.get('space'), r.get('takeover'), r.get('explainedBy'),
+                           r.get('unseenCharged')) for r in rows], [
+            (1.0, 'restore', None, None, None), (1.1, 'tree', None, None, None), (1.2, 'user', True, None, None),
+            (1.25, 'tree', None, None, None), (1.5, 'explained', None, 'D2', None), (1.8, 'tim', None, None, None),
+            (2.0, 'unchanged', None, None, None)])
+
     def test_a_space_answer_is_judged_on_the_theft_windows_as_they_stand_when_it_comes(self):
         # The change was reported at 10.0, outside any theft window; Studio stole focus at 10.1 while yabai took its
         # time to answer, so the answer, Space 3, is the tree's.

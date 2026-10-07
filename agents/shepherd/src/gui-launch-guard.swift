@@ -27,7 +27,9 @@
 //     last HID input (sinceInputMs) is his choice (decision user, takeover), in a theft or grace window too: it is
 //     never reverted, it ends an open theft (whose revert is then no longer wanted) and becomes the app focus goes
 //     back to, and each Space his display shows from then until the next tree activation is his (but one that stays
-//     on the Space the tree took him to), never a breach, and no theft before it revokes it. 100 ms: in the
+//     on the Space the tree took him to), never a breach, and no theft before it revokes it; so is a Space
+//     notification whose interval (since the notification before it) began at or after it: judged as outside a
+//     theft window, never charged to a theft before it. 100 ms: in the
 //     after-dark receipt (e8790f2c) each of his 12 activations came 2.7-47 ms after his input, in the tab receipt
 //     (542d177d) 0.3 and 38.6 ms; it is about twice the slowest. A tree app's activation is never his. The
 //     residual risk: the HID table counts any input, a mouse move or a keystroke too, and a process can feed it (the
@@ -61,18 +63,19 @@
 //     it, two reads positively naming two Spaces on one display: in a theft or grace window only a change of Tim's
 //     own display explains one (sky-lead's decision A; another display's change never does, so a caller that
 //     drives another display's Spaces during a guarded launch gets false failures by design); outside them any
-//     display's does. One that is not explained is a change and back that no read saw: in a theft or grace window
-//     a breach that cannot be named (space-unseen), outside them his own, as his changes are. This rests on macOS
-//     posting at least one notification after each completed Space change [INFERENCE: not shown here]. That the
-//     notifications arrive at all is checked (GR1): a change of any display that another read (an activation's, a
-//     poll's, a restore's, the end's) finds must be followed by a notification within 0.5 s, or they are not
-//     arriving: a problem, once per run. A change no read finds stays unchecked, so this can show them missing only
-//     when a read finds a change. In a theft or grace window, reads more than 100 ms apart, and any read that fails,
-//     leave a Space possibly unseen: a problem. As the guard ends, while a change a read found waits for its
-//     notification, it waits for that (at most 0.5 s, the poll still running); then the poll stops; then, in one
-//     main-queue turn, the watch takes its last read and is sealed (a change still waiting for its notification
-//     then is a problem, however young) and the summary's records are taken; a notification after the seal is a
-//     problem;
+//     display's does, and so does any display's for a notification whose interval began at or after Tim's takeover
+//     (above). One that is not explained is a change and back that no read saw: in a theft or grace window (but
+//     after his takeover) a breach that cannot be named (space-unseen), otherwise his own, as his changes are. This
+//     rests on macOS posting at least one notification after each completed Space change [INFERENCE: not shown
+//     here]. That the notifications arrive at all is checked (GR1): a change of any display that another read (an
+//     activation's, a poll's, a restore's, the end's) finds must be followed by a notification within 0.5 s, or they
+//     are not arriving: a problem, once per run. A change no read finds stays unchecked, so this can show them
+//     missing only when a read finds a change. In a theft or grace window, reads more than 100 ms apart, and any
+//     read that fails, leave a Space possibly unseen: a problem. As the guard ends, while a change a read found
+//     waits for its notification, it waits for that (at most 0.5 s, the poll still running); then the poll stops;
+//     then, in one main-queue turn, the watch takes its last read and is sealed (a change still waiting for its
+//     notification then is a problem, however young) and the summary's records are taken; a notification after the
+//     seal is a problem;
 //   - restores Tim's Space: focusing the restore target, when it was last seen on the expected Space and its owner
 //     checks out, brings that Space back, if a fresh read still wants it before each owner query and the focus;
 //     each restore is recorded too. A change taken for Tim's is undone when a theft turns out to have come within
@@ -636,9 +639,11 @@ func ownerTimeoutProblem(_ outcome: RevertOutcome, immediate: Bool, to pid: pid_
 /// breach that cannot be named. Outside them another display's change explains it too, and one that nothing
 /// explains is his, until a theft turns out to have come within `grace` of it. GR2 (addendum 3): after Tim's takeover
 /// (an app outside the tree he activated, RestorePolicy.userInput) and until the next tree activation, each change
-/// is his, in a theft or grace window too (but one that stays on the Space the tree took him to), and a theft that
-/// came before the takeover revokes none of them. A Space is its yabai index, or, for one yabai's map does not know,
-/// minus its SkyLight id (spaceKey).
+/// is his, in a theft or grace window too (but one that stays on the Space the tree took him to); so is a
+/// notification since the one before it came at or after the takeover, judged as outside a window (another display's
+/// change explains it, and one nothing explains is his); and a theft that came before the takeover revokes or
+/// charges none of them. A Space is its yabai index, or, for one yabai's map does not know, minus its SkyLight id
+/// (spaceKey).
 struct SpacePolicy {
     enum Decision: Equatable {
         case unchanged
@@ -674,11 +679,12 @@ struct SpacePolicy {
     init(expected: Int?) { self.expected = expected }
 
     /// A Space notification read at `t`; the one before it was read at `since`. `tim`: Tim's display, if the reads
-    /// since then named two different Spaces on it; `others`: the other displays they did that for.
+    /// since then named two different Spaces on it; `others`: the other displays they did that for. GR2: once Tim
+    /// took over (TheftWindow.tims) at or before `since`, the whole interval is his: judged as outside a theft window.
     mutating func noticed(at t: Double, since: Double, theft: TheftWindow, tim: String?, others: [String]) -> Notice {
         unseenOutside.removeAll { t - $0 > 2 * TheftWindow.grace }
         if let tim { return .explained(tim) }
-        if theft.covers(since: since) { return .tree }
+        if theft.covers(since: since) && !theft.tims(since: since) { return .tree }
         if let other = others.first { return .explained(other) }
         unseenOutside.append(t)
         return .tim
@@ -692,8 +698,10 @@ struct SpacePolicy {
         breach = nil
         unseenCharged = []
         if let lastTheft = theft.lastTheft {
-            unseenCharged = unseenOutside.filter { abs(lastTheft - $0) <= TheftWindow.grace }
-            unseenOutside.removeAll { abs(lastTheft - $0) <= TheftWindow.grace }
+            // A notification taken for Tim's after his takeover is his: no theft before the takeover charges it.
+            let charged = { (at: Double) in abs(lastTheft - at) <= TheftWindow.grace && !theft.tims(since: at) }
+            unseenCharged = unseenOutside.filter(charged)
+            unseenOutside.removeAll(where: charged)
         }
         if let lastTheft = theft.lastTheft,
            let first = rebases.firstIndex(where: { abs(lastTheft - $0.since) <= TheftWindow.grace && !theft.tims(since: $0.since) }) {
