@@ -135,7 +135,12 @@ and/or guards one that something else starts, then checks that nothing took it.
   records (exemptWindows) are historical only: after the guard exits, the wrapper re-reads each such window in its
   fresh list via the guard's read-only --window-look (WindowServer presence, owner and bounds; all SkyLight memberships,
   in Aqua through the same root step when needed). Still tiny/ordered-out, with every property readable: exempt;
-  grown or ordered in: judged by its current memberships; any unreadable proof fails the check.
+  grown or ordered in: judged by its current memberships; any unreadable proof fails the check. The guard's identity
+  is read again immediately before that probe (as before its start, below): a changed guard is refused, the probe
+  does not run, and the check fails. The check's exemptionProbe records the probe (null when no final exemption
+  needed it): wrapper, argv, env_keys, the guard identity it verified, ids, its outcome (status "exited" with exit
+  and, if nonzero, stderr; "timeout" with timeoutS, 10; "error" with error; "refused" with reason and the identity
+  found) and, when it ran, ms.
   None the guard found back on his screen, and no tree window off the target after the guard's move (but as
   --allow-caller-placement excuses); Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
@@ -167,11 +172,13 @@ so from there the guard runs in Tim's GUI (Aqua) session through the fixed root 
 (`sudo -u` back to Tim keeps yabai's per-user socket answering), with only PATH=/usr/bin:/bin:/usr/sbin:/sbin,
 HOME, USER and LOGNAME (Tim's, from the password database) and LANG=C.UTF-8 in its environment. Caller values
 reach only the guard's arguments, after the second `--`. The `sudo` event records that argv, the
-environment's keys and the guard's real path and sha256 (from Aqua: the guard's argv, "wrapper": "none").
+environment's keys and the guard's real path and sha256 (from Aqua: the guard's argv, "wrapper": "none"); the
+post-exit exemption probe's own root step (the same hop, `<guard> --window-look <ids>`) is recorded the same way in
+the check's exemptionProbe, with its outcome.
 The guard's identity (real path, then device, inode, size, mtime and sha256 read through one O_NOFOLLOW
-descriptor) is read when its argv is built and again immediately before it is started; any change is
-refused. sudo then executes the path by name, so a swap after that second read is the residual: no
-fexecve passes through sudo.
+descriptor) is read when its argv is built, again immediately before it is started, and again immediately before
+the post-exit exemption probe; any change is refused (at the probe: the check fails). sudo then executes the path
+by name, so a swap after the last read is the residual: no fexecve passes through sudo.
 If sudo or the guard fails, nothing is launched: exit 2.
 Exit 0 ok; 1 the check failed (a fault included); 2 usage, launch, sudo or guard error.
 """
@@ -186,6 +193,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 TIM_SPACES = {1, 2, 3, 4}
 YABAI = os.environ.get('GUI_LAUNCH_YABAI', os.path.expanduser('~/Applications/Yabai.app/Contents/MacOS/yabai'))
@@ -193,6 +201,8 @@ GUARD = os.environ.get('GUI_LAUNCH_GUARD', os.path.expanduser('~/.local/bin/gui-
 # The root step into Tim's Aqua session: fixed programs, never looked up on the caller's PATH.
 SUDO = '/usr/bin/sudo'
 LAUNCHCTL = '/bin/launchctl'
+# The post-exit exemption probe (--window-look): how long it may take, through the root step included.
+PROBE_SECONDS = 10
 
 
 def emit(event):
@@ -416,26 +426,65 @@ def final_exempt(summary):
     return {e.get('window'): e.get('reason') for e in summary.get('exemptWindows') or [] if e.get('final')}
 
 
-def check_exemptions(summary, windows, guard, env, spaces, shown, target):
+def check_exemptions(summary, windows, pinned, env, spaces, shown, target):
     """Re-measure historical final exemptions through the same guard's read-only WindowLook adapter in Aqua.
-    A grown/ordered-in window is judged by its current memberships; incomplete proof fails closed."""
+    A grown/ordered-in window is judged by its current memberships; incomplete proof fails closed. `pinned` is the
+    guard's identity as started; it is read again immediately before the probe runs, and any change refuses the probe.
+    Returns (checked, problems, the probe's receipt: None when no exemption needed re-measuring)."""
     historical = final_exempt(summary)
     candidates = [w for w in windows if w.get('id') in historical]
     if not candidates:
-        return {}, []
+        return {}, [], None
+    guard, guard_file = pinned
     argv = [guard['path'], '--window-look', ','.join(str(w['id']) for w in candidates)]
+    wrapper = 'none'
     if env is not None:
         argv, env = hop(argv)
+        wrapper = 'launchctl asuser'
+    probe = {'wrapper': wrapper, 'argv': argv, 'env_keys': sorted(env) if env is not None else None, 'guard': guard,
+             'ids': [w['id'] for w in candidates]}
+    checked, found, looks = {}, [], {}
     try:
-        done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
-        looks = json.loads(done.stdout) if done.returncode == 0 else {}
-        if not isinstance(looks, dict):
-            looks = {}
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        looks = {}
+        again = identify(GUARD)
+    except OSError as error:
+        again, refused = None, 'the guard could not be read again before the post-exit exemption probe: %s' % error
+    else:
+        refused = None if again == (guard, guard_file) else (
+            'the guard changed between its run and the post-exit exemption probe (%s, sha256 %s, then %s, sha256 %s)'
+            % (guard['path'], guard['sha256'], again[0]['path'], again[0]['sha256']))
+    if refused:
+        probe['outcome'] = {'status': 'refused', 'reason': refused, 'found': again[0] if again else None}
+        found.append(refused + ': refused, so no exemption was re-measured')
+        why = 'the probe was refused'
+    else:
+        began = time.monotonic()
+        try:
+            done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=PROBE_SECONDS)
+            probe['outcome'] = {'status': 'exited', 'exit': done.returncode}
+            if done.returncode != 0:
+                probe['outcome']['stderr'] = done.stderr.strip()[:200]
+        except subprocess.TimeoutExpired:
+            probe['outcome'] = {'status': 'timeout', 'timeoutS': PROBE_SECONDS}
+        except OSError as error:
+            probe['outcome'] = {'status': 'error', 'error': str(error)}
+        probe['ms'] = round((time.monotonic() - began) * 1000, 1)
+        outcome = probe['outcome']
+        if outcome['status'] == 'exited' and outcome['exit'] == 0:
+            try:
+                looks = json.loads(done.stdout)
+            except ValueError:
+                looks = None
+            if not isinstance(looks, dict):
+                looks = {}
+                outcome['unreadable'] = True
+        why = {'exited': 'the probe exited %s' % outcome.get('exit'), 'timeout': 'the probe did not answer within %s s' % PROBE_SECONDS,
+               'error': 'the probe could not start: %s' % outcome.get('error')}[outcome['status']]
+        if outcome.get('unreadable'):
+            why = 'the probe answered unreadably'
+        elif outcome['status'] == 'exited' and outcome['exit'] == 0:
+            why = 'state, memberships or bounds unreadable'
     indexes = {s.get('id'): s['index'] for s in spaces
                if s.get('id') is not None and isinstance(s.get('index'), int) and not isinstance(s['index'], bool) and s['index'] > 0}
-    checked, found = {}, []
     for w in candidates:
         wid = w['id']
         look = looks.get(str(wid))
@@ -448,8 +497,8 @@ def check_exemptions(summary, windows, guard, env, spaces, shown, target):
                     isinstance(memberships, list) and all(isinstance(s, int) and not isinstance(s, bool) and s > 0 for s in memberships))
         checked[wid] = None
         if not readable:
-            found.append('window %s of %s (pid %s) has no readable post-exit exemption proof: state, memberships or bounds unreadable'
-                         % (wid, w.get('app'), w.get('pid')))
+            found.append('window %s of %s (pid %s) has no readable post-exit exemption proof: %s'
+                         % (wid, w.get('app'), w.get('pid'), why))
             continue
         if bounds[2] <= 2 and bounds[3] <= 2:
             checked[wid] = '2x2 px or less'
@@ -465,7 +514,7 @@ def check_exemptions(summary, windows, guard, env, spaces, shown, target):
             if tim is not None:
                 found.append('window %s of %s (pid %s, "%s") is on Space %s'
                              % (wid, w.get('app'), w.get('pid'), w.get('title', ''), tim))
-    return checked, found
+    return checked, found, probe
 
 
 def problems(summary, windows, focus_before, focus_after, shown_before, shown_after, target, checked, check_problems):
@@ -577,7 +626,7 @@ def main():
     windows = [w for w in yabai('query', '--windows') if w.get('pid') in tree]
     spaces_after = yabai('query', '--spaces')
     focus_after, shown_after = focus(spaces_after), shown_space(spaces_after)
-    checked, check_problems = check_exemptions(summary, windows, guard, env, spaces_after, shown_after, space)
+    checked, check_problems, probe = check_exemptions(summary, windows, (guard, guard_file), env, spaces_after, shown_after, space)
     found = problems(summary, windows, focus_before, focus_after, shown_before, shown_after, space, checked, check_problems)
     attached = summary.get('attached') or []
     emit({'event': 'check', 'ok': not found, 'problems': found, 'space': space, 'guard': guard,
@@ -594,7 +643,7 @@ def main():
           'spaceHistory': summary.get('spaceHistory') or [], 'ownerQueryTimeouts': summary.get('ownerQueryTimeouts') or [],
           'windowFaults': summary.get('windowFaults') or [], 'exemptWindows': summary.get('exemptWindows') or [],
           'placement': 'caller' if args.allow_caller_placement else 'target',
-          'finalWindowList': summary.get('finalWindowList')})
+          'finalWindowList': summary.get('finalWindowList'), 'exemptionProbe': probe})
     if found:
         die('FAILED: ' + '; '.join(found), 1)
     latencies = [r['latencyMs'] for r in summary.get('reverted') or []]

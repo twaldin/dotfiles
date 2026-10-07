@@ -67,8 +67,11 @@ if sys.argv[1:] == ['--screens']:
     print(json.dumps({'Built-in Retina Display': 1, 'CanvasTest': 43}))
     sys.exit(0)
 if sys.argv[1:2] == ['--window-look']:
+    open(%(looks)r, 'a').write(json.dumps(sys.argv[1:]) + '\\n')
     print(json.dumps(config.get('window_looks', {})))
-    sys.exit(0)
+    if config.get('window_look_exit'):
+        sys.stderr.write('the look failed\\n')
+    sys.exit(config.get('window_look_exit', 0))
 json.dump(sys.argv, open(%(argv_out)r, 'w'))
 if config.get('spawn') and '--' in sys.argv:
     subprocess.run(sys.argv[sys.argv.index('--') + 1:])
@@ -85,6 +88,8 @@ for space in state['spaces']:
         space['is-visible'] = space['index'] == config['shows_after']
 json.dump(state, open(%(state)r, 'w'))
 print(json.dumps({'event': 'guard-end', 'reason': 'tree-exited'}), flush=True)
+if config.get('swap_after_run'):  # the guard's file is replaced between its run and the post-exit probe
+    open(%(guard)r, 'a').write('\\n# swapped after the run\\n')
 sys.exit(config.get('exit', 0))
 '''
 
@@ -414,7 +419,7 @@ class GuiLaunch(unittest.TestCase):
         self.guard_argv = self.root / 'guard-argv.json'
         names = {'python': sys.executable, 'state': str(self.state), 'config': str(self.config),
                  'argv_out': str(self.guard_argv), 'manager': str(self.manager), 'swap': str(self.root / 'swap'),
-                 'guard': str(stubs / 'gui-launch-guard')}
+                 'guard': str(stubs / 'gui-launch-guard'), 'looks': str(self.root / 'window-looks.log')}
         for name, body in (('yabai', FAKE_YABAI), ('gui-launch-guard', FAKE_GUARD), ('launchctl', FAKE_LAUNCHCTL)):
             (stubs / name).write_text(body % names)
             (stubs / name).chmod(0o755)
@@ -768,6 +773,71 @@ class GuiLaunch(unittest.TestCase):
                                              window_looks={str(wid): {'exists': True, 'pid': 500, 'bounds': [0, 0, 500, 500], 'spaceIds': []}})
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(self.check_event(result)['problems'], [])
+
+    def test_a_guard_replaced_after_its_run_is_refused_before_the_post_exit_probe(self):
+        # Review 2 STANDARDS: the probe ran the guard's path unpinned, so bytes replaced after the run could answer
+        # complete-looking tiny proof for a window on Tim's Space 4. Now the identity is read again first.
+        wid = 9012
+        self.machine(windows=[{'id': wid, 'pid': 500, 'app': 'Probe', 'title': 'grown', 'space': 4}])
+        exempt = [{'event': 'window-exempt', 'window': wid, 'reason': '2x2 px or less', 'final': True}]
+        tiny = {str(wid): {'exists': True, 'pid': 500, 'bounds': [0, 0, 1, 1], 'spaceIds': [104]}}
+        looks = self.root / 'window-looks.log'
+        for manager in ('Aqua', 'Background'):
+            with self.subTest(manager=manager):
+                calls = len(self.sudo_calls())
+                pinned = hashlib.sha256(self.guard.read_bytes()).hexdigest()
+                result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), manager=manager,
+                                             summary=summary(exemptWindows=exempt), window_looks=tiny, swap_after_run=True)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                swapped = hashlib.sha256(self.guard.read_bytes()).hexdigest()
+                self.assertNotEqual(swapped, pinned, 'the stand-in guard replaced itself after its run')
+                check = self.check_event(result)
+                path = os.path.realpath(self.guard)
+                self.assertIn('the guard changed between its run and the post-exit exemption probe (%s, sha256 %s, then %s, sha256 %s): '
+                              'refused, so no exemption was re-measured' % (path, pinned, path, swapped), check['problems'])
+                self.assertIn('window %d of Probe (pid 500) has no readable post-exit exemption proof: the probe was refused' % wid,
+                              check['problems'])
+                outcome = check['exemptionProbe']['outcome']
+                self.assertEqual((outcome['status'], outcome['found']), ('refused', {'path': path, 'sha256': swapped}))
+                self.assertFalse(looks.exists(), 'the replaced guard never ran')
+                self.assertEqual(len(self.sudo_calls()) - calls, 2 if manager == 'Background' else 0, 'only the guard run hopped')
+
+    def test_the_post_exit_probe_is_recorded_with_its_root_step_and_outcome(self):
+        # Review 2 STANDARDS: from Background the probe is a second root step. Its argv, environment keys, the guard
+        # identity verified before it, the ids and its outcome are the check's exemptionProbe (null when none is needed).
+        wid = 9013
+        me = pwd.getpwuid(os.getuid())
+        self.machine(windows=[{'id': wid, 'pid': 500, 'app': 'Probe', 'title': '', 'space': 4}])
+        exempt = [{'event': 'window-exempt', 'window': wid, 'reason': 'ordered out', 'final': True}]
+        ordered_out = {str(wid): {'exists': True, 'pid': 500, 'bounds': [0, 0, 500, 500], 'spaceIds': []}}
+        identity = {'path': os.path.realpath(self.guard), 'sha256': hashlib.sha256(self.guard.read_bytes()).hexdigest()}
+        look = [identity['path'], '--window-look', str(wid)]
+        hop = [str(self.sudo), '-n', '-E', '--', str(self.root / 'stubs' / 'launchctl'), 'asuser', str(me.pw_uid),
+               str(self.sudo), '-n', '-E', '-u', me.pw_name, '--']
+        for manager, code in (('Background', 0), ('Background', 3), ('Aqua', 3)):
+            with self.subTest(manager=manager, exit=code):
+                calls = len(self.sudo_calls())
+                result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), manager=manager,
+                                             summary=summary(exemptWindows=exempt), window_looks=ordered_out, window_look_exit=code)
+                self.assertEqual(result.returncode, 1 if code else 0, result.stdout + result.stderr)
+                check = self.check_event(result)
+                probe = check['exemptionProbe']
+                self.assertGreaterEqual(probe.pop('ms'), 0)
+                outcome = dict({'status': 'exited', 'exit': code}, **({'stderr': 'the look failed'} if code else {}))
+                background = manager == 'Background'
+                self.assertEqual(probe, {'wrapper': 'launchctl asuser' if background else 'none',
+                                         'argv': hop + look if background else look,
+                                         'env_keys': ['HOME', 'LANG', 'LOGNAME', 'PATH', 'USER'] if background else None,
+                                         'guard': identity, 'ids': [wid], 'outcome': outcome})
+                hops = [argv for argv, _ in self.sudo_calls()[calls:]]
+                self.assertEqual(hops[2:], [hop + look, hop[7:] + look] if background else [])
+                if code:
+                    self.assertIn('window %d of Probe (pid 500) has no readable post-exit exemption proof: the probe exited 3' % wid,
+                                  check['problems'])
+        self.machine(windows=[])
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(self.check_event(result)['exemptionProbe'])
 
     def test_the_check_fails_when_tims_display_shows_another_space_unless_he_switched_himself(self):
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), shows_after=6)
