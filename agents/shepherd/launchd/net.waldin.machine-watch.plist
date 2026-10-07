@@ -11,13 +11,12 @@
 	<string>net.waldin.machine-watch</string>
 	<key>LowPriorityIO</key>
 	<true/>
-	<key>Nice</key>
-	<integer>10</integer>
 	<key>ProcessType</key>
 	<string>Standard</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/Users/twaldin/.local/bin/machine-watch</string>
+		<string>--tick</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -26,6 +25,6 @@
 	<key>StandardOutPath</key>
 	<string>/Users/twaldin/.local/state/machine-watch.log</string>
 	<key>StartInterval</key>
-	<integer>120</integer>
+	<integer>60</integer>
 </dict>
 </plist>

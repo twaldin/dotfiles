@@ -2,7 +2,8 @@
 
 HOME is a temp dir, so machine-watch's BIN is HOME/.local/bin and holds stub machine-census and
 fsevents-top (plus agent-msg where delivery is tested). Stubs first on PATH stand in for sudo, pgrep, log
-(WindowServer and ColorSync probes), osascript and ssh; every call to them lands in $CALLS so a test can
+(WindowServer and ColorSync probes), osascript, ssh, ioreg (Tim's input idle time: idle unless a test says
+otherwise) and iostat (a fast check's CPU sample); every call to them lands in $CALLS so a test can
 prove what was and was not run.
 No remotes or broker-clients files exist unless a test makes them, so nothing reaches ssh by accident.
 An easl CLI stub lives outside PATH: only a test that writes the switch file into HOME reaches it, and it
@@ -10,6 +11,8 @@ logs to $CALLS too.
 """
 import json
 import os
+import pwd
+import re
 import subprocess
 import sys
 import tempfile
@@ -34,6 +37,9 @@ PATH_STUBS = {
     'log': 'exit 0',
     'osascript': 'exit 0',
     'ssh': 'cat "$HOME/ssh.out" 2>/dev/null; exit 0',
+    'ioreg': 'cat "$HOME/ioreg.out" 2>/dev/null || echo \'    | |   "HIDIdleTime" = 600000000000\'',
+    'iostat': 'cat "$HOME/iostat.out" 2>/dev/null || printf \'      cpu    load average\\n us sy id   1m   5m   15m\\n'
+              ' 20 10 70  3.00 3.00 3.00\\n 20 10 70  3.00 3.00 3.00\\n\'',
 }
 LOGGING = '#!/bin/sh\necho "$(basename "$0") $*" >> "$CALLS"\n{body}\n'
 
@@ -58,6 +64,56 @@ elif args[:1] == ['agent.prompt']:
 SHEPHERD_TILE = {'tile': 'obj_shep', 'board': 'brd_ops', 'name': 'shepherd', 'kind': 'omp',
                  'lifecycle': {'state': 'idle'}, 'pid': 777, 'protocol': 1}
 BIG_FSEVENTSD = {'mem_mb': 2000, 'cpu': 1.0, 'procs': 1}
+
+# ps: `-axww -o pid=,ppid=,user=,time=,command=` prints the table in HOME/ps.json, each call advancing every
+# process's CPU time by its cpu_s (so two samples differ by exactly that); `eww -o command= -p PID` prints that
+# pid's command line with its environment (ps.json "env", else the bare command).
+FAKE_PS = f'#!{sys.executable}\n' + '''\
+import json, os, sys
+home, args = os.environ['HOME'], sys.argv[1:]
+with open(os.environ['CALLS'], 'a') as f:
+    f.write('ps ' + ' '.join(args) + '\\n')
+table = json.load(open(os.path.join(home, 'ps.json')))
+if args[:1] == ['eww']:
+    row = next((r for r in table['procs'] if str(r[0]) == args[-1]), None)
+    print(table['env'].get(args[-1], row[4] if row else ''))
+    sys.exit(0)
+count = os.path.join(home, 'ps.count')
+n = int(open(count).read()) if os.path.exists(count) else 0
+open(count, 'w').write(str(n + 1))
+for pid, ppid, user, cpu_s, cmd in table['procs']:
+    t = 600 + cpu_s * n
+    print('%5d %5d %-12s %d:%05.2f %s' % (pid, ppid, user, t // 60, t % 60, cmd))
+'''
+ME = pwd.getpwuid(os.geteuid()).pw_name
+HOST = os.uname().nodename.split('.')[0]
+# terms, an omp in an easl tile, running a capture job; its first 80 characters are what its message quotes.
+TERMS_TILE = {'tile': 'obj_terms', 'board': 'brd_x', 'name': 'terms', 'kind': 'omp',
+              'lifecycle': {'state': 'working'}, 'pid': 502, 'protocol': 1}
+CAPTURE = 'node capture.js --url http://localhost:5173/terms --frames 900 --fps 30 --out /tmp/terms-capture/frames'
+ZMX = ('/opt/homebrew/bin/zmx attach --labels canvas.board=brd_x canvas.tile=obj_terms canvas.home=_h '
+       'canvas-obj_terms /bin/zsh -l -c omp')
+OMP = '/Users/me/.bun/bin/omp --resume=s.jsonl'
+
+
+def proc(pid, ppid, cmd, cpu_s=0.0, user=ME):
+    """One ps row: cpu_s is the CPU time it uses between two samples."""
+    return [pid, ppid, user, cpu_s, cmd]
+
+
+def tile_tree(capture_s=0.2, chrome_s=6.0, ffmpeg_s=3.0):
+    """terms' tile: zmx server (launchd's child) -> login shell -> omp -> capture job -> headless Chromium and ffmpeg;
+    and Tim's Search app."""
+    return [
+        proc(1, 0, '/sbin/launchd', 0.02, 'root'),
+        proc(500, 1, ZMX),
+        proc(501, 500, f"/bin/zsh -l -c '{OMP}'"),
+        proc(502, 501, OMP, 0.1),
+        proc(600, 502, CAPTURE, capture_s),
+        proc(601, 600, '/Users/me/.cache/puppeteer/chrome-headless-shell --headless --no-sandbox', chrome_s),
+        proc(602, 600, 'ffmpeg -y -f image2pipe -i - -c:v libx264 /tmp/terms.mp4', ffmpeg_s),
+        proc(700, 1, '/Applications/Search.app/Contents/MacOS/Search', 1.0),
+    ]
 
 
 def write_exec(path, text):
@@ -158,9 +214,10 @@ class Rules(MachineWatchCase):
         # A dry run never delivers, never queues and never touches the alert state.
         self.assertFalse((self.state_dir / 'machine-watch.state.json').exists())
         self.assertFalse((self.state_dir / 'machine-watch.alerts').exists())
-        # sudo/pgrep/log are the WindowServer and ColorSync probes; nothing else may run.
+        # sudo/pgrep/log are the WindowServer and ColorSync probes, ioreg asks whether Tim is active (he is not,
+        # so no fast check samples the CPU); nothing else may run.
         self.assertEqual(sorted(set(self.called())),
-                         ['fsevents-top', 'log', 'machine-census', 'pgrep', 'sudo'])
+                         ['fsevents-top', 'ioreg', 'log', 'machine-census', 'pgrep', 'sudo'])
 
     def test_dry_run_without_a_shepherd_pane_says_it_would_queue(self):
         result = self.watch('--dry-run', report=census(free_pct=12))
@@ -410,6 +467,228 @@ sys.exit(%d)
                 self.assertEqual(len(self.notifications()), 1)
                 if mode == 'typed':
                     self.assertIn('machine-watch: WARNING: easl TYPED the alert into tile obj_shep', result.stderr)
+
+
+class FastSaturation(MachineWatchCase):
+    """While Tim is active (input in the last 60 s) launchd's minute ticks each check the CPU; under 15% idle on two
+    consecutive active-time checks messages the owners of the top consumers and tells the shepherd whom it messaged."""
+
+    def setUp(self):
+        super().setUp()
+        write_exec(Path(self.env['PATH'].split(':')[0]) / 'ps', FAKE_PS)
+        RealRuns.configure_shepherd(self, agent_msg_exit=0, name='shepherd')
+        RealRuns.set_easl(self, [SHEPHERD_TILE, TERMS_TILE])
+        self.table(tile_tree())
+
+    def tim(self, idle_s):
+        (self.home / 'ioreg.out').write_text(f'    | |   "HIDIdleTime" = {int(idle_s * 1e9)}\n')
+
+    def cpu(self, idle):
+        busy = 100 - idle
+        (self.home / 'iostat.out').write_text('      cpu    load average\n us sy id   1m   5m   15m\n'
+                                              ' 20 10 70  9.00 9.00 9.00\n'
+                                              f' {busy * 2 // 3:2d} {busy - busy * 2 // 3:2d} {idle:2d}  9.00 9.00 9.00\n')
+
+    def table(self, procs, env=None):
+        (self.home / 'ps.json').write_text(json.dumps({'procs': procs, 'env': env or {}}))
+
+    def tick(self):
+        result = self.watch('--tick', report=census())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def told(self, tile):
+        return [c['argv'][4] for c in RealRuns.easl_calls(self) if c['argv'][:3] == ['agent.prompt', '--target', tile]]
+
+    def state(self, **changes):
+        path = self.state_dir / 'machine-watch.state.json'
+        state = json.loads(path.read_text())
+        state.update(changes)
+        path.write_text(json.dumps(state))
+        return state
+
+    def test_two_saturated_minutes_while_tim_types_message_the_owner_tile_found_by_its_zmx_label(self):
+        self.tim(5)
+        self.cpu(3)
+        self.tick()
+        self.assertEqual(self.told('obj_terms'), [], 'one saturated minute is not enough')
+        self.tick()
+        told, = self.told('obj_terms')
+        self.assertIn('pid 600 `' + CAPTURE[:80] + '`', told)
+        prompt = next(c['argv'] for c in RealRuns.easl_calls(self) if c['argv'][2:3] == ['obj_terms'])
+        self.assertEqual(prompt[5:], ['--from', 'machine-watch', '--when', 'now'])
+        shepherd, = self.told('obj_shep')
+        self.assertRegex(shepherd, r'Messaged terms \(obj_terms\) about pid 600 node at \d+%')
+        self.assertEqual(self.called().count('machine-census'), 1, 'the second minute is a light check')
+        fast = [json.loads(line) for line in (self.state_dir / 'machine-watch.fast.jsonl').read_text().splitlines()]
+        self.assertEqual([(r['cpu_idle'], r['streak']) for r in fast], [(3.0, 1), (3.0, 2)])
+        self.assertEqual(fast[-1]['messaged'], ['obj_terms'])
+
+    def test_while_tim_is_idle_the_fast_rule_never_fires_and_an_idle_minute_breaks_the_streak(self):
+        self.cpu(3)
+        self.tim(600)
+        for _ in range(3):
+            self.watch(report=census())
+        self.assertNotIn('iostat', self.called())
+        for idle_s in (5, 600, 5):
+            self.tim(idle_s)
+            self.watch(report=census())
+        self.assertEqual(self.called().count('iostat'), 2)
+        self.assertEqual(self.told('obj_terms'), [])
+        self.assertEqual(self.told('obj_shep'), [])
+
+    def test_at_idle_time_the_slow_rule_tells_only_the_shepherd_after_three_full_runs(self):
+        report = census()
+        report['cpu_idle'] = 3.0
+        self.tim(600)
+        fired = []
+        for _ in range(4):
+            self.watch(report=report)
+            fired.append(self.records()[-1]['fired'])
+        self.assertEqual(fired, [[], [], ['cpu_saturated'], []])
+        shepherd, = self.told('obj_shep')
+        self.assertIn('[machine-watch testhost] CPU idle 3% (<15%).', shepherd)
+        self.assertEqual(self.told('obj_terms'), [])
+        # While Tim is active the fast rule owns saturation; the slow one stays out of it.
+        RealRuns.fresh(self)
+        self.tim(5)
+        for _ in range(3):
+            self.watch(report=report)
+        self.assertEqual([r['fired'] for r in self.records()[-3:]], [[], [], []])
+
+    def test_an_omp_outside_a_zmx_tile_maps_to_its_tile_through_EASL_TILE_ID(self):
+        table = [p for p in tile_tree() if p[0] != 500]
+        table[1][1] = 1  # the login shell is launchd's child: no zmx label anywhere above the omp
+        self.table(table, env={'502': f'{OMP} TERM=xterm-ghostty EASL_ENV=1 EASL_TILE_ID=obj_terms HOME=/Users/me'})
+        self.tim(5)
+        self.cpu(3)
+        self.tick()
+        self.tick()
+        self.assertEqual(len(self.told('obj_terms')), 1)
+        self.assertIn('ps eww -o command= -p 502', self.calls.read_text())
+
+    def test_the_owner_message_says_what_why_and_what_to_do(self):
+        self.tim(5)
+        self.cpu(3)
+        self.tick()
+        self.tick()
+        told, = self.told('obj_terms')
+        self.assertRegex(told, '^' + re.escape(
+            f"[machine-watch {HOST}] Tim is typing and this Mac's CPU is saturated (idle 3% on 2 checks a minute "
+            "apart); his keys and clicks break system-wide while it is. Your job is one of the top CPU consumers: "
+            f"pid 600 `{CAPTURE[:80]}` at ") + r'\d+' + re.escape(
+            "% CPU with its children (#1). Stop it now. Then rerun it as `machine-ok-queue run -- <command>` (it "
+            "waits for a free slot and clamps the job's priority) or `offload -- <command>` (it runs on deckbox), "
+            "and cap its parallelism.") + '$')
+        shepherd, = self.told('obj_shep')
+        self.assertRegex(shepherd, '^' + re.escape(
+            f"[machine-watch {HOST}] CPU saturated while Tim is active (idle 3% on 2 checks a minute apart). "
+            "Messaged terms (obj_terms) about pid 600 node at ") + r'\d+' + re.escape(
+            "%. Not messaged: pid 700 Search at ") + r'\d+' + re.escape(
+            "% (Tim's app); pid 502 omp at ") + r'\d+' + re.escape("% (omp runtime of terms).") + '$')
+
+    def test_an_owner_hears_about_the_same_job_once_per_10_minutes(self):
+        self.tim(5)
+        self.cpu(3)
+        for _ in range(3):
+            self.tick()
+        self.assertEqual(len(self.told('obj_terms')), 1)
+        self.assertEqual(len(self.told('obj_shep')), 1, 'nobody new was messaged: the shepherd hears hourly')
+        state = self.state()
+        self.state(owner_alert={k: t - 601 for k, t in state['owner_alert'].items()})
+        self.tick()
+        self.assertEqual(len(self.told('obj_terms')), 2)
+        self.assertEqual(len(self.told('obj_shep')), 2)
+        # Another job of the same owner is not covered by the first one's cooldown.
+        self.table(tile_tree() + [proc(610, 502, 'python3 render.py --workers 16', 12.0)])
+        self.tick()
+        told = self.told('obj_terms')
+        self.assertEqual(len(told), 3)
+        self.assertIn('pid 610 `python3 render.py --workers 16`', told[-1])
+        self.assertNotIn('pid 600', told[-1])
+
+    def test_never_messages_about_tims_apps_system_processes_zmx_brokers_or_an_omp_runtime(self):
+        broker = proc(510, 502, '/Users/me/.bun/bin/omp __omp_worker_daemon_broker')
+        hot = {
+            'kernel_task': [proc(0, 0, 'kernel_task', 9.0, 'root')],
+            'WindowServer': [proc(150, 1, '/System/Library/PrivateFrameworks/SkyLight.framework/Resources/'
+                                          'WindowServer -daemon', 9.0, '_windowserver')],
+            'system daemon': [proc(160, 1, '/usr/libexec/syspolicyd', 9.0, 'root')],
+            "Tim's Chrome": [proc(710, 1, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', 9.0)],
+            'Search': [proc(700, 1, '/Applications/Search.app/Contents/MacOS/Search', 9.0)],
+            'easl': [proc(720, 1, '/Applications/easl.app/Contents/MacOS/easl', 9.0)],
+            'zmx': [proc(500, 1, ZMX, 9.0)],
+            'omp worker broker': [proc(510, 502, broker[4], 9.0)],
+            'a job under the shared broker': [broker, proc(511, 510, 'node dev-server.js', 9.0)],
+            'auth broker': [proc(520, 1, '/Users/me/.bun/bin/omp auth-gateway serve --bind=100.64.0.1:4000', 9.0)],
+            'omp runtime': [proc(502, 501, OMP, 9.0)],
+        }
+        for case, procs in hot.items():
+            with self.subTest(case=case):
+                RealRuns.fresh(self)
+                table = {p[0]: p for p in tile_tree(capture_s=0, chrome_s=0, ffmpeg_s=0)}
+                table.update({p[0]: p for p in procs})
+                # Each inherited the tile's environment, so only the never-act rules keep them from terms.
+                self.table(list(table.values()), env={str(p[0]): f'{p[4]} EASL_TILE_ID=obj_terms' for p in procs})
+                self.tim(5)
+                self.cpu(3)
+                self.tick()
+                self.tick()
+                self.assertEqual(self.told('obj_terms'), [])
+                shepherd, = self.told('obj_shep')
+                self.assertIn('. Messaged no agent. Not messaged: pid %d ' % procs[-1][0], shepherd)
+
+    def test_launchd_ticks_every_minute_and_every_other_tick_is_a_full_run(self):
+        self.tim(600)
+        self.tick()
+        self.assertIn('machine-census', self.called())
+        self.calls.write_text('')
+        self.tick()
+        self.assertEqual(self.called(), ['ioreg'], 'Tim idle and the full run not due: nothing else runs')
+        self.tim(5)
+        self.calls.write_text('')
+        self.tick()
+        self.assertEqual(self.called(), ['ioreg', 'iostat'], 'Tim active: a light check')
+        self.state(full_at=int(time.time()) - 111)
+        self.calls.write_text('')
+        self.tick()
+        self.assertEqual(self.called()[:2], ['ioreg', 'iostat'])
+        self.assertIn('machine-census', self.called())
+        # Saturated while Tim types: the full run waits (up to 5 min), so the minute checks keep their pace.
+        self.cpu(3)
+        self.state(full_at=int(time.time()) - 111)
+        self.calls.write_text('')
+        self.tick()
+        self.assertNotIn('machine-census', self.called())
+        self.state(full_at=int(time.time()) - 301)
+        self.tick()
+        self.assertIn('machine-census', self.called())
+
+    def test_a_job_is_quoted_and_named_without_its_executables_directory(self):
+        # Homebrew's python3 runs as .../Python.framework/.../Python.app/Contents/MacOS/Python: 80 characters of
+        # that path would not tell its owner which job it is.
+        python = ('/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/Resources/'
+                  'Python.app/Contents/MacOS/Python wwc1.py --frames 61')
+        self.table(tile_tree(chrome_s=0, ffmpeg_s=0) + [proc(620, 502, python, 12.0)])
+        self.tim(5)
+        self.cpu(3)
+        self.tick()
+        self.tick()
+        told, = self.told('obj_terms')
+        self.assertIn('pid 620 `Python wwc1.py --frames 61` at ', told)
+        shepherd, = self.told('obj_shep')
+        self.assertRegex(shepherd, r'Messaged terms \(obj_terms\) about pid 620 Python at \d+%\.')
+
+    def test_consumers_shows_the_owner_mapping_and_the_messages_without_sending_them(self):
+        result = self.watch('--consumers')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r'(?m)^#1 +\d+% +pid 600 +node capture\.js .* -> terms \(easl tile obj_terms '
+                                        r'by zmx label\)$')
+        self.assertRegex(result.stdout, r"(?m)^#2 +\d+% +pid 700 +Search +-> not messaged \(Tim's app\)$")
+        self.assertIn('OWNER ALERT -> terms (obj_terms) : [machine-watch ', result.stdout)
+        self.assertIn('ALERT -> shepherd : [machine-watch ', result.stdout)
+        self.assertEqual([c for c in RealRuns.easl_calls(self) if c['argv'][0] == 'agent.prompt'], [])
+        self.assertFalse((self.state_dir / 'machine-watch.state.json').exists())
 
 
 class Patch(MachineWatchCase):

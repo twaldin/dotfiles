@@ -62,7 +62,7 @@ Everything custom around the harnesses (omp extensions, herdr hooks, launchd job
 
 [shepherd/](shepherd/) is the machine shepherd's health glue for twaldin-home and twaldin-work:
 - `machine-ok`: the headroom gate agents run before heavy work.
-- `machine-watch` (launchd, every 2 min): logs machine health and alerts the shepherd. It also checks deckbox's path to home's auth broker and reports deckbox's patch state daily (reboot required, pending updates, required units down: urgent).
+- `machine-watch` (launchd, every minute; the full watch every 2 min): logs machine health and alerts the shepherd. While Tim is typing, a CPU under 15% idle on two checks in a row messages the agents that own the top consumers to stop them and rerun them through `machine-ok-queue` or `offload` (`machine-watch --consumers` previews who they are). It also checks deckbox's path to home's auth broker and reports deckbox's patch state daily (reboot required, pending updates, required units down: urgent).
 - `machine-census` and `fsevents-top`: attribute memory, CPU and file-system churn.
 - `omp-update` (launchd, daily): moves every host to the vetted omp release and restarts idle panes onto it.
 - `quiet-window` and `quiet-check`: book and enforce quiet windows for measured runs.
