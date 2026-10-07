@@ -1068,25 +1068,51 @@ def main_ext_ack(args):
                             "hosts": args.hosts}) + "\n")
 
 
-def drop_model(flags):
+def drop_flags(flags, names):
+    """`flags` without each --name / -x flag in `names` and its value (`--x v` or `--x=v`)."""
     out, skip = [], False
     for x in flags:
         if skip:
             skip = False
-        elif x in ("--model", "-m"):
+        elif x in names:
             skip = True
-        elif not x.startswith("--model="):
+        elif not any(x.startswith(n + "=") for n in names if n.startswith("--")):
             out.append(x)
     return out
+
+
+def session_model(path):
+    """(model, thinking level) the session last recorded (its last model_change and
+    thinking_level_change entries), each None when absent or unreadable. omp writes them at
+    start and on every switch, so they name what the agent runs now, not the default role."""
+    model = thinking = None
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                if '"model_change"' not in line and '"thinking_level_change"' not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("type") == "model_change" and e.get("model"):
+                    model = e["model"]
+                elif e.get("type") == "thinking_level_change" and e.get("thinkingLevel"):
+                    thinking = e["thinkingLevel"]
+    except OSError:
+        pass
+    return model, thinking
 
 
 def main_migrate(args):
     """`omp-update migrate <herdr agent>`: move that pane's omp session into an easl tile of
     the same name on the board for --board, through idle_gate like any restart. /exit the
-    pane's omp, create a terminal tile running `omp <its flags> --resume=<session>` (plus
-    --model), and verify the tile's omp pid, lifecycle and session; then close the empty
-    herdr pane, so the name lives only in easl. If the tile never gets an omp, the tile is
-    deleted and the session resumes in the herdr pane again. Never two omp on one session."""
+    pane's omp, create a terminal tile running `omp <its flags> --resume=<session>` in the
+    pane's own cwd (the board root only when herdr reports none: project discovery must not
+    change), with the model and thinking level the session last recorded (--model overrides;
+    never the default role), and verify the tile's omp pid, lifecycle and session; then close
+    the empty herdr pane, so the name lives only in easl. If the tile never gets an omp, the
+    tile is deleted and the session resumes in the herdr pane again. Never two omp on one session."""
     ez = easl_switch()
     if not ez:
         sys.exit(f"migrate: easl is off ({EASL_SWITCH})")
@@ -1114,12 +1140,17 @@ def main_migrate(args):
     if skip:
         sys.exit(f"migrate: {name}: {skip}" + (f" {busy}" if busy else ""))
     keep, dropped = resume_args(argv)
-    if args.model:
-        keep = drop_model(keep) + ["--model", args.model]
+    model, thinking = session_model(session)
+    model = args.model or model
+    if model:
+        keep = drop_flags(keep, ("--model", "-m")) + ["--model", model]
+    if thinking and not args.model:
+        keep = drop_flags(keep, ("--thinking",)) + ["--thinking", thinking]
     root = os.path.expanduser(args.board)
+    cwd = a.get("foreground_cwd") or a.get("cwd") or root
     command = ["/bin/zsh", "-l", "-c", " ".join(shlex.quote(x) for x in [OMP, *keep, f"--resume={session}"])]
-    res = {"name": name, "pane": pane, "pid": pid, "session": session, "root": root, "command": command,
-           "args_dropped": dropped, "dry_run": dry}
+    res = {"name": name, "pane": pane, "pid": pid, "session": session, "root": root, "cwd": cwd,
+           "model": model, "thinking": thinking, "command": command, "args_dropped": dropped, "dry_run": dry}
 
     def done(action, **kw):
         res.update(action=action, **kw)
@@ -1146,7 +1177,7 @@ def main_migrate(args):
         return done("failed: the pane's omp did not exit after /exit; left alone")
     time.sleep(3)
     out = easl(cli, "object.create", "--json", json.dumps(
-        {"board": res["board"], "type": "terminal", "props": {"name": name, "cwd": root, "command": command}}))
+        {"board": res["board"], "type": "terminal", "props": {"name": name, "cwd": cwd, "command": command}}))
     tile = (out.get("object") or {}).get("id") or out.get("id")
     res["tile"] = tile
     t = None

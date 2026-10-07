@@ -889,7 +889,7 @@ class TileRoll(TileSandbox):
         self.assertFalse(any('obj_lead' in ln for ln in log), log)
 
 
-class DropModel(unittest.TestCase):
+class DropFlags(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = load_omp_update()
@@ -897,9 +897,38 @@ class DropModel(unittest.TestCase):
     def test_every_spelling_of_model_goes_and_the_other_flags_stay_in_order(self):
         for old in (['--model', 'opus'], ['-m', 'opus'], ['--model=opus']):
             with self.subTest(old=old):
-                self.assertEqual(self.mod.drop_model(['--thinking', 'high', *old, '--no-skills']),
+                self.assertEqual(self.mod.drop_flags(['--thinking', 'high', *old, '--no-skills'], ('--model', '-m')),
                                  ['--thinking', 'high', '--no-skills'])
-        self.assertEqual(self.mod.drop_model(['--thinking', 'high']), ['--thinking', 'high'])
+        self.assertEqual(self.mod.drop_flags(['--thinking', 'high'], ('--model', '-m')), ['--thinking', 'high'])
+
+
+class SessionModel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_omp_update()
+
+    def write(self, *entries):
+        fd, path = tempfile.mkstemp(suffix='.jsonl')
+        self.addCleanup(os.unlink, path)
+        with os.fdopen(fd, 'w') as f:
+            for e in entries:
+                f.write((e if isinstance(e, str) else json.dumps(e)) + '\n')
+        return path
+
+    def test_the_last_recorded_model_and_thinking_level_win(self):
+        path = self.write(
+            {'type': 'session', 'cwd': '/tmp'},
+            {'type': 'model_change', 'model': 'anthropic/claude-opus-5-5'},
+            {'type': 'thinking_level_change', 'thinkingLevel': 'xhigh'},
+            {'type': 'message', 'message': {'role': 'user', 'content': 'switch to "model_change" please'}},
+            '{"type": "model_change", truncated',
+            {'type': 'model_change', 'model': 'openai/gpt-6.1-sol'},
+            {'type': 'thinking_level_change', 'thinkingLevel': 'high'})
+        self.assertEqual(self.mod.session_model(path), ('openai/gpt-6.1-sol', 'high'))
+
+    def test_no_records_or_no_file_gives_none(self):
+        self.assertEqual(self.mod.session_model(self.write({'type': 'session'})), (None, None))
+        self.assertEqual(self.mod.session_model('/nonexistent/session.jsonl'), (None, None))
 
 
 class Migrate(TileSandbox):
@@ -1027,6 +1056,31 @@ class Migrate(TileSandbox):
                 self.scene(flags=old + ['--thinking', 'high'])
                 _, res = self.migrate(model='sonnet-5', dry_run=True)
                 self.assertEqual(res['command'], self.command('--thinking', 'high', '--model', 'sonnet-5'))
+
+    def test_the_sessions_own_model_and_thinking_replace_the_panes_flags_never_the_default_role(self):
+        for old in (['--model', 'opus', '--thinking', 'low'], ['-m', 'opus'], []):
+            with self.subTest(old=old):
+                self.scene(flags=old)
+                with open(self.session, 'a') as f:
+                    f.write(json.dumps({'type': 'model_change', 'model': 'anthropic/claude-opus-5-5'}) + '\n')
+                    f.write(json.dumps({'type': 'thinking_level_change', 'thinkingLevel': 'medium'}) + '\n')
+                    f.write(json.dumps({'type': 'model_change', 'model': 'openai/gpt-6.1-sol'}) + '\n')
+                _, res = self.migrate(dry_run=True)
+                self.assertEqual(res['command'], self.command('--model', 'openai/gpt-6.1-sol', '--thinking', 'medium'))
+                self.assertEqual((res['model'], res['thinking']), ('openai/gpt-6.1-sol', 'medium'))
+
+    def test_the_tile_runs_in_the_panes_own_cwd_and_the_board_root_only_without_one(self):
+        cases = [({'foreground_cwd': '/w/astra', 'cwd': '/w/shell'}, '/w/astra'), ({'cwd': '/w/shell'}, '/w/shell'),
+                 ({}, None)]
+        for fields, want in cases:
+            with self.subTest(fields=fields):
+                self.scene()
+                self.world.agent.update(fields)
+                self.easl.created.clear()
+                code, res = self.migrate()
+                self.assertIsNone(code)
+                self.assertEqual(self.easl.created[-1]['props']['cwd'], want or self.board_root)
+                self.assertEqual(res['root'], self.board_root)
 
     # -- the move
 
