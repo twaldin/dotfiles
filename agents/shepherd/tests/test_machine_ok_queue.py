@@ -279,34 +279,78 @@ class Holds(QueueCase):
         self.assertIn('queue paused by quiet-window hold', err)
         self.assertEqual(self.order(), ['X'])
 
-    def assert_runs_at_once(self, rows, env=None):
+    def assert_runs_at_once(self, rows, env=None, lane='owner'):
         self.holds(rows)
         code, _, err = self.finish(self.start(*self.recorder('X'), env=env), timeout=10)
         self.assertEqual(code, 0, err)
         self.assertNotIn('paused', err)
+        self.assertEqual([e for e in self.events() if e['event'] == 'admit'][-1]['lane'], lane)
 
-    def test_a_running_hold_pauses_admission(self):
-        self.assert_paused_then_runs([{'start': minute(-5), 'end': minute(20), 'owner': 'sky-beta', 'label': 'r6'}])
+    FULL = {'quiet': 'full', 'reason': 'latency bounds'}
 
-    def test_a_running_booking_pauses_admission_too(self):
+    def test_a_running_full_hold_pauses_admission(self):
+        self.assert_paused_then_runs([{'start': minute(-5), 'end': minute(20), 'owner': 'sky-beta', 'label': 'r6',
+                                       **self.FULL}])
+
+    def test_a_running_full_booking_pauses_admission_too(self):
         self.assert_paused_then_runs([{'start': minute(-5), 'end': minute(20), 'owner': 'perf', 'label': 'p',
-                                       'quiet': 'heavy'}], name='quiet-windows.json')
+                                       **self.FULL}], name='quiet-windows.json')
 
-    def test_a_heavy_hold_pauses_10_minutes_ahead_a_full_one_30(self):
-        self.assert_paused_then_runs([{'start': minute(8), 'end': minute(40), 'owner': 'a', 'label': 'heavy soon'}])
+    def test_a_full_hold_pauses_30_minutes_ahead_a_heavy_one_admits_10_minutes_ahead_in_its_lane(self):
         self.assert_paused_then_runs([{'start': minute(25), 'end': minute(60), 'owner': 'b', 'label': 'full',
-                                       'quiet': 'full', 'reason': 'latency'}])
+                                       **self.FULL}])
+        self.assert_runs_at_once([{'start': minute(8), 'end': minute(40), 'owner': 'a', 'label': 'heavy soon'}],
+                                 lane='heavy-hold')
+
+    def test_a_heavy_only_hold_gives_foreign_tickets_one_background_slot_and_the_owner_its_normal_lane(self):
+        # bench ruling heavy-only-holds-queue-clamp-ruling-1: a heavy-only hold no longer pauses the queue.
+        self.slots(3)
+        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure', 'quiet': 'heavy'}])
+        f1 = self.start(*self.blocker('F1'))
+        self.until(lambda: (self.work / 'F1.pid').exists(), what='F1 running')
+        f2 = self.start(*self.recorder('F2'))
+        self.until(lambda: f2.pid in self.ticket_pids(), what='F2 ticket')
+        time.sleep(0.4)
+        self.assertEqual(self.order(), [], 'one foreign slot during the hold, though two slots are free')
+        owner = self.start(*self.recorder('O'), flags=['--agent', 'perf'])
+        code, _, err = self.finish(owner)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.order(), ['O'], 'the owner passes the waiting foreign ticket')
+        self.assertIsNone(f2.poll())
+        (self.work / 'F1.go').touch()
+        for p in (f1, f2):
+            self.assertEqual(self.finish(p)[0], 0)
+        self.assertEqual(self.order(), ['O', 'F1', 'F2'])
+        admits = sorted((e for e in self.events() if e['event'] == 'admit'), key=lambda e: e['ticket'])  # F1, F2, O
+        lanes = [(e['lane'], e['clamp']) for e in admits]
+        background = 'taskpolicy -b, nice 10 (heavy hold)' if platform.system() == 'Darwin' else None
+        normal = 'taskpolicy -c utility, nice 10' if platform.system() == 'Darwin' else None
+        self.assertEqual(lanes, [('heavy-hold', background), ('heavy-hold', background), ('owner', normal)])
+        self.assertEqual(set((self.root / 'calls').read_text().splitlines()), {'--memory'})
+
+    def test_a_foreign_ticket_in_a_heavy_only_hold_waits_for_the_memory_gate(self):
+        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure'}])
+        (self.root / 'exit').write_text('1')
+        p = self.start(*self.recorder('F'))
+        self.until(lambda: (self.root / 'calls').exists() and len((self.root / 'calls').read_text().split('\n')) > 2,
+                   what='two gate samples')
+        self.assertEqual(self.order(), [])
+        (self.root / 'exit').write_text('0')
+        code, _, err = self.finish(p)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(set((self.root / 'calls').read_text().splitlines()), {'--memory'})
+        self.assertEqual([e for e in self.events() if e['event'] == 'admit'][-1]['lane'], 'heavy-hold')
 
     def test_holds_further_ahead_or_past_do_not_pause(self):
         self.assert_runs_at_once([
             {'start': minute(25), 'end': minute(60), 'owner': 'a', 'label': 'heavy in 25 min', 'quiet': 'heavy'},
             {'start': minute(45), 'end': minute(60), 'owner': 'b', 'label': 'full in 45 min', 'quiet': 'full'},
             {'start': minute(-60), 'end': minute(-1), 'owner': 'c', 'label': 'over'},
-        ])
+        ], lane='normal')
 
     def test_the_hold_owner_is_not_held(self):
-        self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': 'obj_OWNER', 'label': 'mine'}],
-                                 env={'EASL_TILE_ID': 'obj_OWNER'})
+        self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': 'obj_OWNER', 'label': 'mine',
+                                   **self.FULL}], env={'EASL_TILE_ID': 'obj_OWNER'})
 
     def easl_tiles(self, *tiles):
         """easl agent.list answers with these {tile, name, address} rows."""
@@ -318,15 +362,15 @@ class Holds(QueueCase):
         self.easl_tiles({'tile': 'obj_OTHER', 'name': 'other', 'address': 'other@b'}, self.PERF)
         for owner in ('perf', 'perf@bench'):
             with self.subTest(owner=owner):
-                self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': owner, 'label': 'mine'}],
-                                         env={'EASL_TILE_ID': 'obj_PERF'})
+                self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': owner, 'label': 'mine',
+                                           **self.FULL}], env={'EASL_TILE_ID': 'obj_PERF'})
         admit = [e for e in self.events() if e['event'] == 'admit'][-1]
         self.assertEqual(admit['agent'], 'perf')
 
-    def test_another_tiles_hold_still_pauses_a_tile(self):
+    def test_another_tiles_full_hold_still_pauses_a_tile(self):
         self.easl_tiles(self.PERF, {'tile': 'obj_SKY', 'name': 'sky-beta', 'address': 'sky-beta@sky'})
-        self.assert_paused_then_runs([{'start': minute(-5), 'end': minute(20), 'owner': 'sky-beta', 'label': 'r6'}],
-                                     env={'EASL_TILE_ID': 'obj_PERF'})
+        self.assert_paused_then_runs([{'start': minute(-5), 'end': minute(20), 'owner': 'sky-beta', 'label': 'r6',
+                                       **self.FULL}], env={'EASL_TILE_ID': 'obj_PERF'})
 
     def test_an_unreachable_easl_neither_hangs_nor_loses_the_tile_id(self):
         self.easl_tiles(self.PERF)
@@ -343,7 +387,7 @@ class Holds(QueueCase):
         for i, name in enumerate(('F1', 'F2', 'F3'), start=2):
             foreign.append(self.start(*self.recorder(name)))
             self.queued(foreign[-1], i)
-        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure'}])
+        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure', **self.FULL}])
         (self.work / 'H.go').touch()
         self.assertEqual(self.finish(holder)[0], 0)
         owners = []
@@ -367,11 +411,14 @@ class Holds(QueueCase):
     def test_a_running_job_keeps_running_when_a_hold_begins(self):
         p = self.start(*self.blocker('H'))
         self.until(lambda: (self.work / 'H.pid').exists(), what='running')
-        self.holds([{'start': minute(-1), 'end': minute(20), 'owner': 'x', 'label': 'late'}])
+        self.holds([{'start': minute(-1), 'end': minute(20), 'owner': 'x', 'label': 'late', **self.FULL},
+                    {'start': minute(-1), 'end': minute(20), 'owner': 'y', 'label': 'heavy'}])
         time.sleep(0.2)
         self.assertIsNone(p.poll())
         listing = subprocess.run([sys.executable, str(QUEUE), 'status'], env=self.env, capture_output=True, text=True)
         self.assertIn("paused (no new admissions except its owner's) by quiet-window hold x", listing.stdout)
+        self.assertIn("heavy-only hold: other agents' steps get 1 slot at background priority, by quiet-window hold y",
+                      listing.stdout)
         (self.work / 'H.go').touch()
         self.assertEqual(self.finish(p)[0], 0)
 
@@ -395,7 +442,7 @@ class Gate(QueueCase):
         waiters = [self.start(*self.recorder(n)) for n in ('A', 'B')]
         self.queued(waiters[-1], 3)
         time.sleep(0.4)
-        self.assertEqual((self.root / 'calls').read_text().splitlines(), [''], 'only the holder sampled')
+        self.assertEqual((self.root / 'calls').read_text().splitlines(), ['--memory'], 'only the holder sampled')
         (self.work / 'H.go').touch()
         for p in [holder, *waiters]:
             self.finish(p)
@@ -497,6 +544,60 @@ class Clamp(QueueCase):
                 self.assertEqual(self.finish(p)[0], 0)
                 self.assertEqual(nice, '0')
                 self.assertIsNone([e for e in self.events() if e['event'] == 'admit'][-1]['clamp'])
+
+
+class Log(QueueCase):
+    """`log --from --to`: the queue.jsonl excerpt bench attaches to an armed run's record."""
+
+    def write_log(self, rows):
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'queue.jsonl').write_text(''.join(json.dumps({'host': 'testhost', **r}) + '\n' for r in rows))
+
+    def excerpt(self, *argv):
+        r = subprocess.run([sys.executable, str(QUEUE), 'log', *argv], env=self.env, capture_output=True, text=True)
+        return r.returncode, [json.loads(line) for line in r.stdout.splitlines()], r.stderr
+
+    def test_jobs_overlapping_the_window_and_cancels_inside_it(self):
+        def job(ticket, admit, release, agent='canvas'):
+            rows = [{'ts': admit, 'event': 'admit', 'ticket': ticket, 'slot': 1, 'agent': agent, 'wait_s': 12.0,
+                     'command': ['go', 'test', f'./pkg{ticket}/...'], 'clamp': 'taskpolicy -b, nice 10 (heavy hold)',
+                     'lane': 'heavy-hold', 'hold': '2026-10-07T21:00Z-roblox-hold'}]
+            if release:
+                rows.append({'ts': release, 'event': 'release', 'ticket': ticket, 'run_s': 33.0, 'exit': 0})
+            return rows
+        self.write_log([
+            *job(1, '2026-10-07T20:00:00Z', '2026-10-07T20:30:00Z'),   # before the window
+            *job(2, '2026-10-07T20:50:00Z', '2026-10-07T21:05:00Z'),   # runs into it
+            {'ts': '2026-10-07T21:20:00Z', 'event': 'cancel', 'ticket': 4, 'agent': 'terms', 'command': ['pytest'],
+             'wait_s': 60},
+            *job(3, '2026-10-07T21:30:00Z', None),                      # still running
+            *job(5, '2026-10-07T21:50:00Z', '2026-10-07T21:55:00Z'),   # after it
+            {'ts': '2026-10-07T22:00:00Z', 'event': 'cancel', 'ticket': 6, 'command': ['x'], 'wait_s': 1},
+            {'ts': '2026-10-07T21:10:00Z', 'event': 'long-wait', 'ticket': 7},
+        ])
+        code, rows, err = self.excerpt('--from', '2026-10-07T21:00Z', '--to', '2026-10-07T21:45Z')
+        self.assertEqual(code, 0, err)
+        self.assertEqual([(r['event'], r['ticket']) for r in rows], [('job', 2), ('job', 3), ('cancel', 4)])
+        self.assertEqual(rows[0], {'event': 'job', 'host': 'testhost', 'ticket': 2, 'agent': 'canvas',
+                                   'cmd': 'go test ./pkg2/...', 'slot': 1, 'clamp': 'taskpolicy -b, nice 10 (heavy hold)',
+                                   'lane': 'heavy-hold', 'hold': '2026-10-07T21:00Z-roblox-hold',
+                                   'admitted': '2026-10-07T20:50:00Z', 'released': '2026-10-07T21:05:00Z',
+                                   'wait_s': 12.0, 'run_s': 33.0, 'exit': 0})
+        self.assertEqual((rows[1]['released'], rows[1]['run_s']), (None, None))
+        self.assertEqual((rows[2]['agent'], rows[2]['cmd'], rows[2]['at']), ('terms', 'pytest', '2026-10-07T21:20:00Z'))
+
+    def test_a_real_run_shows_up_and_bad_windows_are_usage_errors(self):
+        t0 = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)
+        self.finish(self.start('sh', '-c', 'exit 3'))
+        t1 = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=1)
+        code, rows, err = self.excerpt('--from', t0.strftime('%Y-%m-%dT%H:%M:%SZ'), '--to', t1.strftime('%Y-%m-%dT%H:%MZ'))
+        self.assertEqual(code, 0, err)
+        (row,) = rows
+        self.assertEqual((row['cmd'], row['exit'], row['lane'], row['slot']), ("sh -c 'exit 3'", 3, 'normal', 1))
+        for argv in ([], ['--from', '2026-10-07T21:00Z'], ['--from', 'yesterday', '--to', '2026-10-07T21:00Z'],
+                     ['--to', '2026-10-07T21:00Z', '--from', '2026-10-07T20:00Z', '--x', 'y']):
+            with self.subTest(argv=argv):
+                self.assertEqual(self.excerpt(*argv)[0], 2)
 
 
 class Signals(QueueCase):
@@ -608,7 +709,8 @@ class DefaultGate(QueueCase):
     def test_help_documents_run_and_status(self):
         r = subprocess.run([sys.executable, str(QUEUE), '--help'], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
-        self.assertIn('machine-ok-queue run [--memory] [--gpu]', r.stdout)
+        self.assertIn('machine-ok-queue run [--gpu] [--cpu-gate] [--p-cores]', r.stdout)
+        self.assertIn('machine-ok-queue log --from', r.stdout)
         self.assertIn('machine-ok-queue status', r.stdout)
 
 
@@ -631,16 +733,17 @@ class ThroughTheRealGate(QueueCase):
         return subprocess.run([sys.executable, str(QUEUE), 'run', *argv], env=self.env, cwd=self.work,
                               capture_output=True, text=True, timeout=60)
 
-    def test_the_flags_reach_the_real_gate_and_the_command_runs(self):
+    def test_the_memory_gate_is_the_default_and_cpu_gate_restores_the_full_gate(self):
         self.assertTrue(GATE_SCRIPT.exists())
-        r = self.queue_run('--memory', '--', '/bin/echo', 'hi')
+        r = self.queue_run('--', '/bin/echo', 'hi')
         self.assertEqual((r.returncode, r.stdout), (0, 'hi\n'), r.stderr)
         admit = [e for e in self.events() if e['event'] == 'admit'][0]
         self.assertEqual(admit['gate'], 'free=60% pageins=0/s swap=0/s compressed=25%')  # no idle=: --memory
-        r = self.queue_run('--', 'sh', '-c', 'exit 5')
+        r = self.queue_run('--cpu-gate', '--', 'sh', '-c', 'exit 5')
         self.assertEqual(r.returncode, 5, r.stderr)
         admit = [e for e in self.events() if e['event'] == 'admit'][-1]
         self.assertTrue(admit['gate'].startswith('idle=66% '), admit)
+        self.assertEqual(self.queue_run('--cpu-gate', '--memory', '--', 'true').returncode, 2)
 
     def test_a_closed_real_gate_holds_the_command(self):
         p = subprocess.Popen([sys.executable, str(QUEUE), 'run', '--memory', '--', 'sh', '-c', 'echo ran >> order'],

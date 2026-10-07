@@ -389,7 +389,7 @@ class ExitAndGit(OffloadCase):
                 r = self.offload(*argv)
                 self.assertEqual(r.returncode, 2)
                 self.assertIn('NEEDS GIT METADATA, AND OFFLOAD NEVER SYNCS .git/', r.stderr)
-                self.assertIn('machine-ok-queue run --memory --', r.stderr)
+                self.assertIn('machine-ok-queue run -- ', r.stderr)
         self.assertEqual(self.records('rsync.jsonl') + self.records('ssh.jsonl'), [])
 
     def test_words_that_merely_contain_git_are_not_refused(self):
@@ -401,7 +401,7 @@ class ExitAndGit(OffloadCase):
             'FAKE_SSH_EXIT': '128', 'FAKE_SSH_STDERR': 'fatal: not a git repository (or any of the parent directories): .git\n'})
         self.assertEqual(r.returncode, 128)
         self.assertIn('NEEDS GIT METADATA', r.stderr)
-        self.assertIn('machine-ok-queue run --memory -- bun run stamp', r.stderr)
+        self.assertIn('machine-ok-queue run -- bun run stamp', r.stderr)
         self.assertTrue(self.runs()[-1]['git_needed'])
 
     def test_an_ssh_killed_by_a_signal_exits_255(self):

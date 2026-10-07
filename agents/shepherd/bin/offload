@@ -24,7 +24,7 @@ this worktree, through the same queue and the same capped unit, with the same re
 
 offload never syncs .git/, and there is no git sync mode. A step whose text mentions `git ` is refused before
 anything is sent, and a run whose output says "not a git repository" ends with a loud note: such steps run on
-home behind the queue (`machine-ok-queue run --memory -- <command>`).
+home behind the queue (`machine-ok-queue run -- <command>`).
 --clean deletes this worktree's remote directory by its exact path (do it when the worktree goes).
 Exit status: the command's; 2 for usage errors and refusals; 255 when the sync or ssh fails.
 """
@@ -57,7 +57,7 @@ GIT_NOTE = """offload: =========================================================
 offload: THIS STEP NEEDS GIT METADATA, AND OFFLOAD NEVER SYNCS .git/ (there is no git sync mode).
 offload: {why}
 offload: Run it on home behind the queue instead:
-offload:     machine-ok-queue run --memory -- {command}
+offload:     machine-ok-queue run -- {command}
 offload: ======================================================================"""
 
 
