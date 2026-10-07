@@ -1,0 +1,7 @@
+# Every zsh reads this, including the non-interactive `zsh -c` that easl tiles, agent
+# restarts, launchd jobs and ssh commands run. zshrc reaches interactive shells only, so
+# without this `omp` (in ~/.bun/bin) is "command not found" there (2026-10-07).
+# Interactive shells already get both from zshrc.
+if [[ ! -o interactive ]]; then
+  path=("$HOME/.bun/bin" "$HOME/.local/bin" $path)
+fi

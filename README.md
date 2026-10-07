@@ -36,6 +36,7 @@ no install script — symlink what you want into place:
 ```sh
 ln -s "$PWD/nvim"                        ~/.config/nvim
 ln -s "$PWD/zsh/zshrc"                   ~/.zshrc
+ln -s "$PWD/zsh/zshenv"                  ~/.zshenv
 ln -s "$PWD/zsh/pure-modified.omp.json"  ~/pure-modified.omp.json
 ln -s "$PWD/tmux/.tmux.conf"             ~/.tmux.conf
 ln -s "$PWD/terminal/ghostty/config"     ~/.config/ghostty/config
