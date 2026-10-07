@@ -7,7 +7,8 @@
 Only `offload` calls it: over `ssh -T` with --dir offload/<name> (the synced copy under ~), or, when offload runs
 on deckbox itself, directly with --dir set to the worktree's absolute path (the step runs in place). Steps:
 - Queue: one ticket in deckbox's heavy-work queue (machine-ok-queue beside this file, --no-gate: Linux has no
-  machine-ok; deckbox has 3 slots), so offloaded steps take turns like home's.
+  machine-ok; deckbox's slot count is in its ~/.config/machine-shepherd/slots.json, 8 since 2026-10-07), so offloaded
+  steps take turns like home's.
 - Unit: `systemd-run --user --wait --pipe --collect --quiet --expand-environment=no` in ~/<dir>/<SUB> with
   Slice=offload.slice, CPUQuota=N*100%, MemoryMax=SIZE and CPUAffinity = the system agents.slice's AllowedCPUs.
   A --user unit cannot join the system agents.slice: `-p Slice=agents.slice` under --user names a user slice
