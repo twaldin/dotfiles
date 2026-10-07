@@ -522,8 +522,10 @@ class Clamp(QueueCase):
         self.assertGreater(grandchild['utility'], 0, grandchild)
         unclamped = sum(grandchild[q] for q in ('default', 'legacy', 'user_initiated', 'user_interactive'))
         self.assertEqual(unclamped, 0, grandchild)
+        # The child's pid also spent the fork-to-taskpolicy instant at the queue's own QoS (default/legacy, about
+        # 1 ms; 21:24Z run), so only the grandchild, forked after the clamp, must be pure utility.
         self.assertGreater(child['utility'], 0, child)
-        self.assertEqual(child['legacy'] + child['user_initiated'] + child['user_interactive'], 0, child)
+        self.assertEqual(child['user_initiated'] + child['user_interactive'], 0, child)
         self.assertIn('clamp: taskpolicy -c utility, nice 10', err)
         admit = [e for e in self.events() if e['event'] == 'admit'][-1]
         self.assertEqual(admit['clamp'], 'taskpolicy -c utility, nice 10')
@@ -543,6 +545,17 @@ class Clamp(QueueCase):
         self.assertIn('[clamp: none: --p-cores opt-out]', out)
         (self.work / 'H.go').touch()
         self.finish(holder)
+
+    @unittest.skipUnless(platform.system() == 'Darwin', 'the clamp is macOS only')
+    def test_a_foreign_step_in_a_heavy_only_hold_runs_at_background_qos_and_nice_10_even_with_p_cores(self):
+        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure'}])
+        nice, (child, grandchild), err = self.family(flags=['--p-cores'])
+        self.assertEqual(nice, ['10', '10'])
+        self.assertGreater(grandchild['background'], 0, grandchild)
+        self.assertEqual(sum(v for q, v in grandchild.items() if q not in ('background', 'maintenance')), 0, grandchild)
+        self.assertEqual(child['utility'] + child['user_initiated'] + child['user_interactive'], 0, child)
+        admit = [e for e in self.events() if e['event'] == 'admit'][-1]
+        self.assertEqual((admit['lane'], admit['clamp']), ('heavy-hold', 'taskpolicy -b, nice 10 (heavy hold)'))
 
     @unittest.skipIf(platform.system() == 'Darwin', 'Linux runs commands as they are')
     def test_linux_runs_unclamped_and_ignores_p_cores(self):
