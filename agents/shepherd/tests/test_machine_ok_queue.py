@@ -204,6 +204,22 @@ class Fifo(QueueCase):
             self.assertEqual(self.finish(p)[0], 0)
         self.assertEqual(self.order(), ['H', 'W1', 'W2', 'W3'])
 
+    def test_a_waiter_sees_a_slot_count_raised_while_it_waits(self):
+        # 2026-10-07 20:47Z: home went to 6 slots, but 13 waiters had read 2 at start and kept trying slots 1-2.
+        holder = self.start(*self.blocker('H'))
+        self.until(lambda: (self.work / 'H.pid').exists(), what='holder running')
+        waiter = self.start(*self.recorder('W'))
+        self.until(lambda: waiter.pid in self.ticket_pids(), what='waiter ticket')
+        time.sleep(0.3)
+        self.assertEqual(self.order(), [])
+        self.slots(2)
+        code, _, err = self.finish(waiter, timeout=10)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.order(), ['W'])
+        self.assertIsNone(holder.poll(), 'admitted beside the holder, not after it')
+        (self.work / 'H.go').touch()
+        self.finish(holder)
+
     def test_two_slots_run_two_at_once_and_the_third_waits(self):
         self.slots(2)
         a, b = self.start(*self.blocker('A')), self.start(*self.blocker('B'))

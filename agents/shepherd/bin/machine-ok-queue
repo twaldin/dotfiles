@@ -389,7 +389,6 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
         os.ftruncate(tfd, 0)
         os.write(tfd, json.dumps(row).encode())
 
-    slots = slot_count()
     slot = sfd = None
     said = None
     long_logged = False
@@ -397,6 +396,7 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
     sample = None
     try:
         while True:
+            slots = slot_count()  # every pass: a slots.json change reaches tickets already waiting
             with Lock():
                 live = tickets()
                 running = held_slots(live)
