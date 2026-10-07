@@ -18,15 +18,16 @@ Policy (Tim, 2026-10-05, via the meta pane):
   background jobs as idle and /exit would kill them), text is waiting in its editor,
   or the pane runs this job. The restart is verified: same session file, new pid, and
   the memory before/after is logged.
-- Seats and front doors (config report_only: `lindy-seat`, and every omp outside herdr
-  such as the work Lindy seat): the daily run only reports them.
+- Seats and front doors (config report_only: `lindy-seat`; opt_in overrides it), and every
+  omp outside herdr and easl tiles: the daily run only reports them.
 - launchd omp services (home: auth broker + gateway) restart through launchctl
   kickstart when their omp is older than the installed one.
 - easl tiles (home, behind ~/.config/machine-shepherd/easl.json {"enabled": true, "cli":
-  ".../bin/easl"}; off or missing = herdr panes only): omp agents in easl terminal tiles
-  get the same triggers and the same idle_gate, plus two tile rules: a lifecycle easl only
-  restored after an app restart is not trusted, and a `done` Tim hasn't seen is left
-  alone (a restart would clear his needs-you marker). A tile restarts through
+  ".../bin/easl"}, off or missing = herdr panes only; a remote host when its config names
+  its "easl" CLI, e.g. work's Lindy board, only reported while easl can't be reached): omp
+  agents in easl terminal tiles get the same triggers and the same idle_gate, plus two tile
+  rules: a lifecycle easl only restored after an app restart is not trusted, and a `done`
+  Tim hasn't seen is left alone (a restart would clear his needs-you marker). A tile restarts through
   `easl agent.restart --mode resume` (same tile, name, model, thinking and session).
   `omp-update migrate <name>` moves a herdr pane's session into a tile of that name.
 
@@ -72,9 +73,11 @@ MAC = platform.system() == "Darwin"
 DEFAULT_CONFIG = {
     "hosts": {
         "deckbox": {"ssh": "tim@deckbox", "python": "python3"},
-        # work's herdr is only a client of home's server; its omp sessions (the Lindy seat)
-        # are reported, never restarted.
-        "work": {"ssh": "twaldin-work", "python": "/usr/bin/python3", "manage_panes": False},
+        # work's herdr is only a client of home's server, so its panes are never managed. Its omp
+        # sessions in easl tiles (the Lindy board) pass the same tile gates as home's: "easl" names
+        # the CLI on that machine. When it can't be reached they are only reported, as before.
+        "work": {"ssh": "twaldin-work", "python": "/usr/bin/python3", "manage_panes": False,
+                 "easl": "/Applications/easl.app/Contents/Resources/bin/easl"},
         # Its launchd omp services are restarted when they run an older binary (deckbox omp
         # gets its credentials from this broker; Tim 10-05: work keeps its own local store).
         "home": {"ssh": None, "quiet_book": "~/.config/machine-shepherd/quiet-windows.json",
@@ -390,6 +393,14 @@ def easl_switch():
     return s if isinstance(s, dict) and s.get("enabled") is True and s.get("cli") else None
 
 
+def host_easl(hc):
+    """The easl tile backend for a host, or None: home's switch file; a remote host's config
+    `easl`, its CLI's path on that machine (the host pass runs there)."""
+    if not hc.get("ssh"):
+        return easl_switch()
+    return {"enabled": True, "cli": hc["easl"]} if hc.get("easl") else None
+
+
 def easl(cli, *args, timeout=60):
     """Run the easl CLI (a bun launcher; ENV puts ~/.bun/bin first): its JSON, or {"error"}."""
     try:
@@ -700,7 +711,7 @@ def host_main(params):
     if params.get("manage_panes", True) and os.path.exists(HERDR):
         agents = herdr("agent", "list").get("result", {}).get("agents", [])
     tiles = []
-    if params.get("easl") and params.get("manage_panes", True):
+    if params.get("easl"):  # manage_panes is herdr's: a host can manage tiles and not panes
         tiles, err = tile_agents(params["easl"]["cli"])
         if err:
             res["errors"].append(f"easl agent.list: {err[:200]}")
@@ -999,7 +1010,7 @@ def main_roll(args):
                 r = run_host(name, hc, {"host": name, "target": "0", "dry_run": args.dry_run, "policy": policy,
                                         "blocked": blocked, "roll": True,
                                         "manage_panes": hc.get("manage_panes", True),
-                                        "easl": easl_switch() if name == "home" else None})
+                                        "easl": host_easl(hc)})
                 left[name] = []
                 for p in r["panes"]:
                     act = p.get("action", "")
@@ -1225,7 +1236,7 @@ def main_run(args):
                 blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"])
         params = {"host": name, "target": tinfo["target"], "dry_run": args.dry_run, "policy": policy,
                   "only_pane": args.only_pane, "blocked": blocked, "manage_panes": hc.get("manage_panes", True),
-                  "services": hc.get("services", []), "easl": easl_switch() if name == "home" else None}
+                  "services": hc.get("services", []), "easl": host_easl(hc)}
         note(f"{name}: running")
         results.append(run_host(name, hc, params))
     ended = utcnow()

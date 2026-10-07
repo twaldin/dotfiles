@@ -662,6 +662,48 @@ class EaslSwitch(TileSandbox):
         self.assertEqual(len(world.agent_starts), 1)
 
 
+class RemoteHostTiles(TileSandbox):
+    """A remote host (work) names its easl CLI in config: its tiles pass the tile gates although its herdr panes
+    are never managed; while easl can't be reached, a tile's omp is only reported."""
+
+    def remote(self):
+        params = {'host': 'work', 'dry_run': False, 'target': '1.2.3', 'blocked': None,
+                  'policy': self.mod.load_config(), 'manage_panes': False, 'services': [],
+                  'easl': self.mod.host_easl({'ssh': 'twaldin-work', 'easl': self.easl.cli})}
+        return self.run_host_main(params)
+
+    def test_host_easl_is_homes_switch_or_a_remote_hosts_configured_cli(self):
+        self.assertEqual(self.mod.host_easl({'ssh': None}), {'enabled': True, 'cli': self.easl.cli})
+        self.set_switch(None)
+        self.assertIsNone(self.mod.host_easl({'ssh': None, 'easl': '/x/easl'}))  # home follows its switch only
+        self.assertEqual(self.mod.host_easl({'ssh': 'twaldin-work', 'easl': '/x/easl'}),
+                         {'enabled': True, 'cli': '/x/easl'})
+        self.assertIsNone(self.mod.host_easl({'ssh': 'tim@deckbox'}))
+
+    def test_a_due_tile_is_restarted_and_the_hosts_herdr_panes_are_never_asked_about(self):
+        world = self.world
+        world.place_agent('worker', 'w1:p5', session_mb=150)
+        world.place_tile(session_mb=150)
+        res = self.remote()
+        self.assertEqual({p['pane']: p['action'] for p in res['panes']}, {'obj_lead': 'restarted'})
+        self.assertEqual(self.calls('agent.restart'), [self.RESTART])
+        self.assertEqual((world.herdr_calls, world.agent_starts), ([], []))
+
+    def test_a_tile_easl_reports_no_draft_for_is_left_alone(self):
+        self.world.place_tile(draft=MISSING)
+        self.assertEqual(self.row(self.remote())['action'], 'skip: draft unknown (easl reports none)')
+        self.assertEqual(self.mutations(), [])
+
+    def test_with_easl_unreachable_the_tiles_omp_is_only_reported(self):
+        self.world.place_tile(session_mb=150)
+        self.easl.fail['agent.list'] = (1, '', 'easl: cannot reach the app')
+        res = self.remote()
+        self.assertEqual((res['panes'], res['errors']), ([], ['easl agent.list: easl: cannot reach the app']))
+        (seat,) = [u for u in res['unmanaged'] if u['pid'] == self.world.tile_pid]
+        self.assertEqual(seat['action'], 'report only (outside herdr)')
+        self.assertEqual(self.mutations(), [])
+
+
 class TileRestart(TileSandbox):
     def test_an_idle_or_seen_done_tile_over_the_session_limit_is_restarted_once_and_verified(self):
         for state in ('idle', 'done'):
