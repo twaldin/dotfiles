@@ -61,6 +61,9 @@ AGENT_MSG = r'''#!/usr/bin/env python3
 import json, os, sys
 with open(os.path.join(os.environ['FAKE_DIR'], 'agent-msg.jsonl'), 'a') as f:
     f.write(json.dumps(sys.argv[1:]) + '\n')
+log = os.path.join(os.environ['HOME'], '.local/state/deckbox-cpus/log.jsonl')
+with open(os.path.join(os.environ['FAKE_DIR'], 'log-seen.jsonl'), 'a') as f:
+    f.write(json.dumps([json.loads(l) for l in open(log)] if os.path.exists(log) else []) + '\n')
 if sys.argv[1] in os.environ.get('FAKE_MSG_FAIL', '').split(','):
     sys.exit(75)
 print('agent-msg: queued for ' + sys.argv[1])
@@ -144,9 +147,9 @@ class CpusCase(unittest.TestCase):
 class Take(CpusCase):
     def test_take_shrinks_agents_slice_caps_it_starts_the_timer_messages_and_prints_one_json_line(self):
         t0 = dt.datetime.now(dt.timezone.utc)
-        code, row = self.cpus('take', 'sky', '6-11,18-23', '--for', '60')
+        code, row = self.cpus('take', 'smoke', '6-11,18-23', '--for', '60')
         self.assertEqual(code, 0, row)
-        self.assertEqual((row['ok'], row['owner'], row['cpus']), (True, 'sky', '6-11,18-23'))
+        self.assertEqual((row['ok'], row['owner'], row['cpus'], row['arm']), (True, 'smoke', '6-11,18-23', False))
         expires = dt.datetime.strptime(row['expiresAtUtc'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)
         self.assertAlmostEqual((expires - t0).total_seconds(), 3600, delta=30)
         self.assertEqual((row['governor'], row['epp']), ('powersave', 'performance'))
@@ -157,40 +160,41 @@ class Take(CpusCase):
                                                   'CPUQuota=300%']])
         timer = self.records('systemd-run.jsonl')
         self.assertEqual(len(timer), 1)
-        self.assertRegex(timer[0][1], r'^--unit=deckbox-cpus-give-sky-\d+$')
+        self.assertRegex(timer[0][1], r'^--unit=deckbox-cpus-give-smoke-\d+$')
         self.assertEqual(timer[0][2], f"--on-calendar={expires.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        self.assertEqual(timer[0][-4:], [str(TOOL), 'give', 'sky', '--expired'])
+        self.assertEqual(timer[0][-4:], [str(TOOL), 'give', 'smoke', '--expired'])
         self.assertEqual(row['timer'], timer[0][1][len('--unit='):] + '.timer')
         self.assertEqual([m['to'] for m in row['messages']], ['hone@twaldin-home', 'hutter-v2@deckbox'])
         self.assertEqual([m['exit'] for m in row['messages']], [0, 0])
         sent = self.records('agent-msg.jsonl')
         self.assertEqual([s[0] for s in sent], ['hone@twaldin-home', 'hutter-v2@deckbox'])
-        self.assertIn('sky took deckbox CPUs 6-11,18-23 until', sent[0][1])
+        self.assertIn(f'smoke took deckbox CPUs 6-11,18-23 at {row["takenAtUtc"]} until {row["expiresAtUtc"]}', sent[0][1])
+        self.assertIn('owner smoke: a reservation-only tool test, nothing runs on these CPUs; not an ARM', sent[0][1])
         self.assertEqual(sent[0][2:], ['--from', 'deckbox-cpus'])
-        self.assertEqual(self.holds()['sky']['cpus'], [6, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23])
+        self.assertEqual(self.holds()['smoke']['cpus'], [6, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23])
         self.assertEqual(row['busyLimitPct'], 20)
         self.assertEqual(self.arm_windows(), [])
 
     def test_until_takes_an_iso_utc_time(self):
         until = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%MZ')
-        code, row = self.cpus('take', 'sky', '12', '--until', until)
+        code, row = self.cpus('take', 'smoke', '12', '--until', until)
         self.assertEqual(code, 0, row)
         self.assertEqual(row['expiresAtUtc'], until[:-1] + ':00Z')
 
     def test_refusals_change_nothing(self):
         cases = [
-            (['take', 'sky', '13', '--for', '5'], "13 are Hutter's (1-4,13-16)"),
-            (['take', 'sky', '1-2,6', '--for', '5'], "1-2 are Hutter's"),
-            (['take', 'sky', '24', '--for', '5'], "24 outside agents.slice's base set 0,5-12,17-23"),
-            (['take', 'sky', BASE, '--for', '5'], 'would leave agents.slice no CPUs'),
+            (['take', 'smoke', '13', '--for', '5'], "13 are Hutter's (1-4,13-16)"),
+            (['take', 'smoke', '1-2,6', '--for', '5'], "1-2 are Hutter's"),
+            (['take', 'smoke', '24', '--for', '5'], "24 outside agents.slice's base set 0,5-12,17-23"),
+            (['take', 'smoke', BASE, '--for', '5'], 'would leave agents.slice no CPUs'),
         ]
         for argv, error in cases:
             with self.subTest(argv=argv):
                 code, row = self.cpus(*argv)
                 self.assertEqual((code, row['ok']), (1, False))
                 self.assertIn(error, row['error'])
-        for argv in (['take', 'sky', '6', '--for', '0'], ['take', 'sky', '6', '--until', '2020-01-01T00:00Z'],
-                     ['take', 'sky', 'six', '--for', '5'], ['take', 'sky', '6'], ['take', 'a b', '6', '--for', '5'],
+        for argv in (['take', 'smoke', '6', '--for', '0'], ['take', 'smoke', '6', '--until', '2020-01-01T00:00Z'],
+                     ['take', 'smoke', 'six', '--for', '5'], ['take', 'smoke', '6'], ['take', 'a b', '6', '--for', '5'],
                      ['give'], ['bogus']):
             with self.subTest(argv=argv):
                 code, row = self.cpus(*argv)
@@ -200,15 +204,16 @@ class Take(CpusCase):
 
     def test_the_base_set_is_read_from_the_unit_file(self):
         self.slice_file.write_text('[Slice]\nAllowedCPUs=0 5-12\n')
-        code, row = self.cpus('take', 'sky', '18', '--for', '5')
+        code, row = self.cpus('take', 'smoke', '18', '--for', '5')
         self.assertEqual(code, 1)
         self.assertIn("18 outside agents.slice's base set 0,5-12", row['error'])
 
     def test_cpus_held_by_another_owner_are_refused(self):
-        self.assertEqual(self.cpus('take', 'sky', '6-7', '--for', '10')[0], 0)
-        code, row = self.cpus('take', 'bob', '7-8', '--for', '10')
+        # A second owner exists only in this temp state; real tests and smokes are all owner smoke.
+        self.assertEqual(self.cpus('take', 'smoke', '6-7', '--for', '10')[0], 0)
+        code, row = self.cpus('take', 'sky', '7-8', '--for', '10')
         self.assertEqual(code, 1)
-        self.assertIn('7 held by sky until', row['error'])
+        self.assertIn('7 held by smoke until', row['error'])
         self.assertEqual(len(self.set_properties()), 1)
 
     def test_a_busy_cpu_fails_the_take_and_restores_agents_slice(self):
@@ -237,50 +242,65 @@ class Take(CpusCase):
         self.assertEqual(self.records('systemd-run.jsonl') + self.records('agent-msg.jsonl'), [])
 
     def test_sudo_refusal_fails_the_take_cleanly(self):
-        code, row = self.cpus('take', 'sky', '6', '--for', '5', env={'FAKE_SUDO_FAIL': '1'})
+        code, row = self.cpus('take', 'smoke', '6', '--for', '5', env={'FAKE_SUDO_FAIL': '1'})
         self.assertEqual(code, 1)
         self.assertIn('a password is required', row['error'])
         self.assertEqual((self.holds(), self.records('systemd-run.jsonl')), ({}, []))
 
     def test_a_timer_that_cannot_start_rolls_the_take_back(self):
-        code, row = self.cpus('take', 'sky', '6', '--for', '5', env={'FAKE_TIMER_FAIL': '1'})
+        code, row = self.cpus('take', 'smoke', '6', '--for', '5', env={'FAKE_TIMER_FAIL': '1'})
         self.assertEqual(code, 1)
         self.assertIn('cannot start the auto-give timer', row['error'])
         self.assertEqual(self.slice_state(), {'AllowedCPUs': BASE, 'CPUQuota': None})
         self.assertEqual(self.holds(), {})
 
     def test_a_failed_message_goes_to_hutters_arm_windows_file(self):
-        code, row = self.cpus('take', 'sky', '6', '--for', '5', env={'FAKE_MSG_FAIL': 'hone@twaldin-home'})
+        code, row = self.cpus('take', 'smoke', '6', '--for', '5', env={'FAKE_MSG_FAIL': 'hone@twaldin-home'})
         self.assertEqual(code, 0, row)
         self.assertEqual(row['messages'][0], {'to': 'hone@twaldin-home', 'exit': 75,
                                               'fallback': str(self.home / 'hutter/run/arm-windows.ndjson')})
         self.assertEqual(row['messages'][1], {'to': 'hutter-v2@deckbox', 'exit': 0})
         (line,) = self.arm_windows()
         self.assertEqual((line['event'], line['owner'], line['cpus'], line['undelivered_to'], line['exit']),
-                         ('take', 'sky', '6', 'hone@twaldin-home', 75))
+                         ('take', 'smoke', '6', 'hone@twaldin-home', 75))
 
     def test_a_second_take_by_the_same_owner_replaces_its_reservation(self):
-        self.assertEqual(self.cpus('take', 'sky', '6-7', '--for', '10')[0], 0)
-        first_timer = self.holds()['sky']['timer']
+        self.assertEqual(self.cpus('take', 'smoke', '6-7', '--for', '10')[0], 0)
+        first_timer = self.holds()['smoke']['timer']
         time.sleep(1.1)  # timer names carry the second
-        code, row = self.cpus('take', 'sky', '8', '--for', '20')
+        code, row = self.cpus('take', 'smoke', '8', '--for', '20')
         self.assertEqual(code, 0, row)
-        self.assertEqual(self.holds()['sky']['cpus'], [8])
+        self.assertEqual(self.holds()['smoke']['cpus'], [8])
         self.assertEqual(row['agentsSlice']['after']['AllowedCPUs'], '0 5-7 9-12 17-23')
         self.assertIn(['--user', 'stop', first_timer], self.records('systemctl.jsonl'))
 
     def test_governor_and_epp_are_only_read(self):
         before = {p: p.read_text() for p in self.sys.rglob('*') if p.is_file()}
-        self.assertEqual(self.cpus('take', 'sky', '6', '--for', '5')[0], 0)
-        self.assertEqual(self.cpus('give', 'sky')[0], 0)
+        self.assertEqual(self.cpus('take', 'smoke', '6', '--for', '5')[0], 0)
+        self.assertEqual(self.cpus('give', 'smoke')[0], 0)
         self.assertEqual({p: p.read_text() for p in self.sys.rglob('*') if p.is_file()}, before)
+
+    def test_each_take_and_give_row_is_logged_with_its_times_before_any_message(self):
+        _, take = self.cpus('take', 'smoke', '12', '--for', '5')
+        _, give = self.cpus('give', 'smoke')
+        rows = [json.loads(line) for line in
+                (self.home / '.local/state/deckbox-cpus/log.jsonl').read_text().splitlines()]
+        self.assertEqual([r['event'] for r in rows], ['take', 'take-messages', 'give', 'give-messages'])
+        self.assertEqual((rows[0]['takenAtUtc'], rows[0]['expiresAtUtc'], rows[0]['arm']),
+                         (take['takenAtUtc'], take['expiresAtUtc'], False))
+        self.assertEqual((rows[2]['takenAtUtc'], rows[2]['gaveAtUtc']), (take['takenAtUtc'], give['gaveAtUtc']))
+        self.assertEqual(rows[1]['messages'], take['messages'])
+        # What agent-msg could read when each message went out: the event's own row was already on disk.
+        seen = [json.loads(line) for line in (self.fake / 'log-seen.jsonl').read_text().splitlines()]
+        self.assertEqual([[r['event'] for r in s] for s in seen],
+                         [['take'], ['take'], ['take', 'take-messages', 'give'], ['take', 'take-messages', 'give']])
 
 
 class Give(CpusCase):
     def test_give_restores_the_base_set_removes_the_quota_and_cancels_the_timer(self):
-        self.assertEqual(self.cpus('take', 'sky', '6-11,18-23', '--for', '60')[0], 0)
-        timer = self.holds()['sky']['timer']
-        code, row = self.cpus('give', 'sky')
+        self.assertEqual(self.cpus('take', 'smoke', '6-11,18-23', '--for', '60')[0], 0)
+        timer = self.holds()['smoke']['timer']
+        code, row = self.cpus('give', 'smoke')
         self.assertEqual(code, 0, row)
         self.assertEqual(row['agentsSlice'], {'before': {'AllowedCPUs': '0 5 12 17', 'CPUQuota': '300%'},
                                               'after': {'AllowedCPUs': BASE, 'CPUQuota': None}})
@@ -290,10 +310,10 @@ class Give(CpusCase):
         self.assertEqual(self.holds(), {})
         sent = self.records('agent-msg.jsonl')[-2:]
         self.assertEqual([s[0] for s in sent], ['hone@twaldin-home', 'hutter-v2@deckbox'])
-        self.assertIn('sky gave back deckbox CPUs 6-11,18-23', sent[0][1])
+        self.assertIn('smoke gave back deckbox CPUs 6-11,18-23', sent[0][1])
 
     def test_give_with_nothing_held_is_a_no_op_with_a_note(self):
-        code, row = self.cpus('give', 'sky')
+        code, row = self.cpus('give', 'smoke')
         self.assertEqual((code, row['ok']), (0, True))
         self.assertIn('holds nothing', row['note'])
         self.assertEqual(self.set_properties() + self.records('agent-msg.jsonl'), [])
@@ -306,7 +326,10 @@ class Give(CpusCase):
         self.assertIn('smoke reservation expired; gave back deckbox CPUs 12', self.records('agent-msg.jsonl')[-1][1])
 
     def test_two_owners_share_the_slice_until_both_give(self):
-        self.assertEqual(self.cpus('take', 'sky', '6-11,18-23', '--for', '60')[0], 0)
+        # sky stands for an ARM owner here, in temp state only; real tests and smokes are all owner smoke.
+        _, row = self.cpus('take', 'sky', '6-11,18-23', '--for', '60')
+        self.assertTrue(row['arm'])
+        self.assertNotIn('not an ARM', self.records('agent-msg.jsonl')[0][1])
         code, row = self.cpus('take', 'smoke', '12', '--for', '2')
         self.assertEqual(code, 0, row)
         self.assertEqual(row['agentsSlice']['after'], {'AllowedCPUs': '0 5 17', 'CPUQuota': '200%'})
