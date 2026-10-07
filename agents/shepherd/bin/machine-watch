@@ -34,8 +34,9 @@ its omp's easl tile (the zmx server's canvas.tile label above the omp, else the 
 herdr pane (HERDR_PANE_ID); a job launchd adopted maps through its own EASL_TILE_ID. The message asks the agent to
 stop the job and rerun it through machine-ok-queue or offload with less parallelism, at most once per owner and
 job (executable) per 10 minutes, for jobs using a core or more. The shepherd gets one line naming whom it
-messaged. Tim's apps, macOS (kernel_task, WindowServer, daemons), zmx, brokers and omp runtimes are never
-messaged about, only listed for the shepherd. While the CPU is saturated and Tim active, a full run waits (up to
+messaged. Tim's apps, Tim's own tiles (an easl tile with no agent name, or the one he has focused), macOS
+(kernel_task, WindowServer, daemons), zmx, brokers and omp runtimes are never messaged about, only listed for the
+shepherd. While the CPU is saturated and Tim active, a full run waits (up to
 5 minutes) so the checks keep their pace. Each active-time check is a line in machine-watch.fast.jsonl. While
 Tim is idle, saturation is the slow rule's (cpu_saturated: 3 full runs, shepherd only).
 `machine-watch --consumers` prints the top consumers, their owners and the messages, and sends nothing.
@@ -595,14 +596,24 @@ def verdict(g, procs):
     if p["pid"] in (0, 1) or os.path.basename(path) in ("kernel_task", "WindowServer") or path.startswith(SYSTEM_PATHS):
         return None, "system"
     if parent is not None and is_omp(parent["cmd"]):
-        o = omp_owner(parent, procs)
-        return (o, None) if o else (None, f"under omp {parent['pid']}, whose agent is unknown")
-    if parent is not None and is_broker(parent["cmd"]):
+        o, unknown = omp_owner(parent, procs), f"under omp {parent['pid']}, whose agent is unknown"
+    elif parent is not None and is_broker(parent["cmd"]):
         return None, "under a shared omp broker; owner unknown"  # its parent omp only started the broker
-    if p["user"] != ME:
+    elif p["user"] != ME:
         return None, "system"
-    o = env_owner(p["pid"])  # a detached job keeps the environment of the agent that started it
-    return ((o[0], o[1], "the job's " + o[2]), None) if o else (None, "no agent owner")
+    else:
+        o, unknown = env_owner(p["pid"]), "no agent owner"  # a detached job keeps its agent's environment
+        o = o and (o[0], o[1], "the job's " + o[2])
+    if o is None:
+        return None, unknown
+    return (None, "Tim's own session") if tims_session(o) else (o, None)
+
+
+def tims_session(owner):
+    """Tim's own tile: one with no agent name (his ad-hoc session; his tiktok tile was home's top consumer on 10-07) or
+    the one he has focused (his call). Never told to stop, as in quiet-window (a191011)."""
+    t = owner_tile(owner)
+    return t is not None and (not t.get("name") or t.get("focused") is True)
 
 
 def send_owner(owner, text):

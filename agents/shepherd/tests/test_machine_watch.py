@@ -638,6 +638,23 @@ class FastSaturation(MachineWatchCase):
                 shepherd, = self.told('obj_shep')
                 self.assertIn('. Messaged no agent. Not messaged: pid %d ' % procs[-1][0], shepherd)
 
+    def test_tims_own_tiles_an_unnamed_one_or_the_one_he_has_focused_are_never_messaged(self):
+        # quiet-window's rule (a191011): a tile with no agent name is Tim's ad-hoc session (his tiktok tile was the top
+        # consumer on 10-07), and the tile he has focused is his call.
+        unnamed = {k: v for k, v in TERMS_TILE.items() if k != 'name'}
+        for tile in (unnamed, {**TERMS_TILE, 'focused': True}):
+            with self.subTest(tile=tile):
+                RealRuns.fresh(self)
+                RealRuns.set_easl(self, [SHEPHERD_TILE, tile])
+                self.tim(5)
+                self.cpu(3)
+                self.tick()
+                self.tick()
+                self.assertEqual(self.told('obj_terms'), [])
+                shepherd, = self.told('obj_shep')
+                self.assertRegex(shepherd, r"\. Messaged no agent\. Not messaged: pid 600 node at \d+% "
+                                           r"\(Tim's own session\); ")
+
     def test_launchd_ticks_every_minute_and_every_other_tick_is_a_full_run(self):
         self.tim(600)
         self.tick()
