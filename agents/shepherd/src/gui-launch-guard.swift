@@ -21,8 +21,20 @@
 // Until the guard ends it
 //   - attributes: a theft window runs from a tree activation until focus is back with Tim's app (or, with no app
 //     to give it back to, with any app outside the tree) and 2 s after. Inside it no activation and no Space
-//     change is ever Tim's; outside it every activation outside the tree and every Space change is. His HID
-//     input is logged as a hint (sinceInputMs), never used as authority;
+//     change is Tim's, but for his takeover; outside it every activation outside the tree and every Space change
+//     is. His takeover (GR2, bench's addendum 3; until it, his HID input was only logged, never used as authority):
+//     an app outside the tree, other than the one focus goes back to, that becomes frontmost within 100 ms of his
+//     last HID input (sinceInputMs) is his choice (decision user, takeover), in a theft or grace window too: it is
+//     never reverted, it ends an open theft (whose revert is then no longer wanted) and becomes the app focus goes
+//     back to, and each Space his display shows from then until the next tree activation is his (but one that stays
+//     on the Space the tree took him to), never a breach, and no theft before it revokes it. 100 ms: in the
+//     after-dark receipt (e8790f2c) each of his 12 activations came 2.7-47 ms after his input, in the tab receipt
+//     (542d177d) 0.3 and 38.6 ms; it is about twice the slowest. A tree app's activation is never his. The
+//     residual risk: the HID table counts any input, a mouse move or a keystroke too, and a process can feed it (the
+//     tree's too: synthetic input), so an app macOS activates in a tree's theft cascade within 100 ms of such input
+//     is taken for his, with the Spaces his display shows until the tree next activates: unreverted, no breach, and
+//     the check passes. Conversely, should his activation reach the guard after the Space change it causes, that
+//     change is still the tree's (a breach). Input never decides a Space change on its own;
 //   - reverts activations: when a tree process becomes frontmost, it re-activates Tim's app at once, in the turn
 //     that decides the activation (GR2: it never waits for yabai), after the checks the fallback's final turn makes
 //     (below); then, unless focus is back by then, it focuses his restore-target window by id, or re-activates his
@@ -275,7 +287,8 @@ struct Lineage {
 
 /// The theft windows: from a tree activation until focus is back with Tim's app (or, when there was none to give
 /// it back to, with any app outside the tree), then `grace` more. Inside one, no activation and no Space change is
-/// Tim's, whatever his input. Times are seconds since launch.
+/// Tim's, but for his takeover (RestorePolicy.userInput): from it until the next tree activation, the Spaces his
+/// display shows are his. Times are seconds since launch.
 struct TheftWindow: Equatable {
     static let grace = 2.0
     private(set) var lastTheft: Double?
@@ -283,10 +296,13 @@ struct TheftWindow: Equatable {
     private(set) var open = false
     /// When the last window that closed ended: its return, plus `grace`.
     private(set) var closedUntil: Double?
+    /// When Tim last took focus himself (RestorePolicy.userInput), if no tree activation came since.
+    private(set) var takenOver: Double?
 
     mutating func theft(at t: Double) {
         lastTheft = t
         open = true
+        takenOver = nil
     }
 
     mutating func resolved(at t: Double) {
@@ -295,19 +311,32 @@ struct TheftWindow: Equatable {
         closedUntil = t + TheftWindow.grace
     }
 
+    mutating func takeover(at t: Double) { takenOver = t }
+
     /// Whether any moment from `t` until now lies in a theft window. Read after every theft known so far (each one
     /// came before now): a theft that is open, or a window that ended at or after `t`.
     func covers(since t: Double) -> Bool { open || (closedUntil ?? -.infinity) >= t }
+
+    /// Whether what Tim's display showed from `t` on came after his takeover, with no tree activation since: his.
+    func tims(since t: Double) -> Bool { takenOver.map { t >= $0 } ?? false }
 }
 
 /// What to do when an app becomes frontmost. `userFront` is the app to give focus back to: the frontmost app
 /// at launch (if it is outside the tree), then each app outside the tree that became frontmost outside every theft
-/// window (Tim's own switch).
+/// window, or within `userInput` of his HID input (Tim's own switch).
 struct RestorePolicy {
+    /// GR2 (addendum 3): an app outside the tree, other than the one focus goes back to, that becomes frontmost within
+    /// this long of Tim's last HID input is his choice, in a theft or grace window too (his takeover). In the after-dark
+    /// receipt (e8790f2c) each of his 12 activations came 2.7-47 ms after his input, and in the tab receipt
+    /// (542d177d) 0.3 and 38.6 ms: 100 ms is about twice the slowest, with room for a main thread that serves the
+    /// notification late. Never a tree app's activation.
+    static let userInput = 0.1
+
     enum Decision: Equatable {
         case restore(to: pid_t)            // a tree process took focus: give it back
         case restored(latency: Double)     // the user's app is frontmost again; seconds since the theft
         case user                          // an app outside the tree, outside every theft window: Tim's new choice
+        case tookOver                      // an app outside the tree within userInput of his input, in a theft or grace window: his
         case system                        // an app outside the tree inside a theft window: never taken for his
         case unrestorable                  // a tree process took focus and there is no app to give it back to
         case afterGuard
@@ -324,7 +353,8 @@ struct RestorePolicy {
         self.guardUntil = guardUntil
     }
 
-    mutating func activation(pid: pid_t, inTree: Bool, at t: Double) -> Decision {
+    /// `sinceInput`: seconds from Tim's last HID input to the activation (nil: not known).
+    mutating func activation(pid: pid_t, inTree: Bool, at t: Double, sinceInput: Double? = nil) -> Decision {
         if t > guardUntil { return .afterGuard }
         if inTree {
             window.theft(at: t)
@@ -336,6 +366,17 @@ struct RestorePolicy {
             pendingSince = nil
             window.resolved(at: t)
             return .restored(latency: t - since)
+        }
+        // His takeover: never the app focus goes back to, which the guard's own reverts and restores activate.
+        if pid != userFront, let input = sinceInput, input <= RestorePolicy.userInput {
+            let inWindow = pendingSince != nil || window.covers(since: t)
+            if pendingSince != nil {
+                pendingSince = nil
+                window.resolved(at: t)
+            }
+            window.takeover(at: t)
+            userFront = pid
+            return inWindow ? .tookOver : .user
         }
         if pendingSince != nil && userFront == nil {  // nothing to give focus back to: the tree has lost it
             pendingSince = nil
@@ -566,8 +607,11 @@ func ownerTimeoutProblem(_ outcome: RevertOutcome, immediate: Bool, to pid: pid_
 /// since the notification before it) only a change of Tim's own display explains it (sky-lead's decision A): any
 /// other, one that coincides with another display's change included, is a change and back unseen, the tree's, a
 /// breach that cannot be named. Outside them another display's change explains it too, and one that nothing
-/// explains is his, until a theft turns out to have come within `grace` of it. A Space is its yabai index, or, for
-/// one yabai's map does not know, minus its SkyLight id (spaceKey).
+/// explains is his, until a theft turns out to have come within `grace` of it. GR2 (addendum 3): after Tim's takeover
+/// (an app outside the tree he activated, RestorePolicy.userInput) and until the next tree activation, each change
+/// is his, in a theft or grace window too (but one that stays on the Space the tree took him to), and a theft that
+/// came before the takeover revokes none of them. A Space is its yabai index, or, for one yabai's map does not know,
+/// minus its SkyLight id (spaceKey).
 struct SpacePolicy {
     enum Decision: Equatable {
         case unchanged
@@ -624,7 +668,8 @@ struct SpacePolicy {
             unseenCharged = unseenOutside.filter { abs(lastTheft - $0) <= TheftWindow.grace }
             unseenOutside.removeAll { abs(lastTheft - $0) <= TheftWindow.grace }
         }
-        if let lastTheft = theft.lastTheft, let first = rebases.firstIndex(where: { abs(lastTheft - $0.since) <= TheftWindow.grace }) {
+        if let lastTheft = theft.lastTheft,
+           let first = rebases.firstIndex(where: { abs(lastTheft - $0.since) <= TheftWindow.grace && !theft.tims(since: $0.since) }) {
             revoked = expected
             expected = rebases[first].from
             rebases.removeSubrange(first...)
@@ -636,7 +681,7 @@ struct SpacePolicy {
             seen.removeAll()
             return .unchanged
         }
-        if visible != thiefSpace && !theft.covers(since: since) {
+        if visible != thiefSpace && (!theft.covers(since: since) || theft.tims(since: since)) {
             rebases.removeAll { since - $0.since > 2 * TheftWindow.grace }
             rebases.append((want, visible, since))
             expected = visible
@@ -1634,7 +1679,9 @@ func unknownWindow(_ id: Int) -> String { "yabai knows no window \(id)" }
 /// start times then. In the header, as at the guard's start, attach members among the header's procs join the
 /// tree before the front app and its window become the restore target. Each Space row and each activation starts a
 /// new epoch, as the live guard's events do. A row is one of
-/// - `{"t", "activate": pid, "focused": {"id", "pid", "space"}, "revert": {…}}`: an activation; `focused`, the
+/// - `{"t", "activate": pid, "input": s, "focused": {"id", "pid", "space"}, "revert": {…}}`: an activation; `input`,
+///   when Tim's last HID input came (seconds since launch; absent: not known), whose takeover (RestorePolicy.userInput)
+///   the row reports as "takeover"; `focused`, the
 ///   window yabai reports focused afterwards. A tree activation's row reports "immediate", the app the activation
 ///   made at once in its own turn activates (null, with "immediateRefused", when the fallback's checks refuse it);
 ///   `revert`, the revert it starts: "verify" is what each
@@ -1658,7 +1705,7 @@ func unknownWindow(_ id: Int) -> String { "yabai knows no window \(id)" }
 ///   the displays at t, via "notification" or another read that found `changes` (display null: Tim's), then, with
 ///   "seal", the seal: "missed" (`{"at", "display", "space", "via", "sealed"}`, or null), "waiting" (how many
 ///   changes still wait) and "pending" (one still within the limit).
-/// Other keys (such as "input") play no part. stdout: one line per row.
+/// Other keys (such as "input" on any other row) play no part. stdout: one line per row.
 func decide() -> Never {
     var procs: [pid_t: [String: Any]] = [:]
     var before: [pid_t: UInt64] = [:]
@@ -1784,7 +1831,9 @@ func decide() -> Never {
         resolution(result, into: &out)
         epoch += 1
         if let dropped = revalidate() { out["targetDropped"] = Int(dropped) }
-        switch policy.activation(pid: p, inTree: result.inTree, at: t) {
+        let sinceInput = number(row["input"]).map { t - $0.doubleValue }
+        let decision = policy.activation(pid: p, inTree: result.inTree, at: t, sinceInput: sinceInput)
+        switch decision {
         case .restore(let to):
             out["decision"] = "restore"
             out["to"] = Int(to)
@@ -1797,8 +1846,9 @@ func decide() -> Never {
         case .restored(let latency):
             out["decision"] = "restored"
             out["latencyMs"] = ms(latency)
-        case .user:
+        case .user, .tookOver:
             out["decision"] = "user"
+            if decision == .tookOver { out["takeover"] = true }
             target.userSwitched(to: p, start: source.start(p))
         case .system: out["decision"] = "system"
         case .unrestorable: out["decision"] = "unrestorable"
@@ -2160,8 +2210,8 @@ let mapQueue = DispatchQueue(label: "gui-launch.map")
 let anyInputEvent = unsafeBitCast(UInt32.max, to: CGEventType.self)  // kCGAnyInputEventType
 
 /// When the last HID input (keyboard, mouse, trackpad) came, in seconds since launch, as the HID system's
-/// event-source table says. Process-generated events can update that table, so it is logged as a hint
-/// (sinceInputMs) and never decides whose an activation or a Space change is.
+/// event-source table says. Process-generated events can update that table. It is logged (sinceInputMs) and decides
+/// only Tim's takeover (RestorePolicy.userInput), never a Space change on its own.
 func lastInput() -> Double? {
     let since = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: anyInputEvent)
     return since.isFinite && since >= 0 ? uptime() - t0 - since : nil
@@ -2988,7 +3038,7 @@ func onActivation(_ pid: pid_t, app: Any, running: NSRunningApplication?, at t: 
     let inTree = tree.adopt(pid, via: "activation")
     timEpoch.update { $0 += 1 }  // an owner answer in flight no longer counts
     if let userFront = policy.userFront { _ = revalidateTarget(userFront) }
-    let decision = policy.activation(pid: pid, inTree: inTree, at: t - t0)
+    let decision = policy.activation(pid: pid, inTree: inTree, at: t - t0, sinceInput: input.map { t - t0 - $0 })
     theftState.update { $0 = policy.window }
     let now = iso()
     let sinceInput: Any = input.map { ms(t - t0 - $0) } ?? NSNull()
@@ -3023,11 +3073,14 @@ func onActivation(_ pid: pid_t, app: Any, running: NSRunningApplication?, at t: 
         }
         reverted.append(record)
         emit(record)
-    case .user:
+    case .user, .tookOver:
+        // GR2 (addendum 3): a takeover in a theft or grace window is his too: an open theft ends, its revert is no
+        // longer wanted, and his display's Spaces from now on are his (SpacePolicy).
         let start = processStart(pid)
         restoreTarget.update { $0.userSwitched(to: pid, start: start) }
         timQueue.async { refreshTarget(pid) }
-        emit(context.merging(["event": "activation", "app": app, "tree": false, "decision": "user", "at": now]) { $1 })
+        emit(context.merging(["event": "activation", "app": app, "tree": false, "decision": "user",
+                              "takeover": decision == .tookOver, "at": now]) { $1 })
     case .system:
         emit(context.merging(["event": "activation", "app": app, "tree": false, "decision": "system", "at": now]) { $1 })
     case .unrestorable:

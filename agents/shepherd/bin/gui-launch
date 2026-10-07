@@ -31,9 +31,15 @@ and/or guards one that something else starts, then checks that nothing took it.
 - Guard, until --guard-seconds pass, the launched tree exits (without attach), or SIGTERM/SIGINT:
   gui-launch-guard (src/gui-launch-guard.swift) adopts processes as they activate or launch and in a scan
   of all processes every 150 ms. A theft window runs from a tree activation until focus is back with Tim's app,
-  and 2 s after: inside it no activation and no Space change is ever taken for his, so an app macOS activates
-  then never becomes the one focus goes back to and his expected Space stays the one before the theft. Outside
-  it, every app switch and Space change is his. His HID input is only logged (sinceInputMs). When a tree
+  and 2 s after: inside it no activation and no Space change is taken for his, so an app macOS activates
+  then never becomes the one focus goes back to and his expected Space stays the one before the theft, but for
+  his takeover: an app outside the tree (other than the one focus goes back to) that becomes frontmost within
+  100 ms of his HID input (sinceInputMs) is his choice (decision user, takeover), never reverted, and the Spaces
+  his display shows from then until the tree next activates are his. 100 ms is about twice the slowest of his
+  activations in the after-dark and tab receipts (2.7-47 ms, 0.3-38.6 ms). The residual risk: any input counts
+  (a mouse move, a keystroke, synthetic input from any process), so an app a tree's theft cascade activates
+  within 100 ms of it passes for his, unreverted and unflagged. A tree app's activation is never his. Outside
+  the windows, every app switch and Space change is his. When a tree
   process becomes frontmost, the guard re-activates Tim's app at once, in the turn that decides the activation
   (it never waits for yabai; his app is checked first, as for the re-activation below); then, unless focus is back
   by then, it focuses Tim's restore-target window by id through

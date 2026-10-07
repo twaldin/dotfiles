@@ -767,9 +767,9 @@ class GuiLaunch(unittest.TestCase):
 @unittest.skipUnless(SWIFTC and CC and ARM_MAC, 'needs swiftc and cc on an arm64 Mac')
 class Guard(unittest.TestCase):
     """The real guard. --decide: t is seconds since launch; pids 100 (Tim's terminal) and 300/400 (apps he switches
-    to) run outside the tree; "input" (the HID table's last input) is passed where the old rule would have taken it
-    as Tim's, to show it decides nothing. --resolve: live probe processes. --helpers: yabai calls and the guard's
-    end, with stand-in yabais."""
+    to) run outside the tree; "input" (when the HID table last saw input) decides only his takeover of an activation
+    of an app outside the tree (GR2), and is passed elsewhere to show it decides nothing there. --resolve: live probe
+    processes. --helpers: yabai calls and the guard's end, with stand-in yabais."""
 
     @classmethod
     def setUpClass(cls):
@@ -900,22 +900,95 @@ class Guard(unittest.TestCase):
         self.assertEqual([(r['space'], r.get('from'), r.get('to'), r.get('window')) for r in rows if 'space' in r], [
             ('restore', 3, 2, 42), ('restore', 3, 2, 42), ('restore', 3, 2, 42)])
 
-    def test_hid_input_never_makes_a_change_tims_and_outside_theft_windows_none_is_needed(self):
-        # "input" is when the HID table last saw input: any process can feed that table, so it decides nothing.
+    def test_hid_input_makes_only_tims_own_activation_of_an_app_outside_the_tree_his(self):
+        # GR2 (addendum 3): an activation of an app outside the tree within 100 ms of Tim's HID input ("input": when the
+        # HID table last saw input) is his takeover, in a theft or grace window too, and the Spaces his display shows
+        # from then until the tree next activates are his. Never a tree app's activation, never the app focus goes back
+        # to (the guard's own reverts activate it), never input 100 ms old or more, never a Space change on its own.
         rows = self.decide(self.COUNTER_BALL, [
-            {'t': 1.0, 'activate': 500},
-            {'t': 1.2, 'activate': 600, 'input': 1.19, 'focused': {'id': 59, 'pid': 600, 'space': 3}},  # a "click" 10 ms before
-            {'t': 1.25, 'space': 3, 'input': 1.24},
-            {'t': 1.4, 'activate': 100, 'input': 1.39},
-            {'t': 3.0, 'activate': 600, 'input': 2.99},     # within 2 s of the return
-            {'t': 3.1, 'space': 3, 'input': 3.05},
-            {'t': 3.2, 'space': 2},
-            {'t': 6.0, 'activate': 600, 'focused': {'id': 59, 'pid': 600, 'space': 3}},  # outside every window, no input
-            {'t': 6.1, 'space': 3},
+            {'t': 1.0, 'activate': 500, 'input': 0.99},   # a tree app: given back, whatever the input
+            {'t': 1.2, 'activate': 600, 'input': 1.05, 'focused': {'id': 59, 'pid': 600, 'space': 3}},  # input 150 ms old: macOS's
+            {'t': 1.25, 'space': 3, 'input': 1.24},       # a Space change: the tree's, whatever the input
+            {'t': 1.3, 'space': 2},
+            {'t': 1.4, 'activate': 100, 'input': 1.39},   # the app focus goes back to: given back, no takeover
+            {'t': 3.0, 'activate': 600, 'input': 2.99, 'focused': {'id': 59, 'pid': 600, 'space': 3}},  # 10 ms, in the grace window
+            {'t': 3.05, 'space': 3},                      # where his pick took his display: his
+            {'t': 6.0, 'activate': 500},                  # the tree again: his takeover is over
+            {'t': 6.1, 'space': 2},
         ])
-        self.assertEqual([(r.get('decision') or r.get('space'), r.get('target'), r.get('expected')) for r in rows], [
-            ('restore', 42, None), ('system', 42, None), ('restore', None, None), ('restored', 42, None), ('system', 42, None),
-            ('restore', None, None), ('unchanged', None, None), ('user', 59, None), ('user', None, 3)])
+        self.assertEqual([(r.get('decision') or r.get('space'), r.get('takeover'), r.get('target'), r.get('expected'), r.get('breach'))
+                          for r in rows], [
+            ('restore', None, 42, None, None), ('system', None, 42, None, None), ('restore', None, None, None, 3),
+            ('unchanged', None, None, None, None), ('restored', None, 42, None, None), ('user', True, 59, None, None),
+            ('user', None, None, 3, None), ('restore', None, 59, None, None), ('restore', None, None, None, 2)])
+        self.assertEqual((rows[-1]['from'], rows[-1]['to'], rows[-1]['window']), (2, 3, 59))
+
+    # receipt-after-dark.jsonl (sha256 e8790f2ce4bf9d8eb5348abf7cfa44e9af509c2b0317365bbf90fbbc198ae469), the guard's
+    # events through the incident (its lines 9-37; the launch 05:45:51.120Z): Tim (Discord 29520 frontmost, Space 3)
+    # switches among his apps, the launched easl (14859) steals focus and takes his display to Space 8, the guard gives
+    # both back, and 1.4 s later, inside the grace window, Tim clicks his own easl (37069, sinceInputMs 2.7), which
+    # takes his display to Space 4. The guard called that activation system, the Space change a breach, and restored
+    # Space 2: it reverted his own switch.
+    AFTER_DARK = [
+        {'at': '05:45:55.114', 'event': 'activation', 'pid': 47546, 'tree': False, 'decision': 'user', 'sinceInputMs': 31.4},
+        {'at': '05:45:55.116', 'event': 'display-space', 'space': 1, 'via': 'activation'},
+        {'at': '05:45:55.119', 'event': 'display-space', 'space': 1, 'via': 'notification'},
+        {'at': '05:45:55.148', 'event': 'restore-target', 'pid': 47546, 'space': 1, 'window': 102},
+        {'at': '05:45:55.959', 'event': 'activation', 'pid': 37069, 'tree': False, 'decision': 'user', 'sinceInputMs': 47},
+        {'at': '05:45:55.975', 'event': 'display-space', 'space': 4, 'via': 'activation'},
+        {'at': '05:45:55.980', 'event': 'display-space', 'space': 4, 'via': 'notification'},
+        {'at': '05:45:56.013', 'event': 'restore-target', 'pid': 37069, 'space': 4, 'window': 88251},
+        {'at': '05:46:39.498', 'event': 'activation', 'pid': 13307, 'tree': False, 'decision': 'user', 'sinceInputMs': 30.6},
+        {'at': '05:46:39.537', 'event': 'display-space', 'space': 2, 'via': 'notification'},
+        {'at': '05:46:39.581', 'event': 'restore-target', 'pid': 13307, 'space': 2, 'window': 63099},
+        {'at': '05:46:41.844', 'event': 'activation', 'pid': 61428, 'tree': False, 'decision': 'user', 'sinceInputMs': 10.6},
+        {'at': '05:46:41.868', 'event': 'restore-target', 'pid': 61428, 'space': 2, 'window': 87478},
+        {'at': '05:46:46.215', 'event': 'activation', 'pid': 14859, 'tree': True, 'decision': 'restore'},
+        {'at': '05:46:46.271', 'event': 'display-space', 'space': 8, 'via': 'poll'},
+        {'at': '05:46:46.281', 'event': 'display-space', 'space': 8, 'via': 'notification'},
+        {'at': '05:46:46.340', 'event': 'reverted', 'pid': 61428, 'method': 'window'},
+        {'at': '05:46:46.391', 'event': 'display-space', 'space': 2, 'via': 'poll'},
+        {'at': '05:46:46.394', 'event': 'display-space', 'space': 2, 'via': 'notification'},
+        {'at': '05:46:47.778', 'event': 'activation', 'pid': 37069, 'tree': False, 'decision': 'system', 'sinceInputMs': 2.7},
+        {'at': '05:46:47.827', 'event': 'display-space', 'space': 4, 'via': 'poll'},
+        {'at': '05:46:47.837', 'event': 'display-space', 'space': 4, 'via': 'notification'},
+    ]
+
+    def test_tims_own_click_in_a_grace_window_is_his_replayed_from_the_after_dark_receipt(self):
+        # GR2 (addendum 3): the receipt's events as --decide rows: each activation at its time, with his input
+        # sinceInputMs before it; each restore-target as the window yabai reported focused for that activation; each
+        # read of his display. His click on his own easl is his takeover (2.7 ms after his input): never reverted, and
+        # Space 4, where it took his display, is his, not a breach, and no theft before the click revokes it. The
+        # tree's own excursion to Space 8 stays a breach.
+        def seconds(at):
+            h, m, s = at.split(':')
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        launch = seconds('05:45:51.120')
+        rows, last = [], {}
+        for e in self.AFTER_DARK:
+            t = round(seconds(e['at']) - launch, 3)
+            if e['event'] in ('activation', 'reverted'):
+                row = {'t': t, 'activate': e['pid']}
+                if 'sinceInputMs' in e:
+                    row['input'] = t - e['sinceInputMs'] / 1000
+                rows.append(row)
+                last[e['pid']] = row
+            elif e['event'] == 'restore-target':
+                last[e['pid']]['focused'] = {'id': e['window'], 'pid': e['pid'], 'space': e['space']}
+            else:
+                rows.append({'t': t, 'read': e['space']})
+        rows.append({'t': 58.0, 'read': 4})  # his display still on Space 4, after the grace window: still his
+        pids = (29520, 47546, 37069, 13307, 61428, 14859)
+        header = {'front': 29520, 'frontWindow': 59645, 'frontWindowSpace': 3, 'guardSeconds': 1200, 'roots': [14859], 'timSpace': 3,
+                  'procs': [{'pid': p, 'exe': '/apps/%d' % p} for p in pids]}
+        out = self.decide(header, rows)
+        self.assertEqual([(r['pid'], r['decision'], r.get('takeover')) for r in out if 'decision' in r], [
+            (47546, 'user', None), (37069, 'user', None), (13307, 'user', None), (61428, 'user', None),
+            (14859, 'restore', None), (61428, 'restored', None), (37069, 'user', True)])
+        self.assertEqual([(r['t'], r['breach']) for r in out if 'breach' in r], [(55.151, 8)])
+        self.assertFalse([r for r in out if 'revoked' in r or r.get('space') in ('restore', 'unrestorable') and r['t'] > 56.0], out)
+        click = [i for i, r in enumerate(out) if r.get('takeover')][0]
+        self.assertEqual([(r['space'], r.get('expected')) for r in out[click + 1:]], [('user', 4), ('unchanged', None), ('unchanged', None)])
 
     def test_a_space_answer_is_judged_on_the_theft_windows_as_they_stand_when_it_comes(self):
         # The change was reported at 10.0, outside any theft window; Studio stole focus at 10.1 while yabai took its
@@ -2053,6 +2126,25 @@ class Guard(unittest.TestCase):
         put(root / 'windows-mode', 'answer')
         _, result = self.end_rig(process, lines, root)
         self.assertEqual([r['method'] for r in result['reverted']], ['immediate'])
+
+    def test_tims_takeover_ends_a_theft_and_the_space_his_click_shows_is_his(self):
+        # GR2 (addendum 3), live: while the tree has focus, Tim clicks another app of his 5 ms after his input: his
+        # takeover. The theft ends (its revert to his former app is no longer wanted) and the Space his click takes his
+        # display to, read by the poll and the notification, is his: no breach, and it is the Space expected.
+        process, lines, root, tim, thief = self.theft_rig()
+        other, _ = self.probe(self.java)
+        self.send(process, 'activate %d' % thief)
+        lines.until(lambda row: row.get('event') == 'activation', 10)
+        self.send(process, 'activate %d 5' % other.pid)
+        event = lines.until(lambda row: row.get('event') == 'activation' and row['app']['pid'] == other.pid, 10)[-1]
+        self.assertEqual((event['tree'], event['decision'], event['takeover'], event['sinceInputMs']), (False, 'user', True, 5))
+        show(root, 103)
+        self.send(process, 'notify')
+        time.sleep(0.3)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['spaceRestores'], [])
+        self.assertEqual(result['timSpace']['expected'], 3)
+        self.assertEqual(result['spaceHistory'][-1]['spaceId'], 103)
 
 
 if __name__ == '__main__':
