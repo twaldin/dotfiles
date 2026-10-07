@@ -1990,6 +1990,33 @@ class Guard(unittest.TestCase):
         for wid in (9003, 9004):
             self.assertIn("window %d of the tree could not be located at the guard's end: %s" % (wid, why % wid), result['problems'])
 
+    # GR2 ----------------------------------------------------------------------------------------------------
+
+    def theft_rig(self):
+        """A rig in which Tim's app (a probe outside the tree) is frontmost with its window 42 on Space 1, as a baseline
+        finds them, and another probe is the tree's root: the rig, its lines, its directory, and the two pids."""
+        tim, _ = self.probe(self.java)
+        thief, _ = self.probe(self.java)
+        process, lines, root = self.rig(windows=[{'id': 42, 'pid': tim.pid, 'app': 'Tim', 'title': 'zsh', 'space': 1, 'has-focus': True}])
+        self.send(process, 'root %d' % thief.pid, 'tim %d 42 1' % tim.pid)
+        return process, lines, root, tim.pid, thief.pid
+
+    def test_every_activation_record_carries_the_input_and_the_app_frontmost_before_it(self):
+        # GR2 item 6, diagnostic only: a tree activation's record carried no sinceInputMs; each activation's record (and
+        # the reverted one, for Tim's app given focus back) now carries it and names the app frontmost before it.
+        process, lines, root, tim, thief = self.theft_rig()
+        self.send(process, 'activate %d 12.5' % thief)
+        event = lines.until(lambda row: row.get('event') == 'activation', 10)[-1]
+        self.assertEqual((event['app']['pid'], event['tree'], event['decision'], event['sinceInputMs']), (thief, True, 'restore', 12.5))
+        before = event['previousFront']
+        self.assertEqual((before['app']['pid'], before['tree'], before['terminated'], before['hidden']), (tim, False, None, None))
+        self.assertGreaterEqual(before['frontMs'], 0)
+        self.send(process, 'activate %d' % tim)
+        back = lines.until(lambda row: row.get('event') == 'reverted', 10)[-1]
+        self.assertIsNone(back['sinceInputMs'])
+        self.assertEqual((back['previousFront']['app']['pid'], back['previousFront']['tree']), (thief, True))
+        self.end_rig(process, lines, root)
+
 
 if __name__ == '__main__':
     unittest.main()

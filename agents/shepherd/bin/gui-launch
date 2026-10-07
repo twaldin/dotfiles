@@ -100,7 +100,9 @@ stdout carries only JSON lines: `sudo` (the exact command that starts the guard)
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
 space-unrestorable, window, window-unknown, window-list-failed, window-off-target, yabai-timeout, problem, fault,
-guard-end), then `check`; `error` before exit 2. The launched program's own output
+guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
+previousFront (the app frontmost before it: in the tree or not, for how long, quit or hidden; whether it just closed
+its last window is not known): diagnostics only. The launched program's own output
 goes to stderr. gui-launch never quits what it launched: the caller tears it down.
 Agent shells live in launchd's Background session, where macOS reports no frontmost app and no activations,
 so from there the guard runs in Tim's GUI (Aqua) session through the fixed root step

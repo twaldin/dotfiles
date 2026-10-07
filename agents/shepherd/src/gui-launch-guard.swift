@@ -74,7 +74,10 @@
 // is printed after guard-end. It never quits what it launched. An Objective-C exception, whether AppKit's loop caught
 // it or nothing did, ends the guard at once instead, whatever the defaults say, within 0.5 s whether or not anyone
 // drains its output: a best-effort error event (it may be missing), no summary, no helper teardown, exit 2.
-// Events go to stdout as JSON lines; the summary gui-launch checks goes to --summary.
+// Events go to stdout as JSON lines; the summary gui-launch checks goes to --summary. Each activation's record
+// (activation; reverted, for Tim's app given focus back) carries diagnostics that decide nothing: sinceInputMs, and
+// previousFront, the app frontmost before it (in the tree or not, for how long, whether it has quit or is hidden;
+// whether it just closed its last window is not known: the guard observes no window closes and asks nothing then).
 // Threads: main runs NSApplication's own loop (except in the rig), the event loop macOS delivers Space
 // notifications through: the guard is an AppKit app of its own class (GuardApplication) whose activation policy is
 // .prohibited, so it has no Dock icon, no menu bar and no windows and is never activated; AppKit opens nothing for
@@ -2942,9 +2945,26 @@ func spaceChanged(input: Double?) {
 
 // MARK: - Activations (main thread)
 
-/// `pid` became frontmost; `app` is its record. `t`: uptime when the activation arrived; `input`: the last HID input
-/// then (seconds since launch), a hint.
-func onActivation(_ pid: pid_t, app: Any, at t: Double, input: Double?) {
+/// GR2 (diagnostic only, it decides nothing): the app the last activation made frontmost (at first, the front app at
+/// launch), its NSRunningApplication (none in the rig) and when, in seconds since launch. main.
+var previousFront: (pid: pid_t, app: Any, running: NSRunningApplication?, at: Double)?
+
+/// What the guard knows, without asking anyone, about the app that was frontmost before an activation at `t`
+/// (seconds since launch): its record, whether it is in the tree (membership only), how long it had been frontmost,
+/// and whether it has quit or is hidden (macOS activates another app when the frontmost one quits, hides or closes
+/// its last window; the guard observes no window closes, so that last case is not known). null: none known. main.
+func previousFrontRecord(at t: Double) -> Any {
+    guard let p = previousFront else { return NSNull() }
+    return ["app": p.app, "tree": tree.contains(p.pid), "frontMs": ms(t - p.at),
+            "terminated": p.running.map { $0.isTerminated as Any } ?? NSNull(),
+            "hidden": p.running.map { $0.isHidden as Any } ?? NSNull()] as [String: Any]
+}
+
+/// `pid` became frontmost; `app` is its record and `running` its NSRunningApplication (none in the rig). `t`: uptime
+/// when the activation arrived; `input`: the last HID input then (seconds since launch). Every activation's record
+/// (activation, or reverted for Tim's app given focus back) carries sinceInputMs and previousFront.
+func onActivation(_ pid: pid_t, app: Any, running: NSRunningApplication?, at t: Double, input: Double?) {
+    let before = previousFrontRecord(at: t - t0)
     let inTree = tree.adopt(pid, via: "activation")
     timEpoch.update { $0 += 1 }  // an owner answer in flight no longer counts
     if let userFront = policy.userFront { _ = revalidateTarget(userFront) }
@@ -2952,21 +2972,22 @@ func onActivation(_ pid: pid_t, app: Any, at t: Double, input: Double?) {
     theftState.update { $0 = policy.window }
     let now = iso()
     let sinceInput: Any = input.map { ms(t - t0 - $0) } ?? NSNull()
+    let context: [String: Any] = ["sinceInputMs": sinceInput, "previousFront": before]
     switch decision {
     case .restore(let to):
         if theft == nil {
             theft = ["app": app, "activatedAt": now, "t": t]
             theftPending.update { $0 = true }
         }
-        emit(["event": "activation", "app": app, "tree": true, "decision": "restore", "to": Int(to),
-              "restoreWindow": restoreTarget.value.window(for: to) ?? NSNull(), "at": now])
+        emit(context.merging(["event": "activation", "app": app, "tree": true, "decision": "restore", "to": Int(to),
+                              "restoreWindow": restoreTarget.value.window(for: to) ?? NSNull(), "at": now]) { $1 })
         schedule("revert to pid \(to)", on: restoreQueue) { revert(to: to, stolenAt: t) }
         observe(pid)
         yabaiQueue.async { sweep("activation") }
     case .restored(let latency):
         let last = lastRestore.value
-        var record: [String: Any] = ["event": "reverted", "to": app, "restoredAt": now, "latencyMs": ms(latency),
-                                     "method": last.method, "window": last.window ?? NSNull()]
+        var record: [String: Any] = context.merging(["event": "reverted", "to": app, "restoredAt": now, "latencyMs": ms(latency),
+                                                     "method": last.method, "window": last.window ?? NSNull()]) { $1 }
         if let theft {
             record["stolenBy"] = theft["app"]
             record["activatedAt"] = theft["activatedAt"]
@@ -2977,11 +2998,11 @@ func onActivation(_ pid: pid_t, app: Any, at t: Double, input: Double?) {
         let start = processStart(pid)
         restoreTarget.update { $0.userSwitched(to: pid, start: start) }
         timQueue.async { refreshTarget(pid) }
-        emit(["event": "activation", "app": app, "tree": false, "decision": "user", "sinceInputMs": sinceInput, "at": now])
+        emit(context.merging(["event": "activation", "app": app, "tree": false, "decision": "user", "at": now]) { $1 })
     case .system:
-        emit(["event": "activation", "app": app, "tree": false, "decision": "system", "sinceInputMs": sinceInput, "at": now])
+        emit(context.merging(["event": "activation", "app": app, "tree": false, "decision": "system", "at": now]) { $1 })
     case .unrestorable:
-        emit(["event": "activation", "app": app, "tree": true, "decision": "unrestorable", "at": now])
+        emit(context.merging(["event": "activation", "app": app, "tree": true, "decision": "unrestorable", "at": now]) { $1 })
     case .afterGuard:
         break
     }
@@ -2989,6 +3010,7 @@ func onActivation(_ pid: pid_t, app: Any, at t: Double, input: Double?) {
         theft = nil
         theftPending.update { $0 = false }
     }
+    previousFront = (pid, app, running, t - t0)
     spaceWatch.follow(via: "activation")
 }
 
@@ -3285,6 +3307,7 @@ let launchFront = rigTest ? nil : workspace.frontmostApplication
 guard let baseline = awaitOffMain("the baseline", { takeBaseline(front: launchFront) }) else { dispatchMain() }
 if let error = baseline.error { fail("no baseline, so nothing was launched: \(error)") }
 frontAtLaunch = launchFront
+if let front = launchFront { previousFront = (front.processIdentifier, describe(front), front, 0) }
 focusAtLaunch = baseline.focused
 timSpaceAtLaunch = baseline.timSpace
 policy = RestorePolicy(userFront: baseline.frontIsTims ? launchFront?.processIdentifier : nil, guardUntil: guardSeconds)
@@ -3339,7 +3362,7 @@ if !rigTest {
         let t = uptime()
         let input = lastInput()
         guard !finished, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-        onActivation(app.processIdentifier, app: describe(app), at: t, input: input)
+        onActivation(app.processIdentifier, app: describe(app), running: app, at: t, input: input)
     }
     center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: nil) { note in
         timEpoch.update { $0 += 1 }
@@ -3474,12 +3497,13 @@ func rigCommand(_ words: [String]) {
             _ = target.verified(window, owner: pid, ownerStart: start, ownerInTree: inTree, space: shown)
         }
         rigFront = pid
+        previousFront = (pid, rigApp(pid), nil, uptime() - t0)
     case ("activate", 2), ("activate", 3):
         guard let pid = pid_t(words[1]), !finished else { return }
         let t = uptime()
         let input = words.count == 3 ? Double(words[2]).map { t - t0 - $0 / 1000 } : nil
         rigFront = pid
-        onActivation(pid, app: rigApp(pid), at: t, input: input)
+        onActivation(pid, app: rigApp(pid), running: nil, at: t, input: input)
     case ("notify", 1):
         spaceChanged(input: nil)
     case ("window", 2):
