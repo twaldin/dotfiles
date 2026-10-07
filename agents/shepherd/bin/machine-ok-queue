@@ -39,8 +39,9 @@ SIGTERM, SIGINT and SIGHUP are forwarded to the command; SIGINT is not when it c
 which delivered it to the command already. Only the oldest waiter samples the gate: every 30 s while the
 machine is busy. A job admitted before a hold keeps running; quiet-window's STOP NOW still covers it.
 `status` prints who runs and who waits, since when, in which lane, and what holds are active. `log` prints, one
-JSON line each, every job whose run overlaps the window (caller, command prefix, slot, clamp, lane, hold, wait s,
-run s, exit) and every cancel inside it: the excerpt an armed run's record attaches.
+JSON line each, every job whose run overlaps the window (caller, command prefix, slot, clamp, lane, hold, state,
+wait s, run s, exit) and every cancel inside it: the excerpt an armed run's record attaches. A job never released
+whose ticket is no longer held is not running: its state is "unknown (pre-release-logging or crashed)".
 
 Files, in ~/.local/state/machine-ok/: queue/<n>.json, one ticket per waiter or runner (pid, start, cwd,
 agent, command), flock'ed by its process for as long as it lives, so a ticket nobody holds is dead;
@@ -462,7 +463,7 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
                hold=hold and hold.get("id"))
     with Lock():
         save()
-    log("admit", ticket=n, slot=slot, slots=slots, agent=agent, pane=pane, cwd=row["cwd"], command=cmd,
+    log("admit", ticket=n, pid=os.getpid(), slot=slot, slots=slots, agent=agent, pane=pane, cwd=row["cwd"], command=cmd,
         flags=list(flags), wait_s=round(waited, 1), gate=sample, clamp=clamp and clamp["label"], lane=kind,
         hold=hold and (hold.get("id") or f"{hold.get('start')}-{hold.get('owner')}"))
     say(f"ticket {n} admitted to slot {slot}/{slots} after {span(waited)}" + (f" ({sample})" if sample else "")
@@ -542,9 +543,18 @@ def parse_utc(text):
     raise ValueError(f"not a UTC time like 2026-10-07T21:00Z: {text!r}")
 
 
+UNKNOWN = "unknown (pre-release-logging or crashed)"
+
+
 def excerpt(t_from, t_to):
-    """queue.jsonl for a window, one JSON line each: every job whose run [admit, release] overlaps it (still running
-    when it has no release), then every cancel inside it. For armed-run records (bench)."""
+    """queue.jsonl for a window, one JSON line each: every job whose run [admit, release] overlaps it, then every
+    cancel inside it. For armed-run records (bench). A job's state is released, running (its ticket is still held on
+    this host), or UNKNOWN: admitted, never released, and its ticket is gone (admitted before release events were
+    logged, or the queue process was killed before it could log one)."""
+    os.makedirs(QUEUE, exist_ok=True)
+    with Lock():
+        held = {n: r.get("pid") for n, r in tickets() if r.get("state") == "running"}
+    me = host()
     jobs, cancels = {}, []
     try:
         with open(LOG) as f:
@@ -568,10 +578,15 @@ def excerpt(t_from, t_to):
         if j["admitted"] > t_to or (j["released"] and j["released"] < t_from):
             continue
         a, rel = j["admit"], j["release"] or {}
+        n = a.get("ticket")
+        # Running: this host still holds the ticket, under the admit's pid (older admits log none; the number decides).
+        live = a.get("host") == me and n in held and a.get("pid", held[n]) == held[n]
+        state = "released" if j["release"] else "running" if live else UNKNOWN
         out.append({"event": "job", "host": a.get("host"), "ticket": a.get("ticket"), "agent": a.get("agent"),
                     "cmd": shlex.join(a.get("command") or [])[:120], "slot": a.get("slot"), "clamp": a.get("clamp"),
-                    "lane": a.get("lane"), "hold": a.get("hold"), "admitted": a["ts"], "released": rel.get("ts"),
-                    "wait_s": a.get("wait_s"), "run_s": rel.get("run_s"), "exit": rel.get("exit")})
+                    "lane": a.get("lane"), "hold": a.get("hold"), "state": state, "admitted": a["ts"],
+                    "released": rel.get("ts"), "wait_s": a.get("wait_s"), "run_s": rel.get("run_s"),
+                    "exit": rel.get("exit")})
     for c in cancels:
         out.append({"event": "cancel", "host": c.get("host"), "ticket": c.get("ticket"), "agent": c.get("agent"),
                     "cmd": shlex.join(c.get("command") or [])[:120], "at": c["ts"], "wait_s": c.get("wait_s")})

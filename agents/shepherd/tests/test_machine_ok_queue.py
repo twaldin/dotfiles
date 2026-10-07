@@ -598,7 +598,7 @@ class Log(QueueCase):
             *job(2, '2026-10-07T20:50:00Z', '2026-10-07T21:05:00Z'),   # runs into it
             {'ts': '2026-10-07T21:20:00Z', 'event': 'cancel', 'ticket': 4, 'agent': 'terms', 'command': ['pytest'],
              'wait_s': 60},
-            *job(3, '2026-10-07T21:30:00Z', None),                      # still running
+            *job(3, '2026-10-07T21:30:00Z', None),                      # never released, and no ticket 3 is held
             *job(5, '2026-10-07T21:50:00Z', '2026-10-07T21:55:00Z'),   # after it
             {'ts': '2026-10-07T22:00:00Z', 'event': 'cancel', 'ticket': 6, 'command': ['x'], 'wait_s': 1},
             {'ts': '2026-10-07T21:10:00Z', 'event': 'long-wait', 'ticket': 7},
@@ -608,11 +608,33 @@ class Log(QueueCase):
         self.assertEqual([(r['event'], r['ticket']) for r in rows], [('job', 2), ('job', 3), ('cancel', 4)])
         self.assertEqual(rows[0], {'event': 'job', 'host': 'testhost', 'ticket': 2, 'agent': 'canvas',
                                    'cmd': 'go test ./pkg2/...', 'slot': 1, 'clamp': 'taskpolicy -b, nice 10 (heavy hold)',
-                                   'lane': 'heavy-hold', 'hold': '2026-10-07T21:00Z-roblox-hold',
+                                   'lane': 'heavy-hold', 'hold': '2026-10-07T21:00Z-roblox-hold', 'state': 'released',
                                    'admitted': '2026-10-07T20:50:00Z', 'released': '2026-10-07T21:05:00Z',
                                    'wait_s': 12.0, 'run_s': 33.0, 'exit': 0})
-        self.assertEqual((rows[1]['released'], rows[1]['run_s']), (None, None))
+        # Tickets 17, 195 and 245 on home (2026-10-07): admitted before release events were logged, read as slot-holders.
+        self.assertEqual((rows[1]['state'], rows[1]['released'], rows[1]['run_s']),
+                         ('unknown (pre-release-logging or crashed)', None, None))
         self.assertEqual((rows[2]['agent'], rows[2]['cmd'], rows[2]['at']), ('terms', 'pytest', '2026-10-07T21:20:00Z'))
+
+    def test_a_job_is_running_while_its_ticket_is_held_then_released(self):
+        def window():
+            now = dt.datetime.now(dt.timezone.utc)
+            code, rows, err = self.excerpt('--from', (now - dt.timedelta(minutes=1)).strftime('%Y-%m-%dT%H:%MZ'),
+                                           '--to', (now + dt.timedelta(minutes=1)).strftime('%Y-%m-%dT%H:%MZ'))
+            self.assertEqual(code, 0, err)
+            (row,) = rows
+            return row
+        p = self.start(*self.blocker('H'))
+        self.until(lambda: (self.work / 'H.pid').exists(), what='holder running')
+        admit = [e for e in self.events() if e['event'] == 'admit'][-1]
+        self.assertEqual(admit['pid'], p.pid)
+        row = window()
+        self.assertEqual((row['state'], row['released'], row['exit']), ('running', None, None))
+        (self.work / 'H.go').touch()
+        self.assertEqual(self.finish(p)[0], 0)
+        row = window()
+        self.assertEqual((row['state'], row['exit']), ('released', 0))
+        self.assertIsNotNone(row['released'])
 
     def test_a_real_run_shows_up_and_bad_windows_are_usage_errors(self):
         t0 = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)
