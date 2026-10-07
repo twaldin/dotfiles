@@ -130,7 +130,9 @@ class FakeEasl:
             tile['pid'] = self.world.pid()
             self.world.born(tile['pid'])
         tile.update(self.after_restart)
-        if self.session_after_restart:
+        if self.session_after_restart == 'gone':  # easl 0.2.2 dropped props.agent.sessionPath on some restarts
+            self.session.pop(tile['tile'], None)
+        elif self.session_after_restart:
             self.session[tile['tile']] = self.session_after_restart
         return {'ok': True}
 
@@ -980,7 +982,8 @@ class TileFailures(TileSandbox):
         self.world.place_tile()
         self.easl.session_after_restart = '/elsewhere/other.jsonl'
         row = self.row(self.host())
-        self.assertEqual(row['action'], 'restarted, but easl reports session /elsewhere/other.jsonl')
+        self.assertEqual(row['action'], 'restarted, but easl reports session /elsewhere/other.jsonl; its session '
+                                        f'before the restart: {self.world.tile_session}')
         self.assertFalse(row['session_unchanged'])
 
     def test_a_failing_agent_list_is_one_error_and_herdr_panes_are_still_processed(self):
@@ -1110,6 +1113,21 @@ class RestartSafety(TileSandbox):
                          (lead, 'skip: restarting lead lost its agent on this host'))
         self.assertEqual(self.calls('agent.restart'), [self.RESTART])
         self.assertEqual(res['errors'], [f'obj_lead: {lead}'])
+
+    def test_a_restart_that_loses_the_tiles_session_path_stops_the_host_and_names_the_session(self):
+        for after, reported in (('gone', 'no props.agent.sessionPath'), ('/elsewhere/fresh.jsonl', 'session /elsewhere/fresh.jsonl')):
+            with self.subTest(after=after):
+                world = self.new_world()
+                world.place_tile(name='lead', tile='obj_lead')
+                session = world.tile_session
+                world.place_tile(name='scout', tile='obj_scout')
+                self.easl.session_after_restart = after
+                res = self.host()
+                lead = f'restarted, but easl reports {reported}; its session before the restart: {session}'
+                self.assertEqual((self.row(res, 'obj_lead')['action'], self.row(res, 'obj_scout')['action']),
+                                 (lead, 'skip: restarting lead lost its session path on this host'))
+                self.assertEqual(self.calls('agent.restart'), [self.RESTART])
+                self.assertEqual(res['errors'], [f'obj_lead: {lead}'])
 
 
 class TileRoll(TileSandbox):

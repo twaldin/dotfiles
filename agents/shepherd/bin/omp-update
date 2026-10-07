@@ -26,9 +26,9 @@ Policy (Tim, 2026-10-05, via the meta pane; hourly rotation 2026-10-07):
   or its session file is not on disk. A tile restarts only where `zsh -c 'command -v omp'`
   finds omp in the easl app's environment: easl's resume runs the tile's bare `omp` through
   zsh, and on 2026-10-07 a zsh without ~/.bun/bin killed three agents that way. The restart
-  is verified: same session file, new pid, and the memory before/after is logged; one whose
-  agent does not come back stops the host's other restarts and names the command that
-  resumes it.
+  is verified: same session file, new pid, and the memory before/after is logged. One whose
+  agent does not come back, or whose tile no longer reports that session (props.agent.
+  sessionPath gone or changed), stops the host's other restarts and names the way back.
 - After every restart the new omp's own log must show no extension that failed to load or
   bind, and a tile must report easl protocol >= 1 and its model within 60 s. A failure stops
   the host's other restarts and the rest of the run; when the failing host runs a version a
@@ -659,11 +659,15 @@ def restart_tile(row, a):
         time.sleep(2)
     row["session_unchanged"] = now_session == row["session"]
     row["memory_dropped"] = (row["mem_after_mb"] or 0) < (row["mem_before_mb"] or 0)
+    # A tile whose props.agent.sessionPath went missing (easl 0.2.2) or changed may come back on a
+    # fresh session at its next resume: the host's other restarts stop (session_lost).
+    row["session_lost"] = not row["session_unchanged"]
     row["ext_check"] = extension_problem(new, a, a.get("model")) or "ok"
     if row["ext_check"] != "ok":
         return f"restarted, but extension check failed: {row['ext_check']}"
     if not row["session_unchanged"]:
-        return f"restarted, but easl reports session {now_session}"
+        reported = f"session {now_session}" if now_session else "no props.agent.sessionPath"
+        return f"restarted, but easl reports {reported}; its session before the restart: {row['session']}"
     return "restarted"
 
 
@@ -929,11 +933,13 @@ def host_main(params):
                     row["action"] = f"failed: {str(e)[:200]}"
                 if row.get("agent_lost"):
                     halt = f"restarting {name or pane} lost its agent on this host"
+                if row.get("session_lost"):
+                    halt = f"restarting {name or pane} lost its session path on this host"
                 if row.get("ext_check", "ok") != "ok":
                     halt = f"extension check failed after restarting {name or pane} on this host"
                     res["ext_failures"].append({"pane": pane, "name": name, "version": res["installed_after"],
                                                 "problem": row["ext_check"]})
-                if row["action"].startswith(("failed", "restarted, but extension check failed")):
+                if row["action"].startswith(("failed", "restarted, but")):
                     res["errors"].append(f"{pane}: {row['action']}")
         acts.append({"kind": "pane", **{k: v for k, v in row.items() if k != "session"},
                      "session": os.path.basename(session or "")})
