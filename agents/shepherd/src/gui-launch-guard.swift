@@ -86,9 +86,14 @@
 //     on screen, is moved by id to --space. So every Space notification, and every tree window the guard sees come on
 //     screen (the windows on screen, read every 100 ms from the launch on: a window not on screen at the read before),
 //     re-checks the union of listed and all known tree windows, sampling omitted IDs through SkyLight and
-//     WindowServer even after their 3 s retries end. Each newly shown tree ID is sighted and parked individually,
-//     even with no AX event and no yabai row. macOS can show an existing window again (a native tab selected again)
-//     with no create event and no Space change. The guard keeps both yabai's last index and the measured Tim membership.
+//     WindowServer even after their 3 s retries end, and judging each such sample before its own yabai query (which
+//     may be slow while the window closes): back on Tim's screen after a placement left it off, or there at the final
+//     sweep, is a problem then; one never placed found on his screen is unresolved from that sample. Each newly shown
+//     tree ID is sighted and parked individually, even with no AX event and no yabai row, and so is one already on
+//     screen when its owner joins the tree (a window on screen whose owner was outside the tree is read again at the
+//     first poll after the tree gains a root or an adoption). macOS can show an existing window again (a native tab
+//     selected again) with no create event and no Space change. The guard keeps both yabai's last index and the
+//     measured Tim membership.
 //     Any of a window's SkyLight memberships in Tim's Spaces counts, even when yabai reports the target. A window
 //     found on his screen after an off-Tim sample, or there at the final sweep, is a
 //     problem, created or not. Its first placement there, where macOS opens new windows, is a move whose
@@ -2715,8 +2720,9 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
 /// first placement on his screen is a move whose onTimSpaceMs counts from the start of the stretch it has counted in
 /// (its first sighting, the sample that found it counting after an exempt one, or the event that reported it) to the
 /// move: a problem past onTimsScreenLimit; so is a window that stretch began on his screen (SkyLight) that yabai places
-/// elsewhere later than that.
-func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
+/// elsewhere later than that. `latched`: the sweep already reported this window's sample on his screen (omittedSample),
+/// so this park reports nothing more of that exposure.
+func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bool = false) {
     tracked("park of window \(id) (\(via))", final: final) {
         let (found, why) = windowQuery(id)
         let queried = uptime()
@@ -2758,8 +2764,8 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
             return samples[id]
         }
         let back = onTims && wasOnTims == false
-        let flagged = back || (onTims && final)
-        if flagged {
+        let flagged = latched || back || (onTims && final)
+        if flagged && !latched {
             problem(back ? "window \(id) of the tree (\(app), pid \(pid)) was on \(look.timLocation) (found by \(via)) after the guard had seen it on Space \(before.map { String($0) } ?? "?"): macOS showed it to him again"
                          : "window \(id) of the tree (\(app), pid \(pid)) was on \(look.timLocation) at the guard's end")
         }
@@ -2857,10 +2863,40 @@ let finalWindowList = Locked([String: Any]())
     return (windows, nil)
 }
 
+/// A known tree window yabai's list omits, sampled directly by a sweep (`look`): judged now, before its own yabai
+/// query (park), which may be slow while the window closes or moves. Counting on Tim's screen after a placement left it
+/// off (windowOnTims false), or at the final sweep, is a problem now (returns true: the park that follows reports no
+/// more of it). An existing unresolved entry takes every sample; a window yabai never placed found counting on his
+/// screen becomes unresolved here (unplacedAt) if it was not, so its closing during the query cannot clear it. A
+/// placed window's measured Tim state is kept (windowOnTims). An exempt sample is left to park.
+@Sendable func omittedSample(_ id: Int, _ look: WindowLook, seen: Double, via: String, final: Bool) -> Bool {
+    if let open = unresolved.value[id] {
+        unplacedAt(id, look, seen: open.seen, via: open.via, why: open.why, reported: open.reported)
+    }
+    guard look.exempt == nil else { return false }
+    let onTims = look.onTims
+    let was = windowOnTims.update { (samples: inout [Int: Bool]) -> Bool? in
+        defer { if samples[id] != nil { samples[id] = onTims } }
+        return samples[id]
+    }
+    let back = onTims && was == false
+    if back || (onTims && final) {
+        let pid = look.server?.window?.pid.map { "pid \($0)" } ?? "pid unknown"
+        problem(back ? "window \(id) of the tree (\(pid)) was on \(look.timLocation) (found by \(via); yabai's window list omits it) after the guard had seen it on Space \(windowSpaces.value[id].map { String($0) } ?? "?"): macOS showed it to him again"
+                     : "window \(id) of the tree (\(pid)) was on \(look.timLocation) at the guard's end (yabai's window list omits it)")
+        return true
+    }
+    if onTims && was == nil && unresolved.value[id] == nil {
+        unplacedAt(id, look, seen: seen, via: via, why: "yabai's window list omits it", reported: false)
+    }
+    return false
+}
+
 /// Samples and parks the union of listed and known tree windows, including on-target rows: a sticky window's Tim
 /// membership need not match yabai's index. Known omitted IDs are sampled directly and re-queried unless WindowServer
-/// proves them gone or owned outside the tree. Their unplaced evidence accumulates every sample, after the 3 s retries
-/// too. A failed/unreadable list is window-list-failed but does not suppress the known-window checks.
+/// proves them gone or owned outside the tree; each sample is judged before that query (omittedSample) and accumulates
+/// unplaced evidence, after the 3 s retries too. A failed/unreadable list is window-list-failed but does not suppress
+/// the known-window checks.
 /// The final sweep's two tries share one absolute deadline, own their timeouts and record final-window-list.
 func sweep(_ via: String, final: Bool = false) {
     tracked("sweep (\(via))", final: final) {
@@ -2908,9 +2944,8 @@ func sweep(_ via: String, final: Bool = false) {
                 windowsUnknown.update { $0[id] = nil }
                 unresolved.update { $0[id] = nil }
             } else {
-                let open = unresolved.value[id]
-                if let open { unplacedAt(id, look, seen: open.seen, via: open.via, why: open.why, reported: open.reported) }
-                park(id, seen: open?.seen ?? seen, via: via, final: final)
+                let latched = omittedSample(id, look, seen: seen, via: via, final: final)
+                park(id, seen: unresolved.value[id]?.seen ?? seen, via: via, final: final, latched: latched)
             }
         }
     }

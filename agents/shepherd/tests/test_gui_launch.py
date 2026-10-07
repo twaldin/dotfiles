@@ -2824,6 +2824,34 @@ class Guard(unittest.TestCase):
         _, result = self.end_rig(process, lines, root)
         self.assertTrue(any(m.get('id') == wid and m.get('seenBefore') == 7 for m in result['moves']), result['moves'])
 
+    def test_a_placed_window_omitted_by_yabai_is_judged_back_on_tims_space_before_its_slow_query(self):
+        # Review 2: placed off Tim (10 -> 6), then omitted from yabai's list and back on Tim's Space 2; it closes while
+        # the sweep's own 1 s query about it waits. The sweep's sample, taken before that query, is the evidence.
+        wid = 89340
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [110], 'display': 'D2'}})
+        put(root / ('window-%d.json' % wid), json.dumps({'id': wid, 'pid': easl, 'app': 'easl', 'title': 'root', 'space': 10}))
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False]]))
+        self.send(process, 'window %d' % wid)
+        moved = lines.until(lambda r: r.get('event') == 'window' and r.get('id') == wid, 10)[-1]
+        self.assertEqual((moved['from'], moved['to'], moved['moved']), (10, 6, True))
+        asked = root / ('window-%d-asked' % wid)
+        asked.unlink()
+        put(root / 'window-delay', '1.0')
+        put(root / 'skylight-windows.json', json.dumps({str(wid): {'spaces': [102], 'display': 'D1'}}))
+        self.send(process, 'notify')
+        deadline = time.monotonic() + 5
+        while not asked.exists():
+            self.assertLess(time.monotonic(), deadline, 'the sweep never asked yabai about the omitted window')
+            time.sleep(0.01)
+        put(root / 'onscreen.json', '[]')
+        put(root / 'skylight-windows.json', '{}')
+        (root / ('window-%d.json' % wid)).unlink()
+        put(root / 'window-delay', '0')
+        time.sleep(1.2)  # the query answers, and the window is gone
+        _, result = self.end_rig(process, lines, root)
+        self.assertTrue(any(p.startswith('window %d ' % wid) and "on Tim's Space 2" in p and 'macOS showed it to him again' in p
+                            for p in result['problems']), result['problems'])
+
     def test_a_window_on_screen_before_its_owner_joins_the_tree_is_sighted_once_it_joins(self):
         # Review 2 STANDARDS: WindowServer shows the window while its owner is outside the tree (as before the scan or a
         # launch adopts it); then the owner joins (the rig's root, as an adoption does). yabai never lists the window.

@@ -89,8 +89,12 @@ and/or guards one that something else starts, then checks that nothing took it.
   counts from its first sighting: past 250 ms that fails the check regardless of the move's destination or caller
   placement. At that sighting the guard reads the window's Spaces and display from SkyLight (firstSpace, firstDisplay,
   firstAt). Every membership in a Tim Space counts, even when yabai's one index is the target. Each sweep samples
-  both listed and all known IDs, including omitted windows after their 3 s retries end; a new WindowServer ID gets
-  its own first sighting and park/retry, even with no AX event or yabai row. A window yabai will not place
+  both listed and all known IDs, including omitted windows after their 3 s retries end, and judges an omitted
+  window's sample before its own yabai query: back on his screen after a placement left it off, or there at the
+  end, fails the check then, and one never placed found on his screen is unresolved (below) even if it closes during
+  that query. A new WindowServer ID gets its own first sighting and park/retry, even with no AX event or yabai row,
+  and so does one already on screen when its owner joins the tree (read again once the tree gains a root or an
+  adoption). A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
   (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen, also when
   the guard ends within those 3 s.
