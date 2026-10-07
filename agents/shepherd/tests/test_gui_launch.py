@@ -1769,10 +1769,11 @@ class Guard(unittest.TestCase):
 
     # The rig: the guard without a GUI ---------------------------------------------------------------------
 
-    def rig_argv(self, windows=(), flags=(), space=7, shown=1, onscreen=False):
+    def rig_argv(self, windows=(), flags=(), space=7, shown=1, onscreen=False, skylight=None):
         """What a --rig guard (--space `space`, and `flags`) reads, in a directory of its own: RIG_YABAI, with yabai's
         Spaces as rig_spaces() says, answered 0.6 s late, and `windows` its window list; Tim's display on Space `shown`;
-        with `onscreen`, onscreen.json stands for the windows on screen (none at first). Its argv, and the directory."""
+        with `onscreen`, onscreen.json stands for the windows on screen (none at first); with `skylight` ({id: {"spaces",
+        "display"}}), skylight-windows.json stands for SkyLight's read of windows. Its argv, and the directory."""
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))
         yabai = root / 'yabai'
         yabai.write_text(RIG_YABAI % {'dir': root})
@@ -1788,13 +1789,16 @@ class Guard(unittest.TestCase):
         if onscreen:
             put(root / 'onscreen.json', '[]')
             flags = list(flags) + ['--onscreen', str(root / 'onscreen.json')]
+        if skylight is not None:
+            put(root / 'skylight-windows.json', json.dumps({str(k): v for k, v in skylight.items()}))
+            flags = list(flags) + ['--skylight-windows', str(root / 'skylight-windows.json')]
         return [str(self.binary), '--rig', '--space', str(space), '--guard-seconds', '60', '--yabai', str(yabai),
                 '--displays', str(root / 'displays.json'), '--summary', str(root / 'summary.json')] + list(flags), root
 
-    def rig(self, windows=(), flags=(), space=7, shown=1, onscreen=False):
+    def rig(self, windows=(), flags=(), space=7, shown=1, onscreen=False, skylight=None):
         """A --rig guard as rig_argv() sets it up. The process, its stdout lines, and its directory; its start event
         (guarding) is self.rig_start."""
-        argv, root = self.rig_argv(windows, flags, space, shown, onscreen)
+        argv, root = self.rig_argv(windows, flags, space, shown, onscreen, skylight)
         process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         lines = Lines(process.stdout)
         self.addCleanup(lambda: (process.kill(), process.wait(), lines.thread.join(5), process.stdin.close(), process.stdout.close()))
@@ -2309,6 +2313,64 @@ class Guard(unittest.TestCase):
         self.assertLessEqual(final['ms'], 4100)
         self.assertIn("the tree's windows could not be located at the guard's end: yabai -m query --windows did not answer within 2.0 s",
                       result['problems'])
+
+    # perf's receipt ~/dev/easl-lanes/perf-lead/gui-launch.jsonl (sha256 af721a36…, 06:30Z, its third launch): --space 6,
+    # Tim's display on Space 4; Accessibility reported easl's window 89243 created (ax-created), yabai answered
+    # "yabai -m query --windows --window 89243 exited 1" (it did not list the window yet), the guard gave up after 1 s
+    # (window-unknown, moved 0), the window sat on Space 4 for ~10 s, the tree exited, and the check said ok. Roblox's
+    # receipts: Studio windows listed by yabai 1.3-1.5 s late.
+    def late_rig(self, skylight=None, onscreen=False):
+        easl, _ = self.probe(self.java)
+        process, lines, root = self.rig(space=6, shown=4, skylight=skylight, onscreen=onscreen)
+        put(root / 'moves', 'apply')
+        self.send(process, 'root %d' % easl.pid)
+        return process, lines, root, easl.pid
+
+    def test_a_window_yabai_lists_late_is_moved_once_listed_and_its_time_on_tims_space_counts_from_first_sight(self):
+        # GR2: asked about every 50 ms for 3 s, moved as soon as yabai lists it (1.4 s here); SkyLight's read at its first
+        # sighting puts it on Tim's Space 4, so its time there counts from then: more than 250 ms, a problem.
+        process, lines, root, easl = self.late_rig(skylight={89243: {'spaces': [104], 'display': 'D1'}})
+        self.send(process, 'window 89243')
+        time.sleep(1.4)
+        put(root / 'window-89243.json', json.dumps({'id': 89243, 'pid': easl, 'app': 'easl', 'title': 'root', 'space': 4}))
+        seen = lines.until(lambda r: r.get('event') == 'window' and r.get('id') == 89243, 10)
+        self.assertNotIn('window-unknown', [e.get('event') for e in seen])
+        moved = seen[-1]
+        self.assertEqual({k: moved[k] for k in ('from', 'to', 'moved', 'via', 'firstSpace', 'firstSpaceId', 'firstDisplay', 'firstOnTimsScreen')},
+                         {'from': 4, 'to': 6, 'moved': True, 'via': 'ax-created', 'firstSpace': 4, 'firstSpaceId': 104,
+                          'firstDisplay': 'D1', 'firstOnTimsScreen': True})
+        self.assertGreaterEqual(moved['onTimSpaceMs'], 1300)
+        _, result = self.end_rig(process, lines, root)
+        slow = [p for p in result['problems'] if p.startswith('window 89243 ')]
+        self.assertEqual(len(slow), 1, result['problems'])
+        self.assertRegex(slow[0], r"^window 89243 of the tree \(easl, pid %d\) was on Tim's screen for \d+\.\d ms before the guard "
+                                  r"placed it \(more than 250 ms\)$" % easl)
+
+    def test_a_window_yabai_never_lists_that_skylight_shows_on_display_2_is_no_problem(self):
+        # GR2: SkyLight proves where it was: Space 10, on display D2, never on Tim's screen.
+        process, lines, root, easl = self.late_rig(skylight={89250: {'spaces': [110], 'display': 'D2'}})
+        self.send(process, 'window 89250')
+        unknown = lines.until(lambda r: r.get('event') == 'window-unknown', 10)[-1]
+        self.assertEqual({k: unknown[k] for k in ('window', 'reason', 'firstSpace', 'firstDisplay', 'firstOnTimsScreen', 'space', 'display')},
+                         {'window': 89250, 'reason': 'yabai -m query --windows --window 89250 exited 1', 'firstSpace': 10,
+                          'firstDisplay': 'D2', 'firstOnTimsScreen': False, 'space': 10, 'display': 'D2'})
+        self.assertGreaterEqual(unknown['unplacedMs'], 2900)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+
+    def test_a_window_yabai_never_lists_and_skylight_cannot_place_fails_the_check_though_it_is_gone_at_the_end(self):
+        # GR2, perf's third launch replayed: no SkyLight read names its Space, yabai never lists it, and the tree exits
+        # (WindowServer no longer has it) before the guard ends. Its time on Tim's screen cannot be bounded: a problem.
+        process, lines, root, easl = self.late_rig(onscreen=True)
+        put(root / 'onscreen.json', json.dumps([[89243, easl]]))
+        self.send(process, 'window 89243')
+        unknown = lines.until(lambda r: r.get('event') == 'window-unknown', 10)[-1]
+        self.assertEqual((unknown['window'], unknown['reason'], unknown['windowServer'], unknown['firstSpace']),
+                         (89243, 'yabai -m query --windows --window 89243 exited 1', 'on screen', None))
+        put(root / 'onscreen.json', '[]')
+        _, result = self.end_rig(process, lines, root)
+        self.assertIn("window 89243 of the tree (reported by ax-created) was never placed before it went: yabai -m query --windows "
+                      "--window 89243 exited 1; nothing showed it off Tim's screen, so its time there cannot be bounded", result['problems'])
 
 
 if __name__ == '__main__':

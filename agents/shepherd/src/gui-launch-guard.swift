@@ -85,11 +85,19 @@
 //     the Space Tim is viewing with no create event and no Space change. The guard keeps the Space it last saw each
 //     tree window on. A tree window found on Tim's screen (his Spaces 1-4, or the Space his display shows or should
 //     show, if not --space) after the guard saw it on another Space, or found there by the final sweep, is a
-//     problem, created or not; a window's first sighting there, where macOS opens new windows, is only a move
-//     (a known flash, recorded with onTimSpaceMs). A read of the windows on screen that fails is a problem. A window
-//     whose location or owner yabai will not give, a window list that fails, and a tree window still off --space
-//     after its move are recorded as they happen; the tree's windows that the final sweep still cannot locate are a
-//     problem, and so is each tree window still off --space after its move (window-off-target; GR2, addendum 1).
+//     problem, created or not. Its first placement there, where macOS opens new windows, is a move whose
+//     onTimSpaceMs counts from the window's first Accessibility sighting (or the event that reported it) to the move:
+//     past 250 ms it is a problem (GR1's receipts parked in 30-95 ms). At its first Accessibility sighting each tree
+//     window's Spaces and display are read from SkyLight directly, no yabai (firstSpace, firstDisplay, firstAt on its
+//     records): a window SkyLight put on Tim's screen that yabai places elsewhere more than 250 ms later is a problem
+//     too. A read of the windows on screen that fails is a problem. A window yabai will not place (no answer, or one
+//     without its owner or Space) is asked about again every 50 ms for 3 s after the event that reported it and moved
+//     as soon as yabai places it; then it is window-unknown (with WindowServer's and SkyLight's view of it), until
+//     yabai places it (window-located). One never placed, still there at the end or gone before it, is a problem
+//     unless every SkyLight read of it showed it off Tim's screen: its time there cannot be bounded. A window list
+//     that fails and a tree window still off --space after its move are recorded as they happen; a list that leaves
+//     out an unknown window clears it only if WindowServer shows it gone. A tree window still off --space after its
+//     move is a problem (window-off-target; GR2, addendum 1).
 //     --allow-caller-placement, for a caller that moves the tree's windows itself afterwards, changes only that
 //     verdict: a window off --space is still moved and recorded, but no problem when it is on a Space and off Tim's
 //     screen (his Spaces 1-4, and the Space his display shows or should show, if not --space); one on his screen,
@@ -135,10 +143,11 @@
 //        gui-launch-guard --helpers --yabai PATH
 //                                     yabai calls and the guard's end, driven from stdin (tests)
 //        gui-launch-guard --rig --space N --yabai PATH --displays PATH --summary PATH [--guard-seconds S]
-//            [--allow-caller-placement] [--onscreen PATH]
+//            [--allow-caller-placement] [--onscreen PATH] [--skylight-windows PATH]
 //                                     the guard in a session without a GUI: a stand-in yabai, a file standing in
-//                                     for SkyLight's displays (and one for the windows on screen, or none on
-//                                     screen), and its events driven from stdin (tests)
+//                                     for SkyLight's displays (one for the windows on screen, or none on screen;
+//                                     one for SkyLight's read of each window's Spaces and display, or none), and
+//                                     its events driven from stdin (tests)
 // build: swiftc -O -swift-version 5 -target arm64-apple-macos13 \
 //          -o ~/.local/bin/gui-launch-guard src/gui-launch-guard.swift
 import AppKit
@@ -2120,6 +2129,7 @@ var resolving = false, helperTest = false, rigTest = false
 var allowCallerPlacement = false
 var displaysPath: String?
 var onscreenPath: String?  // --onscreen (rig): the file standing in for the windows on screen
+var skylightWindowsPath: String?  // --skylight-windows (rig): the file standing in for SkyLight's read of windows
 var parentWatch: pid_t?
 var attachExe: String?, attachNeedle: String?, givenToken: String?
 var launchArgv: [String] = []
@@ -2145,6 +2155,7 @@ while !argv.isEmpty {
     case "--token": givenToken = value
     case "--displays": displaysPath = value
     case "--onscreen": onscreenPath = value
+    case "--skylight-windows": skylightWindowsPath = value
     default: fail("unknown flag \(flag)")
     }
 }
@@ -2162,11 +2173,13 @@ if rigTest {
     guard space > 0, guardSeconds > 0, guardSeconds.isFinite, !yabaiPath.isEmpty, !summaryPath.isEmpty, displaysPath != nil,
           mode == nil, matcher == nil, parentWatch == nil else {
         fail("usage: --rig --space N --yabai PATH --displays PATH --summary PATH [--guard-seconds S] [--allow-caller-placement] " +
-             "[--onscreen PATH]")
+             "[--onscreen PATH] [--skylight-windows PATH]")
     }
 } else {
     guard displaysPath == nil else { fail("--displays is for --rig: the guard reads Tim's display from SkyLight") }
-    guard onscreenPath == nil else { fail("--onscreen is for --rig: the guard reads the windows on screen from WindowServer") }
+    guard onscreenPath == nil, skylightWindowsPath == nil else {
+        fail("--onscreen and --skylight-windows are for --rig: the guard reads WindowServer and SkyLight")
+    }
     guard space > 0, guardSeconds > 0, guardSeconds.isFinite, adoptTimeout > 0, adoptTimeout.isFinite,
           !yabaiPath.isEmpty, !summaryPath.isEmpty, (mode == nil) == launchArgv.isEmpty, mode != nil || matcher != nil else {
         fail("usage: --space N --guard-seconds S --yabai PATH --summary PATH [--parent-pid P] [--adopt-timeout S] " +
@@ -2299,10 +2312,110 @@ func windowFields(_ w: [String: Any]?) -> [String: Any] {
     emit(record)
 }
 
-/// yabai would not say where tree window `id` is: unknown until a window list places it or no longer has it.
-@Sendable func windowUnknown(_ id: Int, via: String, why: String) {
-    windowsUnknown.update { $0[id] = why }
-    recordWindowFault(["event": "window-unknown", "window": id, "via": via, "reason": why])
+/// GR2: how often, and for how long after the event that reported it, a tree window yabai will not place (no answer,
+/// or one without its owner or Space) is asked about again; it is moved as soon as yabai places it. perf's receipt
+/// (af721a36, 06:30Z): Accessibility reported windows yabai did not list yet, the guard gave up after 1 s, and one sat
+/// on Tim's Space 4 unmoved for ~10 s while the check said ok.
+let unplacedInterval = 0.05
+let unplacedLimit = 3.0
+/// GR2: the longest a tree window may be on Tim's screen before the guard moves it: longer is a problem. The GR1
+/// receipts parked new windows in 30-95 ms; perf's late-listed ones took 769-1,279 ms.
+let onTimsScreenLimit = 0.25
+
+/// GR2: where SkyLight puts a window, read directly (no yabai): its Spaces (SkyLight ids) and its display's identifier.
+struct WindowPlace {
+    let spaces: [UInt64]
+    let display: String?
+}
+
+/// GR2: a tree window's first sighting by Accessibility, with SkyLight's read of where it was then (nil: SkyLight
+/// named no Space for it) and whether that is on Tim's screen.
+struct FirstSighting {
+    let at: Double  // uptime
+    let place: WindowPlace?
+    let onTims: Bool?
+}
+let firstSightings = Locked([Int: FirstSighting]())
+
+/// The tree windows that were window-unknown and have not been placed since (the resolution event, window-located,
+/// takes one out): when the event that reported each came, what reported it, why yabai would not place it, and
+/// whether every SkyLight read of it so far showed it off Tim's screen.
+let unresolved = Locked([Int: (seen: Double, via: String, why: String, offTims: Bool)]())
+
+/// Whether SkyLight's `place` is on Tim's screen (any of its Spaces is); nil: no place.
+@Sendable func placeOnTims(_ place: WindowPlace?) -> Bool? {
+    guard let place else { return nil }
+    return place.spaces.contains { spaceWatch.showsTim(spaceId: $0) }
+}
+
+/// Accessibility reported tree window `id` at `seen` (uptime): on its first sighting, SkyLight's read of where it is.
+/// Any thread; no child process.
+@Sendable func sighted(_ id: Int, at seen: Double) {
+    guard firstSightings.value[id] == nil else { return }
+    let place = SkyLight.windowPlace(id)
+    let sighting = FirstSighting(at: seen, place: place, onTims: placeOnTims(place))
+    firstSightings.update { if $0[id] == nil { $0[id] = sighting } }
+}
+
+/// The first-sighting fields of window `id`'s records: firstAt (seconds since launch), firstSpace (its index; null:
+/// one yabai's map does not know, or none), firstSpaceId, firstDisplay and firstOnTimsScreen. None before a sighting.
+@Sendable func firstFields(_ id: Int) -> [String: Any] {
+    guard let first = firstSightings.value[id] else { return [:] }
+    let sid = first.place?.spaces.first
+    return ["firstAt": decimal(first.at - t0, 3), "firstSpace": sid.flatMap { spaceWatch.index(of: $0) } ?? NSNull(),
+            "firstSpaceId": sid.map { NSNumber(value: $0) } ?? NSNull(), "firstDisplay": first.place?.display ?? NSNull(),
+            "firstOnTimsScreen": first.onTims ?? NSNull()]
+}
+
+/// WindowServer's record of window `id`, which needs no yabai: whether it exists and whether it is on screen; nil:
+/// unreadable. The rig reads its stand-in (--onscreen: a window listed exists and is on screen; without one, nil).
+@Sendable func windowServerState(_ id: Int) -> (exists: Bool, onScreen: Bool)? {
+    if rigTest {
+        guard onscreenPath != nil, let rows = shownWindows() else { return nil }
+        let listed = rows.contains { $0.id == id }
+        return (listed, listed)
+    }
+    guard let rows = CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(id)) as? [[String: Any]] else { return nil }
+    guard let row = rows.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.intValue == id }) else { return (false, false) }
+    return (true, (row[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false)
+}
+
+/// yabai would not place tree window `id` (`why`) for unplacedLimit since the event that reported it (`seen`), or at
+/// the final sweep: window-unknown, with what WindowServer and SkyLight show of it now. It is unresolved until yabai
+/// places it (window-located); unless WindowServer shows it gone it stays unknown, which the end reports.
+@Sendable func windowUnknown(_ id: Int, seen: Double, via: String, why: String) {
+    let state = windowServerState(id)
+    let gone = state?.exists == false
+    let now = gone ? nil : SkyLight.windowPlace(id)
+    let offTims = firstSightings.value[id]?.onTims == false && (gone || placeOnTims(now) == false)
+    windowsUnknown.update { $0[id] = gone ? nil : why }
+    unresolved.update { (list: inout [Int: (seen: Double, via: String, why: String, offTims: Bool)]) -> Void in
+        let known = list[id]
+        list[id] = (seen: known?.seen ?? seen, via: known?.via ?? via, why: why, offTims: (known?.offTims ?? true) && offTims)
+    }
+    let shown = state.map { $0.exists ? ($0.onScreen ? "on screen" : "off screen") : "gone" }
+    recordWindowFault(firstFields(id).merging([
+        "event": "window-unknown", "window": id, "via": via, "reason": why, "windowServer": shown ?? NSNull(),
+        "unplacedMs": ms(uptime() - seen), "space": now?.spaces.first.flatMap { spaceWatch.index(of: $0) } ?? NSNull(),
+        "spaceId": now?.spaces.first.map { NSNumber(value: $0) } ?? NSNull(), "display": now?.display ?? NSNull(),
+    ]) { $1 })
+}
+
+/// At the guard's end (after the final sweep): each tree window still unknown, or unresolved and gone, is a problem,
+/// unless every SkyLight read of it showed it off Tim's screen (it was never his to see): its time on his screen
+/// cannot be bounded.
+@Sendable func reportUnplacedAtEnd() {
+    let unknown = windowsUnknown.value
+    var open = unresolved.value
+    for id in unknown.keys where open[id] != nil && placeOnTims(SkyLight.windowPlace(id)) != false {
+        open[id]?.offTims = false  // on his screen, or SkyLight names no Space for it
+    }
+    for (id, why) in unknown.sorted(by: { $0.key < $1.key }) where open[id]?.offTims != true {
+        problem("window \(id) of the tree could not be located at the guard's end: \(why)")
+    }
+    for (id, u) in open.sorted(by: { $0.key < $1.key }) where unknown[id] == nil && !u.offTims {
+        problem("window \(id) of the tree (reported by \(u.via)) was never placed before it went: \(u.why); nothing showed it off Tim's screen, so its time there cannot be bounded")
+    }
 }
 
 /// A window list failed: where the tree's windows are is unknown until one answers.
@@ -2335,49 +2448,73 @@ func windowFields(_ w: [String: Any]?) -> [String: Any] {
 
 /// Moves one tree window to the target Space by id, after checking yabai knows it and that it is the tree's (its
 /// pid, with the start time the tree recorded). `seen` is when the event that reported it arrived; yabai may
-/// learn of a brand-new window a few ms after Accessibility does, so a window yabai does not answer for is asked
-/// about again for up to a second, without holding up the queue. Nothing ends unrecorded: a window yabai will not
-/// place, or whose answer does not say whose it is, is window-unknown (only an answer naming an owner outside the
-/// tree clears it), and a tree window still off the target after its move (or on no Space, which a move by Space
+/// learn of a brand-new window some time after Accessibility does, so a window yabai will not place is asked about
+/// again every unplacedInterval until unplacedLimit after `seen` (GR2; was 1 s), without holding up the queue, and
+/// moved as soon as yabai places it. Nothing ends unrecorded: from its first failure it is unknown (the end reports
+/// it if nothing places it), and at the limit it is window-unknown and unresolved until yabai places it
+/// (window-located); only an answer naming an owner outside the tree, a placement, or WindowServer showing it gone
+/// clears its unknown state. A tree window still off the target after its move (or on no Space, which a move by Space
 /// cannot reach) is window-off-target. GR2: each sighting's Space is kept (windowSpaces); a tree window found on Tim's
 /// screen (onTimsScreen) after the guard saw it on another Space came back to him, and one found there by the final
-/// sweep is there at the end: each is a problem, created or not. Its first sighting there, where macOS opens new
-/// windows, is only a move.
+/// sweep is there at the end: each is a problem, created or not. Its first placement on his screen is a move whose
+/// onTimSpaceMs counts from its first sighting (or the event that reported it) to the move: a problem past
+/// onTimsScreenLimit; so is a window SkyLight showed on his screen at its first sighting that yabai places elsewhere
+/// later than that.
 func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
     tracked("park of window \(id) (\(via))", final: final) {
-        let (found, why) = windowQuery(id)
-        guard let w = found else {
-            if !final && uptime() - seen < 1 {
-                yabaiQueue.asyncAfter(deadline: .now() + 0.01) { park(id, seen: seen, via: via) }
+        func unplaced(_ why: String) {
+            windowsUnknown.update { $0[id] = why }
+            if !final && uptime() - seen < unplacedLimit {
+                yabaiQueue.asyncAfter(deadline: .now() + unplacedInterval) { park(id, seen: seen, via: via) }
             } else {
-                windowUnknown(id, via: via, why: why ?? "yabai said nothing about window \(id)")
+                windowUnknown(id, seen: seen, via: via, why: why)
             }
-            return
         }
+        let (found, why) = windowQuery(id)
+        let queried = uptime()
+        guard let w = found else { return unplaced(why ?? "yabai said nothing about window \(id)") }
         guard let pid = (w["pid"] as? NSNumber)?.int32Value else {
-            windowUnknown(id, via: via, why: "yabai's answer about window \(id) does not say whose it is")
-            return
+            return unplaced("yabai's answer about window \(id) does not say whose it is")
         }
         guard tree.contains(pid) else {
             windowsUnknown.update { $0[id] = nil }
+            unresolved.update { $0[id] = nil }
             return
         }
         guard let from = (w["space"] as? NSNumber)?.intValue else {
-            windowUnknown(id, via: via, why: "yabai's answer about window \(id) gives no Space")
-            return
+            return unplaced("yabai's answer about window \(id) gives no Space")
         }
         windowsUnknown.update { $0[id] = nil }
+        let app = w["app"] as? String ?? "?"
+        let first = firstSightings.value[id]
         let before = windowSpaces.update { (spaces: inout [Int: Int]) -> Int? in
             defer { spaces[id] = from }
             return spaces[id]
         }
         let onTims = from != 0 && onTimsScreen(from)
         let back = onTims && before != nil && before != from
-        if back || (onTims && final) {
-            let app = w["app"] as? String ?? "?"
+        let flagged = back || (onTims && final)
+        if flagged {
             problem(back ? "window \(id) of the tree (\(app), pid \(pid)) was on Tim's Space \(from) (found by \(via)) after the guard had seen it on Space \(before.map { String($0) } ?? "?"): macOS showed it to him again"
                          : "window \(id) of the tree (\(app), pid \(pid)) was on Tim's Space \(from) at the guard's end")
         }
+        // On Tim's screen before this first placement, for how long (until the move, or, if it is elsewhere now, until now).
+        func slow(_ seconds: Double) {
+            guard !flagged, seconds > onTimsScreenLimit else { return }
+            problem(String(format: "window %ld of the tree (%@, pid %d) was on Tim's screen for %.1f ms before the guard placed it (more than %.0f ms)",
+                           id, app, pid, seconds * 1000, onTimsScreenLimit * 1000))
+        }
+        let start = first?.at ?? seen
+        let leftUnseen = before == nil && !onTims && first?.onTims == true ? queried - start : nil
+        if let resolved = unresolved.update({ $0.removeValue(forKey: id) }) {
+            var located: [String: Any] = firstFields(id).merging([
+                "event": "window-located", "window": id, "pid": Int(pid), "app": app, "space": from, "via": via,
+                "unknownMs": ms(queried - resolved.seen),
+            ]) { $1 }
+            if let leftUnseen { located["onTimSpaceMs"] = ms(leftUnseen) }
+            emit(located)
+        }
+        if let leftUnseen { slow(leftUnseen) }
         if from == space { return }
         if from == 0 {
             windowOffTarget(id, w, at: 0, via: via, why: "yabai places it on no Space, where a move by Space cannot reach it")
@@ -2387,18 +2524,22 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
         let (moved, afterWhy) = windowQuery(id)
         let after = (moved?["space"] as? NSNumber)?.intValue
         let done = uptime()
-        var record: [String: Any] = [
+        var record: [String: Any] = firstFields(id).merging([
             "event": "window", "id": id, "pid": Int(pid), "app": w["app"] ?? "", "title": w["title"] ?? "",
             "subrole": w["subrole"] ?? "", "from": from, "to": after ?? NSNull(), "moved": after == space, "via": via,
             "latencyMs": ms(done - seen),
-        ]
-        if timSpaces.contains(from) { record["onTimSpaceMs"] = ms(done - seen) }
+        ]) { $1 }
+        if onTims {
+            let exposure = done - (before == nil ? start : seen)
+            record["onTimSpaceMs"] = ms(exposure)
+            if before == nil && after == space { slow(exposure) }
+        }
         if back, let before { record["seenBefore"] = before }
         if let after { windowSpaces.update { $0[id] = after } }
         moves.update { $0.append(record) }
         emit(record)
         guard let after else {
-            windowUnknown(id, via: via, why: afterWhy ?? "yabai's answer about window \(id) gives no Space")
+            windowUnknown(id, seen: seen, via: via, why: afterWhy ?? "yabai's answer about window \(id) gives no Space")
             return
         }
         if after == space { return }
@@ -2444,11 +2585,12 @@ let finalWindowList = Locked([String: Any]())
     return (windows, nil)
 }
 
-/// Parks every tree window yabai lists off the target, and keeps the Space of each it lists on it (windowSpaces). A
-/// list that fails, or has a row without an id or pid, is window-list-failed: where the tree's windows are is unknown
-/// until a list answers. A list that answers places or drops every window that was unknown (park records again those
-/// it still cannot place). The final sweep (`final`) reads the list in up to finalListTries tries, records them
-/// (final-window-list), and owns their timeouts: one that the retry makes good is no problem.
+/// Parks every tree window yabai lists off the target, and keeps the Space of each it lists on it (windowSpaces); a
+/// listed window that is unknown or unresolved is asked about again (park), and one whose owner is outside the tree is
+/// no longer unknown. A list that fails, or has a row without an id or pid, is window-list-failed: where the tree's
+/// windows are is unknown until a list answers. GR2: an unknown window a list leaves out stays unknown (yabai may not
+/// list it yet) unless WindowServer shows it gone. The final sweep (`final`) reads the list in up to finalListTries
+/// tries, records them (final-window-list), and owns their timeouts: one that the retry makes good is no problem.
 func sweep(_ via: String, final: Bool = false) {
     tracked("sweep (\(via))", final: final) {
         let seen = uptime()
@@ -2471,16 +2613,24 @@ func sweep(_ via: String, final: Bool = false) {
             return windowListFailed(via: via, why: read.why ?? "yabai -m query --windows could not be read")
         }
         windowListFailure.update { $0 = nil }
-        windowsUnknown.update { $0.removeAll() }
+        let pending = Set(windowsUnknown.value.keys).union(unresolved.value.keys)
         var member: [pid_t: Bool] = [:]
         for w in windows {
             if member[w.pid] == nil { member[w.pid] = tree.contains(w.pid) }
-            guard member[w.pid] == true else { continue }
-            if w.space == space {
+            guard member[w.pid] == true else {
+                windowsUnknown.update { $0[w.id] = nil }
+                unresolved.update { $0[w.id] = nil }
+                continue
+            }
+            if w.space == space && !pending.contains(w.id) {
                 windowSpaces.update { $0[w.id] = space }
             } else {
                 park(w.id, seen: seen, via: via, final: final)
             }
+        }
+        let listed = Set(windows.map { $0.id })
+        for id in windowsUnknown.value.keys where !listed.contains(id) && windowServerState(id)?.exists == false {
+            windowsUnknown.update { $0[id] = nil }
         }
     }
 }
@@ -2499,6 +2649,7 @@ let axCallback: AXObserverCallback = { _, element, notification, _ in
     guard axWindowID(element, &id) == .success, id != 0 else { return }
     let name = notification as String
     let via = name == kAXWindowCreatedNotification ? "ax-created" : name == kAXMainWindowChangedNotification ? "ax-main" : "ax-focused"
+    sighted(Int(id), at: seen)
     yabaiQueue.async { park(Int(id), seen: seen, via: via) }
 }
 
@@ -2530,7 +2681,9 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
            let windows = value as? [AXUIElement] {
             for window in windows {
                 var id: CGWindowID = 0
-                if axWindowID(window, &id) == .success, id != 0 { yabaiQueue.async { park(Int(id), seen: seen, via: "ax-existing") } }
+                guard axWindowID(window, &id) == .success, id != 0 else { continue }
+                sighted(Int(id), at: seen)
+                yabaiQueue.async { park(Int(id), seen: seen, via: "ax-existing") }
             }
         }
     }
@@ -2852,6 +3005,39 @@ enum SkyLight {
             return Unmanaged<CFArray>.fromOpaque(spaces).takeRetainedValue() as NSArray
         }
     }()
+
+    /// GR2: where SkyLight puts window `id`, read directly (no yabai): SLSCopySpacesForWindows (selector 0x7, every
+    /// Space it is on) and SLSCopyManagedDisplayForWindow (its display's identifier), the calls yabai makes for the same
+    /// [INFERENCE: signatures as in yabai's headers; not exercised here, where no GUI may be touched]. nil: SkyLight
+    /// names no Space for it. The rig reads its stand-in (--skylight-windows: {"<id>": {"spaces": [id], "display": d}}).
+    static func windowPlace(_ id: Int) -> WindowPlace? {
+        if rigTest {
+            guard let skylightWindowsPath, let data = try? Data(contentsOf: URL(fileURLWithPath: skylightWindowsPath)),
+                  let all = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let row = all[String(id)] as? [String: Any],
+                  let spaces = row["spaces"] as? [NSNumber], !spaces.isEmpty else { return nil }
+            return WindowPlace(spaces: spaces.map { $0.uint64Value }, display: row["display"] as? String)
+        }
+        return livePlace?(id)
+    }
+
+    private static let livePlace: ((Int) -> WindowPlace?)? = {
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
+              let connect = dlsym(handle, "SLSMainConnectionID"), let copy = dlsym(handle, "SLSCopySpacesForWindows") else { return nil }
+        let connection = unsafeBitCast(connect, to: (@convention(c) () -> Int32).self)()
+        let spacesFor = unsafeBitCast(copy, to: (@convention(c) (Int32, Int32, CFArray) -> UnsafeRawPointer?).self)
+        let displayFor = dlsym(handle, "SLSCopyManagedDisplayForWindow").map {
+            unsafeBitCast($0, to: (@convention(c) (Int32, UInt32) -> UnsafeRawPointer?).self)
+        }
+        return { id in
+            let wid = UInt32(truncatingIfNeeded: id)
+            guard let raw = spacesFor(connection, 0x7, [NSNumber(value: wid)] as CFArray) else { return nil }
+            let spaces = (Unmanaged<CFArray>.fromOpaque(raw).takeRetainedValue() as? [NSNumber] ?? []).map { $0.uint64Value }
+            guard !spaces.isEmpty else { return nil }
+            let display = displayFor?(connection, wid).map { Unmanaged<CFString>.fromOpaque($0).takeRetainedValue() as String }
+            return WindowPlace(spaces: spaces, display: display)
+        }
+    }()
 }
 
 /// Tim's display, read directly: at every Space notification, at each activation, every SpaceSampling.interval
@@ -2904,6 +3090,22 @@ final class SpaceWatch {
     var shownIndex: Int? {
         lock.lock(); defer { lock.unlock() }
         return shown.flatMap { map?.indexes[$0] }
+    }
+
+    /// The index yabai's map gives SkyLight Space `id`; nil: one it does not know.
+    func index(of id: UInt64) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        return map?.indexes[id]
+    }
+
+    /// GR2: whether SkyLight Space `id` is on Tim's screen: the Space his display showed at the last read, or one whose
+    /// index is on his screen (onTimsScreen).
+    func showsTim(spaceId id: UInt64) -> Bool {
+        lock.lock()
+        let (current, index) = (shown, map?.indexes[id])
+        lock.unlock()
+        if let index { return onTimsScreen(index) }
+        return id == current
     }
 
     /// Starts reading with `rows` (SkyLight's displays, or the rig's stand-in) and yabai's map from the baseline;
@@ -3310,9 +3512,7 @@ func finish(_ reason: String) {  // main
             if mode == "open" || attaching { _ = tree.scan() }
             sweep("final", final: true)
             if let why = windowListFailure.value { problem("the tree's windows could not be located at the guard's end: \(why)") }
-            for (id, why) in windowsUnknown.value.sorted(by: { $0.key < $1.key }) {
-                problem("window \(id) of the tree could not be located at the guard's end: \(why)")
-            }
+            reportUnplacedAtEnd()
             focusAtEnd = windowFields(yabai(["query", "--windows", "--window"]) as? [String: Any])
         }
         spaceWatch.awaitNotices()
@@ -3776,6 +3976,7 @@ func rigCommand(_ words: [String]) {
     case ("window", 2):
         guard let id = Int(words[1]) else { return }
         let seen = uptime()
+        sighted(id, at: seen)
         yabaiQueue.async { park(id, seen: seen, via: "ax-created") }
     case ("sweep", 1):
         yabaiQueue.async { sweep("activation") }

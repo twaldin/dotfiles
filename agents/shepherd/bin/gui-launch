@@ -83,7 +83,11 @@ and/or guards one that something else starts, then checks that nothing took it.
   screen every 100 ms: macOS can show an existing window again, a native tab selected again, on the Space Tim is
   viewing with no create event and no Space change). A tree window found on Tim's screen (Spaces 1-4, or the Space
   his display shows, unless that is the target) after the guard saw it elsewhere, or at the guard's end, fails the
-  check, created or not; a new window's first moments there, where macOS opens it, are only a move (onTimSpaceMs).
+  check, created or not. A new window's first moments there, where macOS opens it, are a move whose onTimSpaceMs
+  counts from its first Accessibility sighting: past 250 ms that fails the check. At that sighting the guard reads
+  the window's Spaces and display from SkyLight (firstSpace, firstDisplay, firstAt). A window yabai will not place
+  is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
+  (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen.
   A window yabai will not place or name the owner of, a window list
   that fails, and a tree window still off the target after its move are recorded as they happen; the tree's
   windows the final sweep cannot locate are a problem, and so is a tree window still off the target after its move
@@ -125,7 +129,8 @@ and/or guards one that something else starts, then checks that nothing took it.
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
-space-unrestorable, window, window-unknown, window-list-failed, window-off-target, final-window-list, yabai-timeout,
+space-unrestorable, window, window-unknown, window-located, window-list-failed, window-off-target, final-window-list,
+yabai-timeout,
 problem, fault, guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
 previousFront (the app frontmost before it: in the tree or not, for how long, quit or hidden; whether it just closed
 its last window is not known): diagnostics only. The launched program's own output
