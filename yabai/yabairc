@@ -49,6 +49,9 @@ YABAI=/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai
 # the board visibly jumps. Unmanaged, AppKit keeps the tab group at one frame, and Tim can
 # stack apps over it. No grid rule: resizing each new tab window would resize the group.
 "$YABAI" -m rule --add label=easl app='^easl$' manage=off
+# Rules added here reach only windows opened later; a yabai restart would otherwise tile the
+# easl window that's already open (seen 2026-10-07 19:41Z).
+"$YABAI" -m rule --apply
 
 # Spaces 6-8 on the built-in display belong to agents' GUI test windows (Tim keeps to 1-4):
 # 6 roblox, 7 canvas, 8 Minecraft labs. Float layout so a window moved there keeps its own
