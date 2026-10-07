@@ -2824,6 +2824,21 @@ class Guard(unittest.TestCase):
         _, result = self.end_rig(process, lines, root)
         self.assertTrue(any(m.get('id') == wid and m.get('seenBefore') == 7 for m in result['moves']), result['moves'])
 
+    def test_a_window_on_screen_before_its_owner_joins_the_tree_is_sighted_once_it_joins(self):
+        # Review 2 STANDARDS: WindowServer shows the window while its owner is outside the tree (as before the scan or a
+        # launch adopts it); then the owner joins (the rig's root, as an adoption does). yabai never lists the window.
+        wid = 89343
+        probe, _ = self.probe(self.java)
+        process, lines, root = self.rig(space=6, shown=4, onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, True]]))
+        time.sleep(0.35)  # several reads see it on screen, its owner outside the tree
+        self.send(process, 'root %d' % probe.pid)
+        time.sleep(0.6)
+        put(root / 'onscreen.json', '[]')
+        _, result = self.end_rig(process, lines, root)
+        self.assertTrue(any(p.startswith('window %d ' % wid) and 'window-shown' in p for p in result['problems']),
+                        result['problems'])
+
 
 if __name__ == '__main__':
     unittest.main()

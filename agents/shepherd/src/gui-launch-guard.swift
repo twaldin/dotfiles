@@ -1620,6 +1620,8 @@ final class Tree {
     private let t0: Double
     private let tokenHash: String?
     private let needle: String?
+    /// Counts each root added and each adoption: a `contains` answer may have changed since (ShownWindows).
+    private var grown = 0
 
     init(_ lineage: Lineage, snapshot: [pid_t: UInt64], t0: Double, tokenHash: String?, needle: String?) {
         self.lineage = lineage
@@ -1645,6 +1647,13 @@ final class Tree {
     func addRoot(_ pid: pid_t) {
         lock.lock(); defer { lock.unlock() }
         lineage.addRoot(pid, start: processStart(pid) ?? 0)
+        grown += 1
+    }
+
+    /// Changes whenever the tree gains a root or an adoption.
+    var generation: Int {
+        lock.lock(); defer { lock.unlock() }
+        return grown
     }
 
     /// Membership only, as before a window move: never adopts.
@@ -1668,6 +1677,7 @@ final class Tree {
             emit(record)
         }
         guard let adoption = result.adopted else { return }
+        grown += 1
         var record: [String: Any] = ["event": "attached", "pid": Int(adoption.pid), "via": via, "rule": adoption.rule.rawValue,
                                      "ms_since_start": ms(uptime() - t0)]
         if adoption.rule == .launchToken { record["token"] = tokenHash }
@@ -2979,13 +2989,19 @@ func shownWindows() -> [ServerWindow]? {
 /// again (a native tab selected again) on the Space Tim is viewing, with no create event and no Space change (bench's
 /// copy 542d177d: ~20 s on his Space, and the check said ok). Every `interval` the windows on screen are read; a tree
 /// window not on screen at the read before is sighted and parked individually (even without AX or a yabai row), and
-/// starts a sweep (window-shown) of all known windows. A failed read is a problem: windows shown then could go unseen.
+/// starts a sweep (window-shown) of all known windows. A window on screen whose owner was outside the tree when read is
+/// read again at the first poll after the tree gains a root or an adoption (Tree.generation): an owner adopted after
+/// its window came on screen has that window handled as newly shown. A failed read is a problem: windows shown then
+/// could go unseen.
 /// GR2 (bench's ruling): every `interval` each exempt tree window (exemptNow) is sampled again too: one gone is
 /// dropped, never a problem; one that counts now is parked (window-counted), judged from this sample on.
 /// From the launch until the guard's end; shownQueue.
 final class ShownWindows {
     static let interval = 0.1
     private var last = Set<Int>()
+    /// The windows in `last` whose owner was outside the tree, and the tree generation they were read at.
+    private var outside = Set<Int>()
+    private var outsideGeneration = -1
     private var failed = false
     private var timer: DispatchSourceTimer?  // main
 
@@ -3008,19 +3024,30 @@ final class ShownWindows {
             }
             return
         }
+        let generation = tree.generation
+        let regrown = generation != outsideGeneration
         var member: [pid_t: Bool] = [:]
         var shown = false
-        for row in rows where !last.contains(row.id) {
+        var stillOutside = Set<Int>()
+        for row in rows {
             guard let pid = row.pid else { continue }
+            if last.contains(row.id) && !(regrown && outside.contains(row.id)) {
+                if outside.contains(row.id) { stillOutside.insert(row.id) }
+                continue
+            }
             if member[pid] == nil { member[pid] = tree.contains(pid) }
             if member[pid] == true {
                 shown = true
                 let seen = uptime()
                 sighted(row.id, at: seen, via: "window-shown")
                 yabaiQueue.async { park(row.id, seen: seen, via: "window-shown") }
+            } else {
+                stillOutside.insert(row.id)
             }
         }
         last = Set(rows.map { $0.id })
+        outside = stillOutside
+        outsideGeneration = generation
         if shown { yabaiQueue.async { sweep("window-shown") } }
     }
 
