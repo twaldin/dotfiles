@@ -404,11 +404,10 @@ def final_exempt(summary):
 def problems(summary, windows, focus_before, focus_after, shown_before, shown_after, target):
     """Why the launch took Tim's screen, or can't vouch that it didn't: tree windows on Spaces 1-4 or on the Space his
     display shows (unless that is the target), but those the guard's final sweep found exempt (final_exempt), a changed
-    frontmost app, his display showing another Space or moved
-    off his Space by the tree (even if brought back), the active display moved (yabai's focused display, or AppKit's
-    main screen: the two can disagree, so both count), the guard's fault or its problems (yabai timeouts, work
-    unsettled or killed at its end, tree windows back on his screen or off the target, a final window list it could
-    not read), or no final window list recorded at all."""
+    frontmost app, his display showing another Space or moved off his Space by the tree (even if brought back), the
+    active display moved (yabai's focused display, or AppKit's main screen: the two can disagree, so both count), the
+    guard's fault or its problems (yabai timeouts, work unsettled or killed at its end, tree windows back on his screen
+    or off the target, a final window list it could not read), or no final window list recorded at all."""
     tree = set(summary.get('tree') or [])
     found = []
     if summary.get('fault'):

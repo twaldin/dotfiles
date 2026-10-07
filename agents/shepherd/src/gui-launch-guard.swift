@@ -2486,7 +2486,7 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
     let look = WindowLook(id)
     let exempt = look.exempt
     let sighting = FirstSighting(at: seen, place: look.place, exempt: exempt, onTims: exempt != nil ? false : placeOnTims(look.place))
-    firstSightings.update { if $0[id] == nil { $0[id] = sighting } }
+    firstSightings.update { (all: inout [Int: FirstSighting]) -> Void in if all[id] == nil { all[id] = sighting } }
 }
 
 /// The first-sighting fields of window `id`'s records: firstAt (seconds since launch), firstSpace (its index; null:
