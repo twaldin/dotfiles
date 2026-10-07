@@ -204,12 +204,19 @@ int main(int argc, char **argv) {
 # (yabai answering late); `query --windows` answers windows.json, `--window N` window-N.json (none: exit 1), and
 # never answers while windows-mode says hang (with hang-once, the next whole list only; a `--window N` query that hangs
 # first creates window-N-asked); `window N --space S` sets the Space in window-N.json while the file moves says apply,
-# else exits 1, as anything else (a focus) does.
+# else exits 1, as anything else does; `window N --focus` exits 0 (and logs N to focus.log) only while focus-ok exists.
+# GR2 item 6: `query --displays --display` answers focused-display.json (yabai's focused display), and `display --focus
+# N` logs N to display-focus.log and makes display N the focused one (exit 1 while display-focus-fails exists).
 RIG_YABAI = '''#!/bin/sh
 [ "$2" = warm ] && exit 0
 dir='%(dir)s'
 case "$2 $3" in
   "query --spaces") sleep "$(cat "$dir/spaces-delay")"; cat "$dir/spaces.json" ;;
+  "query --displays") cat "$dir/focused-display.json" 2>/dev/null || exit 1 ;;
+  "display --focus")
+    echo "$4" >> "$dir/display-focus.log"
+    [ -f "$dir/display-focus-fails" ] && exit 1
+    printf '{"index": %%s}' "$4" > "$dir/focused-display.json" ;;
   "query --windows")
     mode="$(cat "$dir/windows-mode")"
     if [ "$mode" = hang ]; then [ -n "$5" ] && : > "$dir/window-$5-asked"; exec sleep 30; fi
@@ -229,6 +236,7 @@ case "$2 $3" in
     elif [ "$4" = --window ]; then exit 1
     else cat "$dir/windows.json"; fi ;;
   "window "*)
+    if [ "$3" = --focus ]; then echo "$4" >> "$dir/focus.log"; [ -f "$dir/focus-ok" ] || exit 1; exit 0; fi
     if [ "$4" = --space ] && [ "$(cat "$dir/moves" 2>/dev/null)" = apply ] && [ -f "$dir/window-$3.json" ]; then
       [ -f "$dir/move-delay" ] && sleep "$(cat "$dir/move-delay")"
       destination="$5"
@@ -317,10 +325,10 @@ def put(path, text):
 
 def rig_spaces(extra=(), shown=1):
     """yabai's Spaces for the rig: display 1 holds Spaces 1-9 (SkyLight ids 101-109) and then `extra` ids, display
-    2 one more (id 110); Tim's display shows Space `shown`."""
-    rows = [{'index': i, 'id': 100 + i, 'display': 1, 'is-visible': i == shown} for i in range(1, 10)]
-    rows += [{'index': 10 + n, 'id': sid, 'display': 1, 'is-visible': False} for n, sid in enumerate(extra)]
-    return rows + [{'index': 10 + len(extra), 'id': 110, 'display': 2, 'is-visible': True}]
+    2 one more (id 110); Tim's display shows Space `shown`, which has focus."""
+    rows = [{'index': i, 'id': 100 + i, 'display': 1, 'is-visible': i == shown, 'has-focus': i == shown} for i in range(1, 10)]
+    rows += [{'index': 10 + n, 'id': sid, 'display': 1, 'is-visible': False, 'has-focus': False} for n, sid in enumerate(extra)]
+    return rows + [{'index': 10 + len(extra), 'id': 110, 'display': 2, 'is-visible': True, 'has-focus': False}]
 
 
 def show(root, shown, extra=(), anchor=True, other=110):
@@ -713,6 +721,26 @@ class GuiLaunch(unittest.TestCase):
         # An app Tim switched to himself during the guard is his choice, not a change.
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(front=other, user=other))
         self.assertEqual(result.returncode, 0)
+
+    def test_a_system_modal_left_frontmost_is_no_change_and_the_receipt_names_the_focus_before_and_after(self):
+        # GR2 item 6: the guard leaves a SecurityAgent prompt frontmost rather than front Finder over it; its summary's
+        # focus records (app, window or none, focused display, modal) are the check's focusBefore and focusAfter.
+        agent = {'pid': 600, 'name': 'SecurityAgent', 'bundle': 'com.apple.SecurityAgent'}
+        finder = {'pid': 300, 'name': 'Finder', 'bundle': 'com.apple.finder'}
+        prompt = {'pid': 600, 'name': 'SecurityAgent'}
+        before = {'app': finder, 'window': None, 'focusedDisplay': 1, 'timDisplay': 1, 'modal': prompt}
+        after = {'app': agent, 'window': None, 'focusedDisplay': 1, 'modal': prompt}
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app),
+                                     summary=summary(front=agent, user=finder, focusAtLaunch=before, focusAtEnd=after))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        check = self.check_event(result)
+        self.assertEqual({k: check['focusBefore'][k] for k in before}, before)
+        self.assertEqual({k: check['focusAfter'][k] for k in after}, after)
+        gone = dict(after, modal=None)  # without the prompt on screen at the end, another front app is a change
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app),
+                                     summary=summary(front=agent, user=finder, focusAtLaunch=before, focusAtEnd=gone))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Tim's frontmost app changed from Finder (pid 300) to SecurityAgent (pid 600)", result.stderr)
 
     def test_a_tree_window_on_the_space_tims_display_shows_fails_the_check_though_it_is_not_one_of_his(self):
         # GR2 (addendum 2): Tim switched his display to Space 6 himself, where a tree window is: on his screen at the end.
@@ -1991,6 +2019,7 @@ class Guard(unittest.TestCase):
         put(root / 'spaces-delay', '0.6')
         put(root / 'spaces.json', json.dumps(rig_spaces(shown=shown)))
         put(root / 'windows-mode', 'answer')
+        put(root / 'focused-display.json', '{"index": 1}')  # yabai's focus on Tim's display (display 1)
         put(root / 'windows.json', json.dumps(list(windows)))
         for w in windows:
             put(root / ('window-%d.json' % w['id']), json.dumps(w))
@@ -2417,6 +2446,83 @@ class Guard(unittest.TestCase):
         self.assertEqual(activation[0]['immediate'], {'ok': False, 'reason': "the guard's end began: not run"})
         self.assertIn("revert to pid %d came after the guard's end began: not run" % tim, result['problems'])
         self.assertEqual(result['reverted'], [])
+
+    # GR2 item 6 (live finding 1, roblox's accept runs 1 and 3, 20:57:16Z and 21:04:29Z): a tree activation leaves
+    # yabai's focused display on CanvasTest (display 2 here), and re-activating Tim's app does not bring it back when he
+    # had no focused window; run 1 also had a SecurityAgent keychain prompt on screen, which Finder's re-activation took
+    # front from.
+
+    def focus_rig(self, window, modal):
+        """Tim's app (a probe outside the tree) frontmost with window 42 focused on Space 1 (`window`) or no focused
+        window, a SecurityAgent prompt (another probe's window) on screen with `modal`, and the tree's root a third
+        probe; then a tree activation, which leaves yabai's focus on display 2. Returns the rig, its lines, its
+        directory, Tim's pid, the prompt's (or None), and the lines up to the revert's restore-call."""
+        tim, _ = self.probe(self.java)
+        thief, _ = self.probe(self.java)
+        agent = self.probe(self.java)[0].pid if modal else None
+        rows = [{'id': 42, 'pid': tim.pid, 'app': 'Tim', 'title': 'zsh', 'space': 1, 'has-focus': True}] if window else []
+        process, lines, root = self.rig(windows=rows, onscreen=True)
+        if modal:
+            put(root / 'onscreen.json', json.dumps([[77001, agent, 420, 260, True, 'SecurityAgent']]))
+        if window:
+            put(root / 'focus-ok', '')
+        self.send(process, 'root %d' % thief.pid, ('tim %d 42 1' % tim.pid) if window else ('tim %d' % tim.pid))
+        time.sleep(0.2)
+        put(root / 'focused-display.json', '{"index": 2}')  # the tree's activation took yabai's focus to CanvasTest
+        self.send(process, 'activate %d' % thief.pid)
+        seen = lines.until(lambda row: row.get('event') == 'restore-call', 10)
+        return process, lines, root, tim.pid, agent, seen
+
+    def test_with_no_window_to_restore_tims_display_is_focused_again(self):
+        process, lines, root, tim, _, seen = self.focus_rig(window=False, modal=False)
+        call = seen[-1]
+        self.assertEqual((call['to'], call['method'], call['ok'], call['window']), (tim, 'activate', True, None))
+        self.assertEqual(call['display'], {'display': 1, 'before': 2, 'focus': 'ok', 'after': 1, 'ok': True, 'modal': None})
+        self.assertEqual((root / 'display-focus.log').read_text(), '1\n')
+        self.send(process, 'activate %d' % tim)  # macOS reports his app frontmost again
+        lines.until(lambda row: row.get('event') == 'reverted', 10)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual({k: result['focusAtLaunch'][k] for k in ('window', 'focusedDisplay', 'timDisplay', 'modal')},
+                         {'window': None, 'focusedDisplay': 1, 'timDisplay': 1, 'modal': None})
+        self.assertEqual(result['focusAtLaunch']['app']['pid'], tim)
+        self.assertEqual({k: result['focusAtEnd'][k] for k in ('window', 'focusedDisplay', 'modal')},
+                         {'window': None, 'focusedDisplay': 1, 'modal': None})
+        self.assertEqual(result['focusAtEnd']['app']['pid'], tim)
+        self.assertFalse([p for p in result['problems'] if 'focus' in p], result['problems'])
+
+    def test_a_system_modal_on_screen_is_re_fronted_and_nothing_is_fronted_over_it(self):
+        process, lines, root, tim, agent, seen = self.focus_rig(window=False, modal=True)
+        fronted = [e['pid'] for e in seen if e.get('event') == 'rig-activate']
+        self.assertNotIn(tim, fronted, "Tim's app was fronted over the SecurityAgent prompt")
+        self.assertIn(agent, fronted)
+        activation = [e for e in seen if e.get('event') == 'activation'][-1]
+        self.assertEqual(activation['immediate'], {'ok': True, 'reason': None, 'modal': {'pid': agent, 'name': 'SecurityAgent'}})
+        call = [e for e in seen if e.get('event') == 'restore-call'][-1]
+        self.assertEqual((call['method'], call['ok']), ('modal', True))
+        self.assertEqual(call['display'], {'display': 1, 'before': 2, 'focus': 'ok', 'after': 1, 'ok': True,
+                                           'modal': {'pid': agent, 'name': 'SecurityAgent', 'refronted': True}})
+        self.assertEqual(fronted[-1], agent, 'the prompt is fronted last')
+        self.send(process, 'activate %d' % agent)  # macOS reports the prompt frontmost again
+        back = lines.until(lambda row: row.get('event') == 'reverted', 10)[-1]
+        self.assertEqual(back['method'], 'modal')
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['focusAtLaunch']['modal'], {'pid': agent, 'name': 'SecurityAgent'})
+        self.assertEqual(result['focusAtEnd']['modal'], {'pid': agent, 'name': 'SecurityAgent'})
+        self.assertEqual(result['focusAtEnd']['focusedDisplay'], 1)
+
+    def test_a_normal_focused_window_is_given_back_as_before_with_the_focus_recorded(self):
+        process, lines, root, tim, _, seen = self.focus_rig(window=True, modal=False)
+        call = seen[-1]
+        self.assertEqual((call['to'], call['method'], call['ok'], call['window'], call['display']), (tim, 'window', True, 42, None))
+        self.assertEqual([e['pid'] for e in seen if e.get('event') == 'rig-activate'], [tim], 'the immediate activation, as before')
+        self.assertEqual((root / 'focus.log').read_text(), '42\n')
+        self.assertFalse((root / 'display-focus.log').exists(), 'a focused window brings its display: no display focus')
+        self.send(process, 'activate %d' % tim)
+        self.assertEqual(lines.until(lambda row: row.get('event') == 'reverted', 10)[-1]['method'], 'window')
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual({k: result['focusAtLaunch'][k] for k in ('window', 'focusedDisplay', 'timDisplay', 'modal')},
+                         {'window': 42, 'focusedDisplay': 1, 'timDisplay': 1, 'modal': None})
+        self.assertIn('focusedDisplay', result['focusAtEnd'])
 
     def test_tims_takeover_ends_a_theft_and_the_space_his_click_shows_is_his(self):
         # GR2 (addendum 3), live: while the tree has focus, Tim clicks another app of his 5 ms after his input: his

@@ -53,6 +53,16 @@ and/or guards one that something else starts, then checks that nothing took it.
   owner-query-timeout event, expected-slow and no problem only when the window was not focused, an activation of
   his app (at once, or the re-activation) ran, and a read after the revert showed his app frontmost and his display
   on the expected Space; otherwise a problem.
+  Nothing is ever fronted over a system modal on screen (a SecurityAgent keychain or administrator prompt; by name,
+  also coreautha, UserNotificationCenter and universalAccessAuthWarn): no window is focused over it, and the modal is
+  re-fronted in place of his app, so it stays frontmost (restore-call method "modal"). When no window of his was
+  focused (he had none focused at launch, such as Finder with no window, or it could not be vouched for), or there is
+  no app to give focus back to, the guard also reads yabai's focused display and, unless it is his (the display
+  holding Space 1), focuses it (`yabai -m display --focus`; restore-call's display, or a display-restore event) and
+  re-fronts any modal after it; a display it cannot bring back is a problem. Re-activating an app with no window on
+  his display leaves the focus, and his keystrokes, on CanvasTest (roblox's runs, 2026-10-07). The check's focusBefore
+  and focusAfter record the front app, the focused window (or none), yabai's focused display and any modal; a modal
+  the guard found on screen at its end may be frontmost then without that being a change of his app.
   The guard reads every display directly (SkyLight, which yabai reads too) at every Space notification, every 20
   ms through each theft window, around each restore, and once more as it ends: each Space the tree shows him is a
   breach the moment it is read, and if his display shows another Space at any moment of a theft window, focusing
@@ -160,7 +170,7 @@ stdout carries only JSON lines: `sudo` (the exact command that starts the guard)
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
 space-unrestorable, window, window-unknown, window-located, window-exempt, window-list-failed, window-off-target,
-final-window-list,
+final-window-list, display-restore,
 yabai-timeout,
 problem, fault, guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
 previousFront (the app frontmost before it: in the tree or not, for how long, quit or hidden; whether it just closed
@@ -542,11 +552,14 @@ def problems(summary, windows, focus_before, focus_after, shown_before, shown_af
             found.append('window %s of %s (pid %s, "%s") is on Space %s, the one Tim\'s display shows'
                          % (w.get('id'), w.get('app'), w.get('pid'), w.get('title', ''), w.get('space')))
     front, user = summary.get('frontAtEnd'), summary.get('userFront')
+    # GR2 item 6: a system modal (SecurityAgent, an authentication prompt) the guard found on screen at its end is
+    # left frontmost, never a change of Tim's app.
+    modal = (summary.get('focusAtEnd') or {}).get('modal') or {}
     if not front:
         found.append('no app is frontmost at the end')
     elif front.get('pid') in tree:
         found.append('the launched %s is frontmost' % name(front))
-    elif user and front.get('pid') != user.get('pid'):
+    elif user and front.get('pid') != user.get('pid') and front.get('pid') != modal.get('pid'):
         found.append('Tim\'s frontmost app changed from %s to %s' % (name(user), name(front)))
     # The Space he should see: the one his display showed, or the one he switched to himself during the guard.
     expected = (summary.get('timSpace') or {}).get('expected') or shown_before
