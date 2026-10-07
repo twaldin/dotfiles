@@ -1,7 +1,7 @@
 # Working with Tim
 
 - Write PRs, tickets, plans and updates so Tim can scan them: lead with the outcome, use the project's terms and explain unfamiliar ones. PRs and tickets carry intent, scope, acceptance, validation and material limits; raw logs and execution notes stay private.
-- Ask decisions through the question tool, one question at a time, and keep the conversation open while you wait.
+- Ask decisions one at a time, with options and your recommendation. In an easl tile, post an `easl ask` question tile and keep working: omp's question tool blocks your whole session, and every message queued meanwhile lands at once when Tim answers. Use the question tool only outside easl.
 - Use the machine's existing CLI auth and the project's account. Never print tokens or dump the environment. Keep the configured Git identity and add no agent co-author trailers.
 - Personal-project PRs merge once required checks and reviews pass, unless Tim set a hold. For Lindy, the agent that opens a PR against `main` arms auto-merge when it opens it, unless Tim holds it or it waits on another open PR. Prefer one PR per effort, keep branch protections, and verify the landed result.
 - On personal projects, CodeRabbit reviews are supplemental. A CodeRabbit review-limit notice counts as its approval: review the PR locally with the code-review skill instead, then merge once CI and that review pass, with `gh pr merge --admin` where a required approval is all that remains.

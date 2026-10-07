@@ -18,8 +18,9 @@ def adapt(root: Path) -> None:
     start = text.index('Work the tree in **rounds**.')
     end = text.index('Finding _facts_ is your job')
     text = text[:start] + (
-        "Ask one decision at a time with the harness's native question tool. "
-        "Give concise options and your recommendation, then wait for the answer. "
+        "Ask one decision at a time: in an easl tile with an `easl ask` question tile, which never "
+        "blocks your session; elsewhere with the harness's native question tool. "
+        "Give concise options and your recommendation. "
         "Do not treat elapsed time as an answer. Keep working on independent research "
         "while a question is pending. Recompute the remaining decisions after each answer; "
         "do not ask about a decision whose prerequisites are still unresolved.\n\n"
@@ -50,8 +51,8 @@ Give a concise recommendation in conversation: the affected files, concrete prob
 proposed change, expected benefit, and supporting evidence. Identify any existing
 decision it would revisit. Use the project's terms. Include a small diagram only when
 it clarifies the change; use HTML or an editor when the user requests that format.
-Recommend which candidate to explore first. Use the native question tool for the
-user's choice before designing interfaces in detail.
+Recommend which candidate to explore first. Ask the user's choice (an `easl ask` tile in easl,
+else the native question tool) before designing interfaces in detail.
 
 ''' + text[end:]
     path.write_text(text)
