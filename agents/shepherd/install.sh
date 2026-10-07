@@ -1,9 +1,10 @@
 #!/bin/sh
-# Install the shepherd's machine-health glue on this Mac from this checkout:
+# Install the shepherd's machine-health glue on this host from this checkout:
 # symlink bin/* into ~/.local/bin, build src/*.swift there, and copy launchd/*.plist
 # into ~/Library/LaunchAgents (launchd ignores symlinked plists at login), reloading a job
-# only when its plist changed.
-#   install.sh           install what this host runs (twaldin-home: all; twaldin-work: the watcher set)
+# only when its plist changed. A bins entry with a slash is a path in this checkout.
+#   install.sh           install what this host runs (twaldin-home: all; twaldin-work: the watcher set;
+#                        deckbox: the heavy-work queue, offload and deckbox-cpus, no tools or jobs)
 #   install.sh --check   report drift only; exit 1 if anything differs
 # machine-ok is the benchmark gate; bench-judge pins its sha256, so it is swapped only by
 # atomic rename while holding the native-client lock (never mid-run), and not at all while
@@ -31,14 +32,21 @@ case "$host" in
     bins="machine-ok machine-ok-queue machine-watch machine-census omp-browser-cycle"
     tools="fsevents-top"
     jobs="net.waldin.machine-watch net.waldin.omp-browser-cycle" ;;
+  deckbox)
+    bins="machine-ok-queue offload offload-run deckbox/deckbox-cpus"
+    tools=""
+    jobs="" ;;
   *) echo "install.sh: no shepherd profile for host '$host'" >&2; exit 2 ;;
 esac
 
 drift=0
-mkdir -p "$bin_dir" "$agents_dir"
+mkdir -p "$bin_dir"
+[ -z "$jobs" ] || mkdir -p "$agents_dir"
 
 for b in $bins; do
-  src="$here/bin/$b" dst="$bin_dir/$b"
+  case $b in */*) src="$here/$b" ;; *) src="$here/bin/$b" ;; esac
+  b=${b##*/}
+  dst="$bin_dir/$b"
   [ "$(readlink "$dst" 2>/dev/null || true)" = "$src" ] && continue
   if [ "$b" = machine-ok ] && [ -e "$ok_hold" ]; then
     echo "bin machine-ok: held, left as is ($(head -n 1 "$ok_hold"))"

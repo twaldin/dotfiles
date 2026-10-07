@@ -1,0 +1,451 @@
+#!/usr/bin/python3
+"""Transient CPU reservations on deckbox for measured runs (sky's ARMs): CPUs leave agents.slice for a while.
+
+  deckbox-cpus take <owner> <cpulist> (--for <min> | --until <ISO-UTC>)
+  deckbox-cpus give <owner>
+  deckbox-cpus status
+
+e.g. `ssh tim@deckbox deckbox-cpus take sky 6-11,18-23 --for 60`. Every command prints one JSON line; a refused
+or failed one has "ok": false and an "error", and exits 1 (2 for usage errors).
+
+take fails, changing nothing, when a CPU is held by another owner, is one of Hutter's 1-4,13-16 (its
+calibrations and evals hold them; any overlap invalidates the eval), or is outside agents.slice's base set
+(AllowedCPUs= in /etc/systemd/system/agents.slice, read at every call). Otherwise, under one lock:
+  1. agents.slice shrinks to the base set minus every held CPU, and is capped at CPUQuota = 75% of the CPUs it
+     keeps (at least 100%; hone's ask, so the agents left beside an ARM can't saturate the shared memory system):
+     `sudo -n systemctl set-property --runtime agents.slice AllowedCPUs=... CPUQuota=...`. The cpuset moves
+     agents' processes off the taken CPUs at once.
+  2. Running offload units (systemd --user offload-*.service, outside agents.slice: they copied its CPUs when
+     they started) have every thread's affinity narrowed off the taken CPUs; each move is reported. New offload
+     units copy the shrunk set. A thread that cannot be moved fails the take.
+  3. The taken CPUs must then be idle: busy <= 20% each over a 1 s /proc/stat sample (deckbox idles at 0-12%
+     per CPU with agents running; what is left after the moves is work nothing here can move).
+  4. A transient systemd --user timer runs `deckbox-cpus give <owner>` at the expiry.
+Any failure after step 1 puts agents.slice back as it was. A second take by the same owner replaces its
+reservation (CPUs and expiry). take's JSON has the owner, CPUs, expiresAtUtc, the governor, EPP and current
+frequency (kHz) of each taken CPU (recorded only: this never changes the governor or EPP), agents.slice's
+AllowedCPUs and CPUQuota before and after, the busy sample, the offload threads moved and the timer.
+
+give removes the owner's reservation, cancels its timer and restores agents.slice: the base set minus any
+other owner's CPUs, and no CPUQuota once nothing is held. Giving when nothing is held exits 0 with a note.
+take and give message hone@hone and hutter-v2@deckbox through ~/.local/bin/agent-msg; a send that fails is
+appended to ~/hutter/run/arm-windows.ndjson instead. State: ~/.local/state/deckbox-cpus/ (holds.json, log.jsonl).
+"""
+import datetime as dt
+import fcntl
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import time
+
+BASE_FILE = os.environ.get("DECKBOX_CPUS_SLICE_FILE", "/etc/systemd/system/agents.slice")
+PROC = os.environ.get("DECKBOX_CPUS_PROC", "/proc")
+SYS = os.environ.get("DECKBOX_CPUS_SYS", "/sys")
+SAMPLE_S = float(os.environ.get("DECKBOX_CPUS_SAMPLE_S", "1"))
+BUSY_PCT = 20
+QUOTA_SHARE = 0.75
+HUTTER = "1-4,13-16"
+SLICE = "agents.slice"
+HOME = os.path.expanduser("~")
+STATE = os.path.join(HOME, ".local/state/deckbox-cpus")
+HOLDS = os.path.join(STATE, "holds.json")
+LOG = os.path.join(STATE, "log.jsonl")
+AGENT_MSG = os.path.join(HOME, ".local/bin/agent-msg")
+RECIPIENTS = ("hone@hone", "hutter-v2@deckbox")
+ARM_WINDOWS = os.path.join(HOME, "hutter/run/arm-windows.ndjson")
+USAGE = ("usage: deckbox-cpus take <owner> <cpulist> (--for <min> | --until <ISO-UTC>)\n"
+         "       deckbox-cpus give <owner>\n"
+         "       deckbox-cpus status")
+
+
+class Refused(Exception):
+    """take or give cannot go ahead; nothing is left changed."""
+
+
+def parse_cpus(text):
+    cpus = set()
+    for part in re.split(r"[,\s]+", text.strip()):
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
+        if not m or (m.group(2) and int(m.group(2)) < int(m.group(1))):
+            raise ValueError(f"bad CPU list {text!r}")
+        cpus.update(range(int(m.group(1)), int(m.group(2) or m.group(1)) + 1))
+    return cpus
+
+
+def fmt_cpus(cpus, sep=","):
+    out, run = [], []
+    for c in sorted(cpus):
+        if run and c == run[-1] + 1:
+            run.append(c)
+            continue
+        if run:
+            out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
+        run = [c]
+    if run:
+        out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
+    return sep.join(out)
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+
+def iso(t):
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def base_cpus():
+    """agents.slice's base AllowedCPUs from its unit file (the last assignment wins, as in systemd)."""
+    value = None
+    with open(BASE_FILE) as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if line.startswith("AllowedCPUs="):
+                value = line.split("=", 1)[1]
+    if not value:
+        raise Refused(f"no AllowedCPUs= in {BASE_FILE}")
+    return parse_cpus(value)
+
+
+def slice_now():
+    """{"AllowedCPUs": "0 5-12 17-23", "CPUQuota": "300%" | None} as systemd reports agents.slice now."""
+    r = subprocess.run(["systemctl", "show", SLICE, "-p", "AllowedCPUs", "-p", "CPUQuotaPerSecUSec"],
+                       capture_output=True, text=True, timeout=20)
+    props = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+    quota = props.get("CPUQuotaPerSecUSec", "infinity")
+    m = re.fullmatch(r"([\d.]+)(s|ms|us)", quota)
+    pct = None
+    if m:
+        seconds = float(m.group(1)) / {"s": 1, "ms": 1e3, "us": 1e6}[m.group(2)]
+        pct = f"{round(seconds * 100)}%"
+    return {"AllowedCPUs": props.get("AllowedCPUs", ""), "CPUQuota": pct}
+
+
+def set_slice(allowed, quota):
+    """Runtime AllowedCPUs and CPUQuota of agents.slice (quota None removes it); raises Refused on failure."""
+    argv = ["sudo", "-n", "systemctl", "set-property", "--runtime", SLICE,
+            f"AllowedCPUs={fmt_cpus(allowed, ' ')}", f"CPUQuota={quota or ''}"]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    if r.returncode:
+        raise Refused(f"`{' '.join(argv)}` failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()}")
+
+
+def restore_slice(before):
+    allowed = parse_cpus(before["AllowedCPUs"]) if before["AllowedCPUs"] else base_cpus()
+    set_slice(allowed, before["CPUQuota"])
+
+
+def quota_for(allowed, held):
+    """agents.slice's CPUQuota while anything is held: 75% of the CPUs it keeps, at least one CPU; else none."""
+    return f"{max(100, math.floor(QUOTA_SHARE * len(allowed)) * 100)}%" if held else None
+
+
+def stat():
+    """{cpu: (total jiffies, idle + iowait jiffies)} from /proc/stat."""
+    out = {}
+    with open(os.path.join(PROC, "stat")) as f:
+        for line in f:
+            p = line.split()
+            if p and p[0].startswith("cpu") and p[0] != "cpu":
+                v = [int(x) for x in p[1:]]
+                out[int(p[0][3:])] = (sum(v[:8]), v[3] + (v[4] if len(v) > 4 else 0))
+    return out
+
+
+def busy(a, b, cpus):
+    """Busy % of each CPU between two stat() samples."""
+    pct = {}
+    for c in cpus:
+        total = b[c][0] - a[c][0]
+        pct[c] = round(100 * (total - (b[c][1] - a[c][1])) / total) if total > 0 else 0
+    return pct
+
+
+def sysfs(cpu, name):
+    try:
+        with open(os.path.join(SYS, f"devices/system/cpu/cpu{cpu}/cpufreq/{name}")) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def power(cpus):
+    """Governor and EPP (one value when the CPUs agree, else per CPU) and each CPU's current frequency in kHz."""
+    def one(name):
+        values = {str(c): sysfs(c, name) for c in sorted(cpus)}
+        distinct = set(values.values())
+        return distinct.pop() if len(distinct) == 1 else values
+    freqs = {}
+    for c in sorted(cpus):
+        f = sysfs(c, "scaling_cur_freq")
+        freqs[str(c)] = int(f) if f and f.isdigit() else None
+    return {"governor": one("scaling_governor"), "epp": one("energy_performance_preference"), "curFreqKHz": freqs}
+
+
+def offload_threads():
+    """(unit, pid, tid) of every thread of every running offload unit."""
+    r = subprocess.run(["systemctl", "--user", "list-units", "offload-*", "--state=running", "--no-legend",
+                        "--plain"], capture_output=True, text=True, timeout=20)
+    threads = []
+    for unit in (line.split()[0] for line in r.stdout.splitlines() if line.strip()):
+        cg = subprocess.run(["systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit],
+                            capture_output=True, text=True, timeout=20).stdout.strip()
+        try:
+            with open(os.path.join(SYS, "fs/cgroup", cg.lstrip("/"), "cgroup.procs")) as f:
+                pids = [int(x) for x in f.read().split()]
+        except OSError:
+            continue
+        for pid in pids:
+            try:
+                tids = [int(t) for t in os.listdir(os.path.join(PROC, str(pid), "task"))]
+            except OSError:
+                continue
+            threads += [(unit, pid, tid) for tid in tids]
+    return threads
+
+
+def move_offload(taken, keep):
+    """Narrow every offload thread running on a taken CPU to its other CPUs (or the slice's); the moves made."""
+    moved = []
+    for unit, pid, tid in offload_threads():
+        try:
+            aff = os.sched_getaffinity(tid)
+        except ProcessLookupError:
+            continue
+        if not aff & taken:
+            continue
+        new = (aff - taken) or keep
+        try:
+            os.sched_setaffinity(tid, new)
+        except ProcessLookupError:
+            continue
+        except OSError as e:
+            raise Refused(f"cannot move offload thread {tid} ({unit}) off CPUs {fmt_cpus(aff & taken)}: {e.strerror}")
+        moved.append({"unit": unit, "pid": pid, "tid": tid, "from": fmt_cpus(aff), "to": fmt_cpus(new)})
+    return moved
+
+
+def load_holds():
+    try:
+        with open(HOLDS) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_holds(holds):
+    os.makedirs(STATE, exist_ok=True)
+    with open(HOLDS + ".tmp", "w") as f:
+        json.dump(holds, f, indent=1)
+    os.replace(HOLDS + ".tmp", HOLDS)
+
+
+def log(row):
+    os.makedirs(STATE, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(json.dumps(row) + "\n")
+
+
+def lock():
+    os.makedirs(STATE, exist_ok=True)
+    fd = os.open(os.path.join(STATE, "lock"), os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def notify(event, owner, cpus, expires, text):
+    """Message each recipient; a failed send goes to Hutter's arm-windows file instead. Returns the outcomes."""
+    out = []
+    for to in RECIPIENTS:
+        try:
+            r = subprocess.run([AGENT_MSG, to, text, "--from", "deckbox-cpus"], capture_output=True, text=True,
+                               timeout=60)
+            code, err = r.returncode, (r.stderr or r.stdout).strip()[-300:]
+        except (OSError, subprocess.SubprocessError) as e:
+            code, err = None, str(e)
+        row = {"to": to, "exit": code}
+        if code != 0:
+            os.makedirs(os.path.dirname(ARM_WINDOWS), exist_ok=True)
+            with open(ARM_WINDOWS, "a") as f:
+                f.write(json.dumps({"ts": iso(now()), "source": "deckbox-cpus", "event": event, "owner": owner,
+                                    "cpus": cpus, "expiresAtUtc": expires, "undelivered_to": to, "exit": code,
+                                    "error": err, "text": text}) + "\n")
+            row["fallback"] = ARM_WINDOWS
+        out.append(row)
+    return out
+
+
+def timer_name(owner):
+    return f"deckbox-cpus-give-{owner}-{int(time.time())}"
+
+
+def start_timer(owner, expires):
+    unit = timer_name(owner)
+    argv = ["systemd-run", "--user", f"--unit={unit}", f"--on-calendar={expires.strftime('%Y-%m-%d %H:%M:%S')} UTC",
+            "--timer-property=AccuracySec=1s", "--collect", f"--setenv=PATH={os.environ.get('PATH', '/usr/bin:/bin')}",
+            "--", sys.executable, os.path.realpath(__file__), "give", owner, "--expired"]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    if r.returncode:
+        raise Refused(f"cannot start the auto-give timer (exit {r.returncode}): {(r.stderr or r.stdout).strip()}")
+    return unit + ".timer"
+
+
+def stop_timer(timer):
+    if timer:
+        subprocess.run(["systemctl", "--user", "stop", timer], capture_output=True, timeout=30)
+
+
+def take(owner, cpus_text, expires):
+    cpus = parse_cpus(cpus_text)
+    if not cpus:
+        raise ValueError("no CPUs given")
+    fd = lock()
+    try:
+        base = base_cpus()
+        holds = load_holds()
+        others = set()
+        for o, h in holds.items():
+            if o != owner:
+                others |= set(h["cpus"])
+        problems = []
+        if cpus - base:
+            problems.append(f"{fmt_cpus(cpus - base)} outside agents.slice's base set {fmt_cpus(base)} ({BASE_FILE})")
+        if cpus & parse_cpus(HUTTER):
+            problems.append(f"{fmt_cpus(cpus & parse_cpus(HUTTER))} are Hutter's ({HUTTER})")
+        for o, h in holds.items():
+            if o != owner and cpus & set(h["cpus"]):
+                problems.append(f"{fmt_cpus(cpus & set(h['cpus']))} held by {o} until {h['expiresAtUtc']}")
+        if not base - others - cpus:  # an empty AllowedCPUs= would reset the slice to every CPU, Hutter's included
+            problems.append(f"taking {fmt_cpus(cpus)} would leave agents.slice no CPUs")
+        if problems:
+            raise Refused("; ".join(problems))
+        before = slice_now()
+        allowed = base - others - cpus
+        quota = quota_for(allowed, True)
+        set_slice(allowed, quota)
+        try:
+            moved = move_offload(cpus, allowed)
+            a = stat()
+            time.sleep(SAMPLE_S)
+            pct = busy(a, stat(), cpus)
+            hot = {c: p for c, p in pct.items() if p > BUSY_PCT}
+            if hot:
+                raise Refused(f"busy after agents and offload moved off: " +
+                              ", ".join(f"CPU {c} {p}%" for c, p in sorted(hot.items())) +
+                              f" (limit {BUSY_PCT}% over {SAMPLE_S:g}s)")
+            old = holds.get(owner, {}).get("timer")
+            timer = start_timer(owner, expires)
+        except BaseException:
+            restore_slice(before)
+            raise
+        stop_timer(old)
+        holds[owner] = {"cpus": sorted(cpus), "takenAtUtc": iso(now()), "expiresAtUtc": iso(expires), "timer": timer}
+        save_holds(holds)
+        after = slice_now()
+    finally:
+        os.close(fd)
+    row = {"ok": True, "event": "take", "owner": owner, "cpus": fmt_cpus(cpus), "expiresAtUtc": iso(expires),
+           **power(cpus), "agentsSlice": {"before": before, "after": after}, "busyPct": {str(c): p for c, p in pct.items()},
+           "busyLimitPct": BUSY_PCT, "offloadMoved": moved, "timer": timer}
+    text = (f"deckbox-cpus: {owner} took deckbox CPUs {fmt_cpus(cpus)} until {iso(expires)} (auto-give timer). "
+            f"agents.slice now {after['AllowedCPUs']}, CPUQuota {after['CPUQuota']}.")
+    row["messages"] = notify("take", owner, row["cpus"], row["expiresAtUtc"], text)
+    log({"ts": iso(now()), **row})
+    return row
+
+
+def give(owner, expired=False):
+    fd = lock()
+    try:
+        holds = load_holds()
+        if owner not in holds:
+            return {"ok": True, "event": "give", "owner": owner, "note": f"{owner} holds nothing; nothing to give"}
+        held = holds.pop(owner)
+        base = base_cpus()
+        others = set()
+        for h in holds.values():
+            others |= set(h["cpus"])
+        before = slice_now()
+        allowed = base - others
+        set_slice(allowed, quota_for(allowed, bool(holds)))
+        stop_timer(held.get("timer"))
+        save_holds(holds)
+        after = slice_now()
+    finally:
+        os.close(fd)
+    cpus = fmt_cpus(held["cpus"])
+    row = {"ok": True, "event": "give", "owner": owner, "cpus": cpus, "expiresAtUtc": held["expiresAtUtc"],
+           "expired": expired, "agentsSlice": {"before": before, "after": after},
+           "baseRestored": parse_cpus(after["AllowedCPUs"] or "") == base and not holds}
+    text = (f"deckbox-cpus: {owner} {'reservation expired; gave back' if expired else 'gave back'} deckbox CPUs "
+            f"{cpus}. agents.slice now {after['AllowedCPUs']}, CPUQuota {after['CPUQuota'] or 'none'}.")
+    row["messages"] = notify("give", owner, cpus, held["expiresAtUtc"], text)
+    log({"ts": iso(now()), **row})
+    return row
+
+
+def status():
+    base = base_cpus()
+    holds = load_holds()
+    held = set()
+    for h in holds.values():
+        held |= set(h["cpus"])
+    current = slice_now()
+    expected = base - held
+    return {"ok": True, "event": "status", "base": fmt_cpus(base), "hutter": HUTTER,
+            "holds": [{"owner": o, "cpus": fmt_cpus(h["cpus"]), "expiresAtUtc": h["expiresAtUtc"], "timer": h["timer"]}
+                      for o, h in sorted(holds.items())],
+            "agentsSlice": current,
+            "agentsSliceAsExpected": parse_cpus(current["AllowedCPUs"] or "") == expected,
+            **power(held or base)}
+
+
+def expiry(args):
+    if len(args) != 2 or args[0] not in ("--for", "--until"):
+        raise ValueError("give --for <minutes> or --until <ISO-UTC>")
+    if args[0] == "--for":
+        minutes = float(args[1])
+        if minutes <= 0:
+            raise ValueError("--for needs a positive number of minutes")
+        return now() + dt.timedelta(minutes=minutes)
+    t = dt.datetime.fromisoformat(args[1].replace("Z", "+00:00"))
+    t = (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).astimezone(dt.timezone.utc).replace(microsecond=0)
+    if t <= now():
+        raise ValueError(f"--until {args[1]} is not in the future")
+    return t
+
+
+def main(argv):
+    owner_ok = re.compile(r"[A-Za-z0-9_.-]{1,40}")
+    try:
+        if argv[:1] == ["take"] and len(argv) == 5 and owner_ok.fullmatch(argv[1]):
+            row = take(argv[1], argv[2], expiry(argv[3:]))
+        elif argv[:1] == ["give"] and len(argv) in (2, 3) and owner_ok.fullmatch(argv[1]) and argv[2:] in ([], ["--expired"]):
+            row = give(argv[1], expired=argv[2:] == ["--expired"])
+        elif argv == ["status"]:
+            row = status()
+        elif argv[:1] in (["-h"], ["--help"]):
+            print(__doc__.strip())
+            return 0
+        else:
+            raise ValueError("bad arguments")
+    except ValueError as e:
+        print(json.dumps({"ok": False, "error": str(e), "usage": USAGE}))
+        print(USAGE, file=sys.stderr)
+        return 2
+    except (Refused, OSError) as e:
+        row = {"ok": False, "event": argv[0], "owner": argv[1] if len(argv) > 1 else None, "error": str(e)}
+        print(json.dumps(row))
+        log({"ts": iso(now()), **row})
+        return 1
+    print(json.dumps(row))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

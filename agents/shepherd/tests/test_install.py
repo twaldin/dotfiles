@@ -190,6 +190,18 @@ class Install(unittest.TestCase):
                          ['bootout gui/%d/%s' % (self.uid, job), 'bootstrap gui/%d %s' % (self.uid, installed)])
         self.assertEqual(installed.read_bytes(), (CHECKOUT / 'launchd' / (job + '.plist')).read_bytes())
 
+    def test_deckbox_links_the_queue_offload_and_deckbox_cpus_and_nothing_else(self):
+        result = self.install(SHEPHERD_HOST='deckbox')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.links(), {'machine-ok-queue': self.expect_link('machine-ok-queue'),
+                                        'offload': self.expect_link('offload'),
+                                        'offload-run': self.expect_link('offload-run'),
+                                        'deckbox-cpus': str(CHECKOUT / 'deckbox' / 'deckbox-cpus')})
+        self.assertIn('bin deckbox-cpus -> %s' % (CHECKOUT / 'deckbox' / 'deckbox-cpus'), result.stdout)
+        self.assertFalse(self.agents.exists(), 'no launchd on Linux')
+        self.assertEqual(self.lines(self.launchctl_log) + self.lines(self.swiftc_log), [])
+        self.assertEqual(self.install('--check', SHEPHERD_HOST='deckbox').returncode, 0)
+
     def test_unknown_host_exits_2_and_installs_nothing(self):
         result = self.install(SHEPHERD_HOST='twaldin-elsewhere')
         self.assertEqual(result.returncode, 2)
