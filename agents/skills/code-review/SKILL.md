@@ -12,6 +12,7 @@ Read the [upstream review procedure](../../vendor/mattpocock-skills/skills/engin
   - Both families → `reviewer`, plus a `grok` pass when the change is consequential.
   - A small, low-risk diff may use `grok` alone. Never make Grok the only reviewer of security, concurrency, migrations or cross-cutting design.
   - Without omp, choose another available family and harness.
+  - If the chosen reviewer is out of quota or rate-limited, use the closest available model from another family that isn't the authors' (e.g. `zai/glm-5.3` for `grok`), name the substitute, and verify it like any reviewer. This applies to a project's pinned reviewer too; never wait for a limit to reset.
 - Run the Standards and Spec reviewers in separate contexts. They may use the same reviewer model; both must differ from all authors' families. Keep the upstream rubric and separate reports.
 - Give reviewers the exact changes under review, including uncommitted changes when those are in scope, and read-only access to the relevant repository and evidence. Keep author summaries distinct from primary evidence.
 - After corrections, have the independent reviewers check the changes since their last reviewed revision. Include the final corrections before reporting the final head as reviewed; prior clean reports cover only the changes they inspected.
