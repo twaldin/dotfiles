@@ -18,6 +18,10 @@
    whatever the exit status. A failed fetch after a passing command exits with rsync's status.
 4. Log: one JSON line per run in ~/.local/state/offload/runs.jsonl.
 
+On <host> itself (deckbox agents running `offload` there), there is nothing to sync: the step runs in place, in
+this worktree, through the same queue and the same capped unit, with the same refusal of steps that mention
+`git `; --fetch and --clean have nothing to do. The local host is SHEPHERD_HOST, else the short hostname.
+
 offload never syncs .git/, and there is no git sync mode. A step whose text mentions `git ` is refused before
 anything is sent, and a run whose output says "not a git repository" ends with a loud note: such steps run on
 home behind the queue (`machine-ok-queue run --memory -- <command>`).
@@ -33,11 +37,13 @@ import os
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 
+HERE = os.path.dirname(os.path.realpath(__file__))
 REMOTE_HELPER = "~/dotfiles/agents/shepherd/bin/offload-run"
 STATE = os.path.expanduser("~/.local/state/offload")
 LOG = os.path.join(STATE, "runs.jsonl")
@@ -122,13 +128,24 @@ def fetch_argv(host, remote, rel):
     return ["rsync", "-a", "-R", "-e", ssh_command(), f"{host}:{remote}/./{rel}", "./"]
 
 
-def run_argv(host, remote, rel_cwd, cpus, mem, setup, agent, cmd):
-    args = ["--dir", remote, "--cwd", rel_cwd, "--cpus", cpus, "--mem", mem]
+def helper_args(directory, rel_cwd, cpus, mem, setup, agent, cmd):
+    args = ["--dir", directory, "--cwd", rel_cwd, "--cpus", cpus, "--mem", mem]
     if setup:
         args += ["--setup", setup]
     if agent:
         args += ["--agent", agent]
-    return ["ssh", *SSH_OPTS, host, f"python3 {REMOTE_HELPER} " + shlex.join([*args, "--", *cmd])]
+    return [*args, "--", *cmd]
+
+
+def run_argv(host, remote, rel_cwd, cpus, mem, setup, agent, cmd):
+    return ["ssh", *SSH_OPTS, host,
+            f"python3 {REMOTE_HELPER} " + shlex.join(helper_args(remote, rel_cwd, cpus, mem, setup, agent, cmd))]
+
+
+def in_place(host):
+    """True when --host names this machine: the step then runs in the worktree itself, with no rsync or ssh."""
+    here = os.environ.get("SHEPHERD_HOST") or socket.gethostname().split(".")[0]
+    return host.rsplit("@", 1)[-1] in (here, "localhost")
 
 
 def stats(out):
@@ -196,7 +213,11 @@ def main(argv):
     name = remote_name(root)
     remote = f"offload/{name}"
     manifest = manifest_path(a.host, name)
+    local = in_place(a.host)
     if a.clean:
+        if local:
+            say(f"this is {a.host}: offload runs in place here, so there is no remote copy to clean")
+            return 0
         r = subprocess.run(["ssh", *SSH_OPTS, a.host, f'rm -rf -- "$HOME"/offload/{shlex.quote(name)}'])
         if r.returncode:
             say(f"removing {a.host}:~/{remote} failed (ssh exit {r.returncode})")
@@ -220,30 +241,38 @@ def main(argv):
             return 2
         fetch.append(rel)
 
-    send, deny = select(root)
-    if deny:
-        say(f"not sent (deny-list): {', '.join(deny)}")
-    sending = set(send)
-    gone = [p for p in read_manifest(manifest) if p not in sending and not os.path.lexists(os.path.join(root, p))]
-    t0 = time.monotonic()
-    r = subprocess.run(sync_argv(a.host, remote), cwd=root, capture_output=True,
-                       input="\0".join(send + gone).encode("utf-8", "surrogateescape"))
-    sync_s = round(time.monotonic() - t0, 2)
-    out = r.stdout.decode("utf-8", "replace")
-    if r.returncode not in (0, 24):  # 24: a file vanished mid-transfer
-        sys.stderr.write(r.stderr.decode("utf-8", "replace"))
-        say(f"sync to {a.host}:~/{remote} failed (rsync exit {r.returncode})")
-        return 255
-    write_manifest(manifest, [p for p in send if os.path.lexists(os.path.join(root, p))])
-    files, sent = stats(out)
-    say(f"synced {len(send)} paths ({files} changed, {sent} bytes sent, {len(gone)} deleted) to "
-        f"{a.host}:~/{remote} in {sync_s}s")
-
     rel_cwd = os.path.relpath(cwd, root)
     agent = os.environ.get("EASL_TILE_ID") or os.environ.get("HERDR_PANE_ID")
+    send, deny, gone, files, sent, sync_s = [], [], [], None, None, 0.0
+    if local:
+        if fetch:
+            say("runs in place on this host: --fetch has nothing to copy back")
+            fetch = []
+        argv = [sys.executable, os.path.join(HERE, "offload-run"),
+                *helper_args(root, rel_cwd, a.cpus, a.mem, a.setup, agent, a.command)]
+    else:
+        send, deny = select(root)
+        if deny:
+            say(f"not sent (deny-list): {', '.join(deny)}")
+        sending = set(send)
+        gone = [p for p in read_manifest(manifest) if p not in sending and not os.path.lexists(os.path.join(root, p))]
+        t0 = time.monotonic()
+        r = subprocess.run(sync_argv(a.host, remote), cwd=root, capture_output=True,
+                           input="\0".join(send + gone).encode("utf-8", "surrogateescape"))
+        sync_s = round(time.monotonic() - t0, 2)
+        out = r.stdout.decode("utf-8", "replace")
+        if r.returncode not in (0, 24):  # 24: a file vanished mid-transfer
+            sys.stderr.write(r.stderr.decode("utf-8", "replace"))
+            say(f"sync to {a.host}:~/{remote} failed (rsync exit {r.returncode})")
+            return 255
+        write_manifest(manifest, [p for p in send if os.path.lexists(os.path.join(root, p))])
+        files, sent = stats(out)
+        say(f"synced {len(send)} paths ({files} changed, {sent} bytes sent, {len(gone)} deleted) to "
+            f"{a.host}:~/{remote} in {sync_s}s")
+        argv = run_argv(a.host, remote, rel_cwd, a.cpus, a.mem, a.setup, agent, a.command)
+
     t1 = time.monotonic()
-    proc = subprocess.Popen(run_argv(a.host, remote, rel_cwd, a.cpus, a.mem, a.setup, agent, a.command),
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     seen = threading.Event()
     pumps = [threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, seen)),
              threading.Thread(target=pump, args=(proc.stderr, sys.stderr.buffer, seen))]
@@ -266,10 +295,10 @@ def main(argv):
     run_s = round(time.monotonic() - t1, 2)
     if stopped:
         code = 128 + stopped[0]
-    elif code < 0:  # ssh itself was killed: the connection is gone, and offload-run stops the unit
-        say(f"ssh to {a.host} was killed by signal {-code}; the remote step is stopped")
+    elif code < 0:  # ssh (or the in-place offload-run) was killed; offload-run stops the unit when its stdin closes
+        say(f"{'offload-run' if local else 'ssh to ' + a.host} was killed by signal {-code}; the step is stopped")
         code = 255
-    elif code == 255:
+    elif code == 255 and not local:
         say(f"ssh to {a.host} failed or the remote side exited 255")
 
     fetched = []
@@ -284,7 +313,8 @@ def main(argv):
         print(GIT_NOTE.format(why="The run failed with \"not a git repository\": nothing under .git/ exists there.",
                               command=shlex.join(a.command)), file=sys.stderr)
     log({"ts": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "host": a.host, "worktree": root,
-         "remote": f"~/{remote}", "cwd": rel_cwd, "command": a.command, "setup": a.setup, "cpus": a.cpus,
+         "inPlace": local, "remote": None if local else f"~/{remote}", "cwd": rel_cwd, "command": a.command,
+         "setup": a.setup, "cpus": a.cpus,
          "mem": a.mem, "paths": len(send), "denied": len(deny), "deleted": len(gone), "sync_files": files,
          "sync_bytes": sent, "sync_s": sync_s, "run_s": run_s, "exit": code, "fetch": fetched,
          "git_needed": seen.is_set(), "signal": stopped[0] if stopped else None})

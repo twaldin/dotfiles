@@ -4,7 +4,8 @@
   python3 ~/dotfiles/agents/shepherd/bin/offload-run --dir offload/<name> [--cwd SUB] --cpus N --mem SIZE
           [--setup CMD] [--agent NAME] -- <command> [args...]
 
-Only `offload` calls it, over `ssh -T`. Steps:
+Only `offload` calls it: over `ssh -T` with --dir offload/<name> (the synced copy under ~), or, when offload runs
+on deckbox itself, directly with --dir set to the worktree's absolute path (the step runs in place). Steps:
 - Queue: one ticket in deckbox's heavy-work queue (machine-ok-queue beside this file, --no-gate: Linux has no
   machine-ok; deckbox has 3 slots), so offloaded steps take turns like home's.
 - Unit: `systemd-run --user --wait --pipe --collect --quiet --expand-environment=no` in ~/<dir>/<SUB> with
@@ -96,13 +97,17 @@ def main(argv):
         return 2
     a, cmd = parsed
     home = os.path.realpath(os.path.expanduser("~"))
-    root = os.path.realpath(os.path.join(home, a["--dir"]))
+    root = os.path.realpath(os.path.join(home, a["--dir"]))  # an absolute --dir stays as is: an in-place run
     cwd = os.path.realpath(os.path.join(root, a["--cwd"]))
-    if os.path.dirname(root) != os.path.join(home, "offload") or not (cwd == root or cwd.startswith(root + os.sep)):
-        print(f"offload-run: {a['--dir']} / {a['--cwd']} is not a directory under ~/offload/", file=sys.stderr)
+    synced = not os.path.isabs(a["--dir"])
+    if (synced and os.path.dirname(root) != os.path.join(home, "offload")) or not (
+            cwd == root or cwd.startswith(root + os.sep)):
+        print(f"offload-run: {a['--dir']} / {a['--cwd']} is not a directory under ~/offload/ or an absolute "
+              "worktree path", file=sys.stderr)
         return 2
     if not os.path.isdir(cwd):
-        print(f"offload-run: {cwd} does not exist on this host (nothing synced there)", file=sys.stderr)
+        print(f"offload-run: {cwd} does not exist on this host" + (" (nothing synced there)" if synced else ""),
+              file=sys.stderr)
         return 2
     unit = f"offload-{os.getpid()}-{int(time.time())}"
     affinity = agents_cpus()

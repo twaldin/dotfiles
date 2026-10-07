@@ -42,7 +42,8 @@ if os.environ.get('FAKE_SSH_EXIT'):
     sys.stderr.write(os.environ.get('FAKE_SSH_STDERR', ''))
     sys.exit(int(os.environ['FAKE_SSH_EXIT']))
 home = os.environ['FAKE_REMOTE_HOME']
-child = subprocess.Popen(['sh', '-c', command], cwd=home, env={**os.environ, 'HOME': home}, stdin=subprocess.PIPE)
+child = subprocess.Popen(['sh', '-c', command], cwd=home, env={**os.environ, 'HOME': home, 'SHEPHERD_HOST': host},
+                         stdin=subprocess.PIPE)
 
 def drop(*_):
     child.stdin.close()  # the connection is gone: the remote side reads EOF
@@ -155,7 +156,7 @@ class OffloadCase(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k not in ('EASL_TILE_ID', 'HERDR_PANE_ID')}
         self.env = {**env, **GIT_ENV, 'HOME': str(self.home), 'PATH': f'{self.stubs}:{env["PATH"]}',
                     'FAKE_LOG': str(self.log_dir), 'FAKE_REMOTE_HOME': str(self.remote_home),
-                    'SHEPHERD_HOST': 'deckbox', 'MACHINE_OK_QUEUE_POLL': '0.05'}
+                    'SHEPHERD_HOST': 'twaldin-home', 'MACHINE_OK_QUEUE_POLL': '0.05'}
         self.repo = self.root / 'wt' / 'my repo'
         self.repo.mkdir(parents=True)
         self.git('init', '-q')
@@ -282,7 +283,8 @@ class Argv(OffloadCase):
                               '2.5', '--mem', '512M', '--setup', 'echo set up', '--agent', 'obj_A', '--', 'sh', '-c',
                               'echo "ran in $(pwd -P)"; exit 9'], cwd=self.remote_home, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                             env={**self.env, 'HOME': str(self.remote_home), 'FAKE_AGENTS_CPUS': '0 5-12 17-23'})
+                             env={**self.env, 'HOME': str(self.remote_home), 'SHEPHERD_HOST': 'deckbox',
+                                  'FAKE_AGENTS_CPUS': '0 5-12 17-23'})
         self.procs.append(p)
         out, err = p.stdout.read(), p.stderr.read()  # stdin stays open: its EOF would mean the caller is gone
         p.wait(timeout=30)
@@ -304,7 +306,7 @@ class Argv(OffloadCase):
 
     def test_offload_run_refuses_paths_outside_offload(self):
         for args in (['--dir', '../etc'], ['--dir', 'offload'], ['--dir', 'offload/a/b'],
-                     ['--dir', 'offload/x', '--cwd', '../y']):
+                     ['--dir', 'offload/x', '--cwd', '../y'], ['--dir', str(self.root / 'nowhere')]):
             with self.subTest(args=args):
                 (self.remote_home / 'offload' / 'x').mkdir(parents=True, exist_ok=True)
                 p = subprocess.run([PY39, str(OFFLOAD_RUN), *args, '--cpus', '1', '--mem', '1G', '--', 'true'],
@@ -312,6 +314,56 @@ class Argv(OffloadCase):
                                    env={**self.env, 'HOME': str(self.remote_home)}, timeout=30)
                 self.assertEqual(p.returncode, 2, p.stderr)
         self.assertEqual(self.records('systemd-run.jsonl'), [])
+
+
+class InPlace(OffloadCase):
+    """offload on its own target host: no rsync or ssh; the same queue, unit limits and git refusal."""
+
+    def setUp(self):
+        super().setUp()
+        self.write('sub/a.ts', 'a\n')
+        self.commit('.')
+        self.env['SHEPHERD_HOST'] = 'deckbox'
+
+    def test_it_runs_in_the_worktree_itself_behind_the_queue_in_a_capped_unit(self):
+        r = self.offload('--cpus', '2', '--mem', '1G', '--', 'sh', '-c', 'pwd -P; cat a.ts; exit 4',
+                         cwd=self.repo / 'sub')
+        self.assertEqual((r.returncode, r.stdout), (4, f'{os.path.realpath(self.repo / "sub")}\na\n'), r.stderr)
+        self.assertNotIn('synced', r.stderr)
+        self.assertEqual(self.records('rsync.jsonl') + self.records('ssh.jsonl'), [])
+        unit = self.records('systemd-run.jsonl')[0]
+        self.assertIn(f'--working-directory={os.path.realpath(self.repo / "sub")}', unit)
+        self.assertEqual([unit[i + 1] for i, x in enumerate(unit) if x == '-p'][:3],
+                         ['Slice=offload.slice', 'CPUQuota=200%', 'MemoryMax=1G'])
+        admit = [json.loads(line) for line in (self.home / '.local/state/machine-ok/queue.jsonl')
+                 .read_text().splitlines() if '"admit"' in line][0]
+        self.assertEqual((admit['host'], admit['slots'], admit['gate']), ('deckbox', 3, None))
+        run = self.runs()[-1]
+        self.assertEqual((run['inPlace'], run['remote'], run['exit'], run['cwd']), (True, None, 4, 'sub'))
+
+    def test_user_at_host_and_localhost_are_this_host_too(self):
+        for host in ('tim@deckbox', 'localhost'):
+            with self.subTest(host=host):
+                r = self.offload('--host', host, '--', 'true')
+                self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.records('rsync.jsonl') + self.records('ssh.jsonl'), [])
+
+    def test_the_git_refusal_holds_and_fetch_and_clean_have_nothing_to_do(self):
+        r = self.offload('--', 'git', 'status')
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('NEEDS GIT METADATA', r.stderr)
+        r = self.offload('--fetch', 'out', '--', 'true')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('--fetch has nothing to copy back', r.stderr)
+        r = self.offload('--clean')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('no remote copy to clean', r.stderr)
+        self.assertEqual(self.records('rsync.jsonl') + self.records('ssh.jsonl'), [])
+
+    def test_another_host_still_syncs_and_uses_ssh(self):
+        r = self.offload('--host', 'otherbox', '--', 'true', env={'FAKE_SSH_EXIT': '0'})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.records('ssh.jsonl')[0][-2], 'otherbox')
 
 
 class ExitAndGit(OffloadCase):
