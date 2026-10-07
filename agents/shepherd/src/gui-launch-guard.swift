@@ -100,9 +100,11 @@
 //     sweep, is a problem then; one never placed found on his screen is unresolved from that sample. Each newly shown
 //     tree ID is sighted and parked individually, even with no AX event and no yabai row, and so is one already on
 //     screen when its owner joins the tree (a window on screen whose owner was outside the tree is read again at the
-//     first poll after the tree gains a root or an adoption). macOS can show an existing window again (a native tab
-//     selected again) with no create event and no Space change. The guard keeps both yabai's last index and the
-//     measured Tim membership.
+//     first poll after the tree gains a root or an adoption); at the end, after its last adoption (its own scan), the
+//     windows on screen are read once more and every tree window on them is sighted before the final sweep (review
+//     3; a read that fails then is a problem). macOS can show an existing window again (a native tab selected again)
+//     with no create event and no Space change. The guard keeps both yabai's last index and the measured Tim
+//     membership.
 //     Any of a window's SkyLight memberships in Tim's Spaces counts, even when yabai reports the target. A window
 //     found on his screen after an off-Tim sample, or there at the final sweep, is a
 //     problem, created or not. Its first placement there, where macOS opens new windows, is a move whose
@@ -135,7 +137,10 @@
 //     the first sample that finds it counting (parked, window-counted; its exposure starts there); one gone is dropped.
 //     That counted stretch is evidence until a placement judges it: if the window closes unplaced, it is never-placed
 //     evidence (the sample showed it on his screen); if a sample finds it exempt again first, it counts as on his
-//     screen for all the time from the counting sample to that exempt one, a problem past 250 ms (fail closed).
+//     screen for all the time from the counting sample to that exempt one, a problem past 250 ms (fail closed); a
+//     sweep's sample of a window yabai's list omits ends it at that sample, before the window's own query (review 3).
+//     A stretch no sample judged by the end (the park its counting sample queued, skipped as the guard ended) counts
+//     until the end, past 250 ms a problem too (review 3).
 //     A final exemption is not permanent: after this guard exits, the wrapper's fresh window list is checked against
 //     fresh WindowServer/SkyLight samples (--window-look, read-only, no activation or AppKit loop). A grown/ordered-in
 //     window is judged by all its current memberships; any unreadable exemption proof fails the check.
@@ -2708,7 +2713,10 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
 
 /// At the guard's end (after the final sweep): each tree window still unknown, or unresolved and gone, is a problem,
 /// unless every read of it showed it off Tim's screen (it was never his to see): its time on his screen cannot be
-/// bounded. The end's own sample of one still unknown counts too.
+/// bounded. The end's own sample of one still unknown counts too. Review 3: so is every stretch a window yabai never
+/// placed counted in on Tim's screen (countingSince) that no park or exempt sample judged, as when the guard's end
+/// skipped the park its counting sample queued (the window grown and gone by then): on his screen, as far as the guard
+/// knows, until now, a problem past onTimsScreenLimit (fail closed).
 @Sendable func reportUnplacedAtEnd() {
     let unknown = windowsUnknown.value
     var open = unresolved.value
@@ -2720,6 +2728,13 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
     }
     for (id, u) in open.sorted(by: { $0.key < $1.key }) where unknown[id] == nil && !u.offTims {
         problem("window \(id) of the tree (reported by \(u.via)) was never placed before it went: \(u.why); nothing showed it off Tim's screen, so its time there cannot be bounded")
+    }
+    let end = uptime()
+    let placed = windowSpaces.value
+    for (id, stretch) in countingSince.value.sorted(by: { $0.key < $1.key })
+        where stretch.onTims && placed[id] == nil && unknown[id] == nil && open[id] == nil && end - stretch.at > onTimsScreenLimit {
+        problem(String(format: "window %ld of the tree counted on Tim's screen for up to %.1f ms, never placed, and no sample judged it before the guard's end (more than %.0f ms)",
+                       id, (end - stretch.at) * 1000, onTimsScreenLimit * 1000))
     }
 }
 
@@ -2776,6 +2791,7 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
         if let owner = (found?["pid"] as? NSNumber)?.int32Value, !tree.contains(owner) {
             windowsUnknown.update { $0[id] = nil }
             unresolved.update { $0[id] = nil }
+            countingSince.update { $0[id] = nil }  // not the tree's: no evidence of it (review 3)
             return
         }
         let look = WindowLook(id)
@@ -2910,17 +2926,21 @@ let finalWindowList = Locked([String: Any]())
     return (windows, nil)
 }
 
-/// A known tree window yabai's list omits, sampled directly by a sweep (`look`): judged now, before its own yabai
-/// query (park), which may be slow while the window closes or moves. Counting on Tim's screen after a placement left it
-/// off (windowOnTims false), or at the final sweep, is a problem now (returns true: the park that follows reports no
-/// more of it). An existing unresolved entry takes every sample; a window yabai never placed found counting on his
-/// screen becomes unresolved here (unplacedAt) if it was not, so its closing during the query cannot clear it. A
-/// placed window's measured Tim state is kept (windowOnTims). An exempt sample is left to park.
-@Sendable func omittedSample(_ id: Int, _ look: WindowLook, seen: Double, via: String, final: Bool) -> Bool {
+/// A known tree window yabai's list omits, sampled directly by a sweep (`look`, taken at `sampled`): judged now, before
+/// its own yabai query (park), which may be slow while the window closes or moves. Counting on Tim's screen after a
+/// placement left it off (windowOnTims false), or at the final sweep, is a problem now (returns true: the park that
+/// follows reports no more of it). An existing unresolved entry takes every sample; a window yabai never placed found
+/// counting on his screen becomes unresolved here (unplacedAt) if it was not, so its closing during the query cannot
+/// clear it. A placed window's measured Tim state is kept (windowOnTims). Review 3: an exempt sample ends the stretch
+/// the window counted in now, at `sampled` (exempted), not at the reply of the query that follows.
+@Sendable func omittedSample(_ id: Int, _ look: WindowLook, at sampled: Double, seen: Double, via: String, final: Bool) -> Bool {
     if let open = unresolved.value[id] {
         unplacedAt(id, look, seen: open.seen, via: open.via, why: open.why, reported: open.reported)
     }
-    guard look.exempt == nil else { return false }
+    if let reason = look.exempt {
+        exempted(id, look, at: sampled, reason: reason, via: via, found: nil, why: "yabai's window list omits it; not queried before this sample", final: false)
+        return false
+    }
     let onTims = look.onTims
     let was = windowOnTims.update { (samples: inout [Int: Bool]) -> Bool? in
         defer { if samples[id] != nil { samples[id] = onTims } }
@@ -2976,6 +2996,7 @@ func sweep(_ via: String, final: Bool = false) {
             guard member[w.pid] == true else {
                 windowsUnknown.update { $0[w.id] = nil }
                 unresolved.update { $0[w.id] = nil }
+                countingSince.update { $0[w.id] = nil }
                 continue
             }
             sighted(w.id, at: seen, via: via)
@@ -2985,13 +3006,15 @@ func sweep(_ via: String, final: Bool = false) {
         // Every AX, listed and newly shown window is sighted before its first park: this is the complete known set.
         for id in firstSightings.value.keys.sorted() where !listed.contains(id) {
             let look = WindowLook(id)
+            let sampled = uptime()
             if look.gone {
                 windowsUnknown.update { $0[id] = nil }
             } else if let pid = look.server?.window?.pid, !tree.contains(pid) {
                 windowsUnknown.update { $0[id] = nil }
                 unresolved.update { $0[id] = nil }
+                countingSince.update { $0[id] = nil }
             } else {
-                let latched = omittedSample(id, look, seen: seen, via: via, final: final)
+                let latched = omittedSample(id, look, at: sampled, seen: seen, via: via, final: final)
                 park(id, seen: unresolved.value[id]?.seen ?? seen, via: via, final: final, latched: latched)
             }
         }
@@ -3077,7 +3100,8 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
 /// could go unseen.
 /// GR2 (bench's ruling): every `interval` each exempt tree window (exemptNow) is sampled again too: one gone is
 /// dropped, never a problem; one that counts now is parked (window-counted), judged from this sample on.
-/// From the launch until the guard's end; shownQueue.
+/// From the launch until the guard's end; shownQueue. Review 3: the end makes one more pass of its own (finalPass)
+/// after its last adoption.
 final class ShownWindows {
     static let interval = 0.1
     private var last = Set<Int>()
@@ -3090,12 +3114,33 @@ final class ShownWindows {
     func start() {  // main
         let ticker = DispatchSource.makeTimerSource(queue: shownQueue)
         ticker.schedule(deadline: .now(), repeating: ShownWindows.interval, leeway: .milliseconds(20))
-        ticker.setEventHandler { [unowned self] in if !stopping { self.poll() } }
+        ticker.setEventHandler { [unowned self] in self.pollNow() }
         ticker.resume()
         timer = ticker
     }
 
     func stop() { timer?.cancel() }  // main
+
+    /// One poll, unless the guard is ending (the timer's; the rig's `poll`). shownQueue.
+    func pollNow() { if !stopping { poll() } }
+
+    /// GR2 (review 3): at the guard's end, after its last adoption (the end's own scan) and before the final sweep,
+    /// every window on screen whose owner is in the tree now is sighted, so the final sweep judges it: an owner adopted
+    /// after the last poll (or by that scan) has windows no poll will read again. A read that fails is a problem.
+    /// shownQueue, waited for by the end.
+    func finalPass() {
+        guard let rows = shownWindows() else {
+            problem("the windows on screen could not be read at the guard's end: a tree window on Tim's screen whose owner joined the tree late could go unseen")
+            return
+        }
+        let seen = uptime()
+        var member: [pid_t: Bool] = [:]
+        for row in rows {
+            guard let pid = row.pid else { continue }
+            if member[pid] == nil { member[pid] = tree.contains(pid) }
+            if member[pid] == true { sighted(row.id, at: seen, via: "final-shown") }
+        }
+    }
 
     private func poll() {
         resample()
@@ -3998,6 +4043,7 @@ func finish(_ reason: String) {  // main
             let landBy = uptime() + 0.2
             while theftPending.value && uptime() < landBy { usleep(5_000) }
             if mode == "open" || attaching { _ = tree.scan() }
+            shownQueue.sync { shownWatch.finalPass() }  // after the last adoption: its windows on screen are sighted
             sweep("final", final: true)
             if let why = windowListFailure.value { problem("the tree's windows could not be located at the guard's end: \(why)") }
             reportUnplacedAtEnd()
@@ -4444,8 +4490,9 @@ var rigFront: pid_t?
 /// app, window and modal), `activate <pid> [ms]` (macOS reports `pid`
 /// frontmost, his HID input `ms` before: the guard's whole activation path, reverts included; the rig's stand-in
 /// activation, rig-activate, touches no app), `notify` (an active-Space change), `window <id>` (Accessibility reports
-/// a window created), `sweep` (as at a tree activation), `stall <s>` (watchQueue busy that long), `raise` (an
-/// Objective-C exception on main, which in the rig, with no AppKit loop, nothing catches) and `end` (SIGTERM). main.
+/// a window created), `sweep` (as at a tree activation), `poll` (one read of the windows on screen now, as the 100 ms
+/// timer's, then rig-polled), `stall <s>` (watchQueue busy that long), `raise` (an Objective-C exception on main,
+/// which in the rig, with no AppKit loop, nothing catches) and `end` (SIGTERM). main.
 func rigCommand(_ words: [String]) {
     switch (words.first ?? "", words.count) {
     case ("root", 2):
@@ -4490,6 +4537,11 @@ func rigCommand(_ words: [String]) {
         yabaiQueue.async { park(id, seen: seen, via: "ax-created") }
     case ("sweep", 1):
         yabaiQueue.async { sweep("activation") }
+    case ("poll", 1):
+        shownQueue.async {
+            shownWatch.pollNow()
+            emit(["event": "rig-polled"])
+        }
     case ("stall", 2):
         guard let seconds = Double(words[1]) else { return }
         watchQueue.async { usleep(UInt32(seconds * 1_000_000)) }

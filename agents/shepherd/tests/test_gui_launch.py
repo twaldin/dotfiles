@@ -204,15 +204,20 @@ int main(int argc, char **argv) {
 # (yabai answering late); `query --windows` answers windows.json, `--window N` window-N.json (none: exit 1), and
 # never answers while windows-mode says hang (with hang-once, the next whole list only; a `--window N` query that hangs
 # first creates window-N-asked); `window N --space S` sets the Space in window-N.json while the file moves says apply,
-# else exits 1, as anything else does; `window N --focus` exits 0 (and logs N to focus.log) only while focus-ok exists.
-# GR2 item 6: `query --displays --display` answers focused-display.json (yabai's focused display), and `display --focus
-# N` logs N to display-focus.log and makes display N the focused one (exit 1 while display-focus-fails exists).
+# else exits 1, as anything else does; `window --focus N` exits 0 (and logs N to focus.log) only while focus-ok exists.
+# GR2 item 6: `query --displays --display` answers focused-display.json (yabai's focused display; after display-delay
+# seconds, creating displays-asked first), and `display --focus N` logs N to display-focus.log and makes display N the
+# focused one (exit 1 while display-focus-fails exists). Review 3: while windows-hold exists, a whole window list
+# waits (creating windows-held first) until it is removed.
 RIG_YABAI = '''#!/bin/sh
 [ "$2" = warm ] && exit 0
 dir='%(dir)s'
 case "$2 $3" in
   "query --spaces") sleep "$(cat "$dir/spaces-delay")"; cat "$dir/spaces.json" ;;
-  "query --displays") cat "$dir/focused-display.json" 2>/dev/null || exit 1 ;;
+  "query --displays")
+    : > "$dir/displays-asked"
+    [ -f "$dir/display-delay" ] && sleep "$(cat "$dir/display-delay")"
+    cat "$dir/focused-display.json" 2>/dev/null || exit 1 ;;
   "display --focus")
     echo "$4" >> "$dir/display-focus.log"
     [ -f "$dir/display-focus-fails" ] && exit 1
@@ -234,7 +239,12 @@ case "$2 $3" in
       [ "$delay" != 0 ] && sleep "$delay"
       cat "$dir/window-$5.json" 2>/dev/null || exit 1
     elif [ "$4" = --window ]; then exit 1
-    else cat "$dir/windows.json"; fi ;;
+    else
+      if [ -f "$dir/windows-hold" ]; then
+        : > "$dir/windows-held"
+        while [ -f "$dir/windows-hold" ]; do sleep 0.01; done
+      fi
+      cat "$dir/windows.json"; fi ;;
   "window "*)
     if [ "$3" = --focus ]; then echo "$4" >> "$dir/focus.log"; [ -f "$dir/focus-ok" ] || exit 1; exit 0; fi
     if [ "$4" = --space ] && [ "$(cat "$dir/moves" 2>/dev/null)" = apply ] && [ -f "$dir/window-$3.json" ]; then
@@ -3069,6 +3079,82 @@ class Guard(unittest.TestCase):
         _, result = self.end_rig(process, lines, root)
         self.assertTrue(any(p.startswith('window %d ' % wid) and 'window-shown' in p for p in result['problems']),
                         result['problems'])
+
+    # Review 3 STANDARDS: a sweep whose window list waits (windows-hold) holds yabaiQueue, so work queued behind it waits.
+
+    def hold_a_sweep(self, process, root):
+        put(root / 'windows-hold', '')
+        self.send(process, 'sweep')
+        deadline = time.monotonic() + 5
+        while not (root / 'windows-held').exists():
+            self.assertLess(time.monotonic(), deadline, "the sweep's window list never began")
+            time.sleep(0.01)
+
+    def test_a_counted_stretch_whose_park_the_end_skips_is_judged_at_the_end(self):
+        # (R2 partial) the 1x1 helper on Tim's Space 4 grows while a sweep holds yabai's queue: the park its counting
+        # sample queues waits behind it. It stays grown 0.5 s and closes; the guard's end begins before that park runs,
+        # so the end skips it. The counted stretch is judged at the end all the same.
+        wid = 89344
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
+        self.send(process, 'window %d' % wid)
+        lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid, 10)
+        time.sleep(0.2)  # its first park found it exempt too
+        self.hold_a_sweep(process, root)
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False]]))
+        time.sleep(0.5)  # the polls find it counting: its park waits behind the sweep
+        put(root / 'onscreen.json', '[]')
+        self.send(process, 'end')
+        time.sleep(0.3)  # the end has begun: nothing queued runs now
+        (root / 'windows-hold').unlink()
+        lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        self.assertEqual(process.wait(10), 0)
+        result = json.loads((root / 'summary.json').read_text())
+        self.assertTrue(any(p.startswith('window %d of the tree counted on Tim\'s screen for up to ' % wid) and 'more than 250 ms' in p
+                            for p in result['problems']), result['problems'])
+
+    def test_a_window_on_screen_whose_owner_joins_the_tree_as_the_guard_ends_is_judged_at_the_end(self):
+        # (R2 partial) WindowServer shows the window while its owner is outside the tree; the owner joins in the
+        # main-queue turn just before the end's, so no poll reads the window again, and yabai never lists it. The end
+        # reads the windows on screen once more after its last adoption.
+        wid = 89345
+        probe, _ = self.probe(self.java)
+        process, lines, root = self.rig(space=6, shown=4, onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, True]]))
+        time.sleep(0.35)  # several reads see it on screen, its owner outside the tree
+        self.send(process, 'root %d' % probe.pid, 'end')
+        lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        self.assertEqual(process.wait(10), 0)
+        result = json.loads((root / 'summary.json').read_text())
+        self.assertIn("window %d of the tree (pid %d) was on Tim's Space 4 at the guard's end (yabai's window list omits it)" % (wid, probe.pid),
+                      result['problems'])
+
+    def test_a_counted_stretch_ends_at_the_sweeps_exempt_sample_not_at_its_slow_query(self):
+        # (P2) the 1x1 helper on Tim's Space 4 grows while a sweep's window list waits; a poll finds it counting; it is
+        # 1x1 again before the list answers. The sweep's own sample, before its 1.5 s query about the helper, ends that
+        # stretch, well under 250 ms: no problem.
+        wid = 89346
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
+        self.send(process, 'window %d' % wid)
+        lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid, 10)
+        time.sleep(0.2)  # its first park found it exempt too
+        self.hold_a_sweep(process, root)
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False]]))
+        self.send(process, 'poll')
+        try:
+            lines.until(lambda r: r.get('event') == 'rig-polled', 0.5)
+        except AssertionError:
+            pass  # a guard without the rig's `poll`: its own 100 ms polls have found the helper counting by now
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
+        put(root / 'window-delay', '1.5')
+        (root / 'windows-hold').unlink()
+        exempt = lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid, 10)[-1]
+        self.assertEqual(exempt['final'], False)
+        time.sleep(1.8)  # the sweep's query about the helper answers
+        put(root / 'window-delay', '0')
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual([p for p in result['problems'] if p.startswith('window %d ' % wid)], [])
 
 
 if __name__ == '__main__':
