@@ -2852,6 +2852,33 @@ class Guard(unittest.TestCase):
         self.assertTrue(any(p.startswith('window %d ' % wid) and "on Tim's Space 2" in p and 'macOS showed it to him again' in p
                             for p in result['problems']), result['problems'])
 
+    def test_a_helper_counted_on_tims_space_is_judged_when_it_closes_or_is_exempt_again_before_the_reply(self):
+        # Review 2: the 1x1 helper grows on Tim's Space 4 during a 1.2 s first query and stays grown 0.45 s; then,
+        # before the reply, it closes (yabai never lists it) or shrinks back to 1x1 (yabai lists it). The counted
+        # sample is evidence: never placed and not off his screen, or on it for up to the time until the exempt sample.
+        for wid, ending in ((89341, 'closes'), (89342, 'shrinks')):
+            with self.subTest(ending=ending):
+                process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+                if ending == 'shrinks':
+                    put(root / ('window-%d.json' % wid), json.dumps({'id': wid, 'pid': easl, 'app': 'easl', 'title': 'helper', 'space': 4}))
+                put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
+                put(root / 'window-delay', '1.2')
+                self.send(process, 'window %d' % wid)
+                deadline = time.monotonic() + 5
+                while not (root / ('window-%d-asked' % wid)).exists():
+                    self.assertLess(time.monotonic(), deadline, 'the first park never asked yabai')
+                    time.sleep(0.01)
+                put(root / 'window-delay', '0')
+                put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False]]))
+                time.sleep(0.45)
+                put(root / 'onscreen.json', '[]' if ending == 'closes' else json.dumps([[wid, easl, 1, 1, False]]))
+                time.sleep(1.2)  # the first reply, then the window-counted park
+                _, result = self.end_rig(process, lines, root)
+                mine = [p for p in result['problems'] if p.startswith('window %d ' % wid)]
+                self.assertTrue(mine, result['problems'])
+                if ending == 'shrinks':
+                    self.assertTrue(any('more than 250 ms' in p for p in mine), mine)
+
     def test_a_window_on_screen_before_its_owner_joins_the_tree_is_sighted_once_it_joins(self):
         # Review 2 STANDARDS: WindowServer shows the window while its owner is outside the tree (as before the scan or a
         # launch adopts it); then the owner joins (the rig's root, as an adoption does). yabai never lists the window.

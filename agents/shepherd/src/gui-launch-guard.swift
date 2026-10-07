@@ -105,7 +105,8 @@
 //     without its owner or Space) is asked about again every 50 ms for 3 s after the event that reported it and moved
 //     as soon as yabai places it; then it is window-unknown (with WindowServer's and SkyLight's view of it), until
 //     yabai places it (window-located). One never placed, still there at the end or gone before it, is a problem
-//     unless every read of it showed it off Tim's screen: its time there cannot be bounded; that holds from its first
+//     unless every read of it (first sighting and every counted sample since) showed it off Tim's screen: its time
+//     there cannot be bounded; that holds from its first
 //     unplaced sample, so also when the guard ends within those 3 s. A window list that fails and a tree window still
 //     off --space after its move are recorded as they happen; a list that leaves out an unknown window clears it (as
 //     unknown; it stays unplaced) only if WindowServer shows it gone. A tree window still off --space after its
@@ -122,8 +123,10 @@
 //     ordered state, Spaces; at the first sample of each exempt stretch and at the final sweep), never moved, never a
 //     problem, and not unknown (its window-unknown is that record, never a fault). Each is sampled again every 100 ms
 //     from its first sighting, before any yabai query finishes: one that orders in or grows past 2×2 px is judged from
-//     the first sample that finds it counting (parked, window-counted; its exposure starts there); one gone is dropped. A window that counted
-//     before it went exempt is still judged on that stretch (window-unknown and the never-placed rule).
+//     the first sample that finds it counting (parked, window-counted; its exposure starts there); one gone is dropped.
+//     That counted stretch is evidence until a placement judges it: if the window closes unplaced, it is never-placed
+//     evidence (the sample showed it on his screen); if a sample finds it exempt again first, it counts as on his
+//     screen for all the time from the counting sample to that exempt one, a problem past 250 ms (fail closed).
 //     A final exemption is not permanent: after this guard exits, the wrapper's fresh window list is checked against
 //     fresh WindowServer/SkyLight samples (--window-look, read-only, no activation or AppKit loop). A grown/ordered-in
 //     window is judged by all its current memberships; any unreadable exemption proof fails the check.
@@ -2578,14 +2581,22 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
 
 /// A sample (`look`, taken at `sampled`) found tree window `id` exempt (`reason`): it is recorded (window-exempt, at
 /// the first sample of each exempt stretch and at the final sweep), never moved, never a problem, and not unknown;
-/// it counts again only from a sample that finds it so. `found`: yabai's answer about it (nil: none, `why`).
+/// it counts again only from a sample that finds it so. `found`: yabai's answer about it (nil: none, `why`). The
+/// stretch it counted in until now is judged first, if no placement judged it: one that began on Tim's screen
+/// (countingSince) of a window yabai never placed was there for up to `sampled` minus its start, a problem past
+/// onTimsScreenLimit (fail closed: no sample between bounds it tighter).
 @Sendable func exempted(_ id: Int, _ look: WindowLook, at sampled: Double, reason: String, via: String, found: [String: Any]?,
                         why: String?, final: Bool) {
     let fresh = exemptNow.update { (now: inout [Int: Double]) -> Bool in
         defer { now[id] = sampled }
         return now[id] == nil
     }
-    countingSince.update { $0[id] = nil }
+    let stretch = countingSince.update { $0.removeValue(forKey: id) }
+    if let stretch, stretch.onTims, windowSpaces.value[id] == nil, sampled - stretch.at > onTimsScreenLimit {
+        let pid = look.server?.window?.pid.map { "pid \($0)" } ?? "pid unknown"
+        problem(String(format: "window %ld of the tree (%@) counted on Tim's screen for up to %.1f ms, never placed, until a sample found it exempt (%@) (more than %.0f ms)",
+                       id, pid, (sampled - stretch.at) * 1000, reason, onTimsScreenLimit * 1000))
+    }
     windowsUnknown.update { $0[id] = nil }
     guard fresh || final else { return }
     var record = look.fields
@@ -2624,10 +2635,12 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
 
 /// Tree window `id` was unplaced at a sample (`look`): unresolved from then until yabai places it (the end reports
 /// one never placed, even if the guard ended within the 3 s it is asked about), from the event that reported it
-/// (`seen`, `via`); `reported` once window-unknown records it. Off Tim's screen only while its first sighting and every
-/// sample since showed it off.
+/// (`seen`, `via`); `reported` once window-unknown records it. Off Tim's screen only while its first sighting, every
+/// counted sample since (the stretch it counts in, countingSince: a sample that found it counting on his screen after
+/// an exempt one stays evidence after it closes) and this sample showed it off.
 @Sendable func unplacedAt(_ id: Int, _ look: WindowLook, seen: Double, via: String, why: String, reported: Bool) {
-    let off = firstSightings.value[id]?.onTims == false && (look.gone || !look.onTims)
+    let countedOnTims = countingSince.value[id]?.onTims == true
+    let off = firstSightings.value[id]?.onTims == false && !countedOnTims && (look.gone || !look.onTims)
     unresolved.update { (list: inout [Int: Unresolved]) -> Void in
         let known = list[id]
         list[id] = (seen: known?.seen ?? seen, via: known?.via ?? via, why: why, offTims: (known?.offTims ?? true) && off,

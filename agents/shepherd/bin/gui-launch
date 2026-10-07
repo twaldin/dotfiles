@@ -96,15 +96,17 @@ and/or guards one that something else starts, then checks that nothing took it.
   and so does one already on screen when its owner joins the tree (read again once the tree gains a root or an
   adoption). A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
-  (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen, also when
-  the guard ends within those 3 s.
+  (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen (every
+  counted sample included), also when the guard ends within those 3 s.
   Helper windows (bench's ruling): "on Tim's screen" means ordered in on one of his Spaces (SkyLight) with
   WindowServer bounds larger than 2x2 px; what cannot be read counts as on it. Exempt, and only these: a window
   SkyLight puts on no Space (ordered out; not merely off screen: a window on one of Tim's Spaces that no display
   shows counts, at the end too) and one of 2x2 px or less, such as easl's 1x1 window and its ordered-out 500x500
   helpers. Each is recorded (window-exempt: id, pid, bounds, ordered state, Spaces), never moved, never a problem;
   the guard samples it every 100 ms from its first sighting, before any yabai query finishes, and judges one that
-  orders in or grows past 2x2 px from the first sample that finds it counting. Both exemptions require readable
+  orders in or grows past 2x2 px from the first sample that finds it counting. That counted stretch stays evidence
+  until judged: closed unplaced, it is never-placed evidence; exempt again before any placement, the whole time from
+  that sample to the exempt one counts as on his screen (past 250 ms, a problem). Both exemptions require readable
   membership and bounds and WindowServer presence; an incomplete sample counts, never exempts.
   A window yabai will not place or name the owner of, a window list
   that fails, and a tree window still off the target after its move are recorded as they happen; the tree's
