@@ -206,6 +206,12 @@ case "$2 $3" in
     mode="$(cat "$dir/windows-mode")"
     if [ "$mode" = hang ]; then [ -n "$5" ] && : > "$dir/window-$5-asked"; exec sleep 30; fi
     if [ "$mode" = hang-once ] && [ -z "$4" ]; then echo answer > "$dir/windows-mode"; exec sleep 30; fi
+    if [ "$mode" = hang-hard ] && [ -z "$4" ]; then
+      trap '' TERM
+      echo $$ >> "$dir/windows-pids"
+      sleep 30 & echo $! >> "$dir/windows-pids"
+      wait
+    fi
     if [ -n "$5" ]; then
       : > "$dir/window-$5-asked"
       [ -f "$dir/window-delay" ] && sleep "$(cat "$dir/window-delay")"
@@ -2425,11 +2431,26 @@ class Guard(unittest.TestCase):
         put(root / 'windows-mode', 'hang')
         _, result = self.end_rig(process, lines, root)
         final = result['finalWindowList']
-        self.assertEqual((final['ok'], [t['error'] for t in final['tries']]),
-                         (False, ['yabai -m query --windows did not answer within 2.0 s'] * 2))
+        self.assertFalse(final['ok'])
+        self.assertEqual(final['tries'][0]['error'], 'yabai -m query --windows did not answer within 2.0 s')
+        self.assertEqual(len(final['tries']), 2)
+        self.assertRegex(final['tries'][1]['error'], r'^yabai -m query --windows did not answer within 1\.\d s$')
         self.assertLessEqual(final['ms'], 4100)
-        self.assertIn("the tree's windows could not be located at the guard's end: yabai -m query --windows did not answer within 2.0 s",
+        self.assertIn("the tree's windows could not be located at the guard's end: " + final['tries'][-1]['error'],
                       result['problems'])
+
+    def test_the_final_list_deadline_includes_cleanup_of_a_helper_that_ignores_sigterm(self):
+        # Review 1: each reply timeout used to add 0.3 s before SIGKILL, making the two tries take about 4.6 s.
+        process, lines, root = self.rig()
+        put(root / 'windows-mode', 'hang-hard')
+        _, result = self.end_rig(process, lines, root)
+        final = result['finalWindowList']
+        self.assertEqual((final['ok'], final['retried'], final['limitS'], len(final['tries'])), (False, True, 4.0, 2))
+        self.assertLessEqual(final['ms'], 4100, final)
+        self.assertTrue(all(t['error'] for t in final['tries']), final)
+        self.assertIn("the tree's windows could not be located at the guard's end: " + final['tries'][-1]['error'],
+                      result['problems'])
+        self.assert_gone(self.recorded(root / 'windows-pids', 4))
 
     # perf's receipt ~/dev/easl-lanes/perf-lead/gui-launch.jsonl (sha256 af721a36…, 06:30Z, its third launch): --space 6,
     # Tim's display on Space 4; Accessibility reported easl's window 89243 created (ax-created), yabai answered

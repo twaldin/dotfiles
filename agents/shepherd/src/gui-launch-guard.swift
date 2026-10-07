@@ -126,7 +126,8 @@
 // --parent-pid (gui-launch) exits, even by SIGKILL; on SIGTERM/SIGINT; or (--open) when no token-bearing
 // process appeared within --adopt-timeout. On every end no new work starts (a theft then is not reverted, and is
 // a problem); work in flight, including reverts still queued, gets 3 s to settle; the end's own work (the final
-// scan, sweep and focus read) gets its own 5 s (GR2: its window list may take two tries of 2 s, at most 4 s in all;
+// scan, sweep and focus read) gets its own 5 s (GR2: the window list's two tries share one absolute 4 s deadline,
+// including helper termination and reaping; each reply gets up to 2 s, shortened to leave cleanup time;
 // one the retry reads is no problem, one neither try reads fails the check, and the tries and their latency are in
 // the summary, finalWindowList); then every yabai helper still running is killed with its process
 // group (SIGTERM, then SIGKILL) and reaped. Work that has not finished by then is a problem for the check; nothing
@@ -1186,6 +1187,8 @@ func childAttributes(onlyListedFds: Bool) -> posix_spawnattr_t? {
 /// exit noted under one absolute deadline. The leader stays unreaped until `end`, so its pid, which names the
 /// group, cannot pass to another process while the group is cleared.
 final class Child {
+    /// Space reserved inside an operation's absolute deadline for TERM, KILL and reaping.
+    static let cleanupAllowance = 0.8
     static let outputCap = 16 << 20
     private static let chunk = 65536
     let pid: pid_t
@@ -1263,12 +1266,12 @@ final class Child {
     /// reaped if a whole listing shows it alone, and `release` deregisters it in that same turn: no pid is
     /// signalled once it is released. Returns whether the leader was reaped alone; a group that cannot be listed
     /// whole keeps its leader unreaped.
-    func end(lifecycle: NSLock, release: () -> Void) -> Bool {
+    func end(until deadline: Double = .infinity, lifecycle: NSLock, release: () -> Void) -> Bool {
         if !reaped && !(exited && others()?.isEmpty == true) {
             killpg(pid, SIGTERM)
-            if !settled(within: 0.3) {
+            if !settled(until: min(uptime() + 0.3, deadline - 0.5)) {
                 killpg(pid, SIGKILL)
-                _ = settled(within: 0.5)
+                _ = settled(until: min(uptime() + 0.5, deadline))
             }
         }
         lifecycle.lock(); defer { lifecycle.unlock() }
@@ -1283,13 +1286,13 @@ final class Child {
 
     private func others() -> [pid_t]? { groupMembers(pid)?.filter { $0 != pid } }
 
-    private func settled(within seconds: Double) -> Bool {
-        let until = uptime() + seconds
+    private func settled(until deadline: Double) -> Bool {
         while true {
-            step(until: until)
+            step(until: deadline)
             if exited && others()?.isEmpty == true { return true }
-            if uptime() >= until { return false }
-            usleep(2_000)
+            let left = deadline - uptime()
+            if left <= 0 { return false }
+            usleep(UInt32(min(left, 0.002) * 1_000_000))
         }
     }
 }
@@ -1329,8 +1332,9 @@ final class Helpers {
     }
 
     /// `ownsTimeout`: the caller records a timeout itself (the owner query before a revert's focus).
+    /// `until`: one operation's absolute deadline, including helper cleanup; reserve cleanupAllowance before replying.
     /// `released` (tests): called once the call's group is ended, with whether its pid is still registered.
-    func run(_ path: String, _ args: [String], timeout: Double, ownsTimeout: Bool = false,
+    func run(_ path: String, _ args: [String], timeout: Double, ownsTimeout: Bool = false, until: Double? = nil,
              released: ((Bool) -> Void)? = nil) -> Reply {
         let what = "yabai -m " + args.joined(separator: " ")
         if onMain() {
@@ -1351,7 +1355,8 @@ final class Helpers {
         var spawned: Int32 = -1
         lock.lock()
         let begun = uptime()
-        let allowed = min(timeout, cap - begun)
+        let cleanupDeadline = min(cap, until ?? .infinity)
+        let allowed = min(timeout, cap - begun, until.map { min($0, cap) - begun - Child.cleanupAllowance } ?? .infinity)
         let deadline = begun + allowed
         if !closed && begun < deadline {
             spawned = posix_spawn(&pid, path, &actions, &attributes, argv, environ)
@@ -1369,7 +1374,7 @@ final class Helpers {
         let child = Child(pid: pid, output: fds[0])
         let finished = child.wait(until: deadline)
         var killedAtEnd = false
-        let groupEnded = child.end(lifecycle: lock) {
+        let groupEnded = child.end(until: until == nil ? .infinity : cleanupDeadline, lifecycle: lock) {
             running[pid] = nil
             killedAtEnd = ended.remove(pid) != nil
         }
@@ -2295,8 +2300,9 @@ let queryTimeout = 2.0
 /// misses it falls back to re-activating the app (580 ms there).
 let focusTimeout = 1.0
 
-@Sendable func yabaiReply(_ args: [String], timeout: Double = queryTimeout, ownsTimeout: Bool = false) -> Helpers.Reply {
-    helpers.run(yabaiPath, args, timeout: timeout, ownsTimeout: ownsTimeout)
+@Sendable func yabaiReply(_ args: [String], timeout: Double = queryTimeout, ownsTimeout: Bool = false,
+                         until: Double? = nil) -> Helpers.Reply {
+    helpers.run(yabaiPath, args, timeout: timeout, ownsTimeout: ownsTimeout, until: until)
 }
 
 @Sendable func json(_ data: Data) -> Any? { data.isEmpty ? [:] as [String: Any] : try? JSONSerialization.jsonObject(with: data) }
@@ -2754,19 +2760,19 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
     }
 }
 
-/// GR2 (item 5): the final sweep's window list gets one retry: two tries of queryTimeout each, at most 2 × 2.0 s =
-/// 4.0 s in all (within the end's own finalSeconds). Roblox's run saw one try run out of time, and the check fail on
-/// it. A list neither try reads is window-list-failed, and the check fails: the tree's windows cannot be vouched for.
+/// GR2 (item 5): one absolute 4.0 s deadline for the final list's two tries, including helper termination and reaping.
+/// Each reply gets at most queryTimeout; cleanup time in the first try shortens the next one's reply allowance.
+/// A list neither try reads fails the check: the tree's windows cannot be vouched for.
 let finalListTries = 2
 /// The final sweep's tries (finalWindowList in the summary and the check): each one's latency and why it failed.
 let finalWindowList = Locked([String: Any]())
 
 /// One read of yabai's window list: each window's id, pid and Space; or why it could not be read (a list that
 /// fails, runs out of time, or has a row without an id or pid). `ownsTimeout`: the caller records a timeout.
-@Sendable func windowList(ownsTimeout: Bool) -> (windows: [(id: Int, pid: pid_t, space: Int?)]?, why: String?) {
+@Sendable func windowList(ownsTimeout: Bool, until: Double? = nil) -> (windows: [(id: Int, pid: pid_t, space: Int?)]?, why: String?) {
     let what = "yabai -m query --windows"
     let list: [[String: Any]]
-    switch yabaiReply(["query", "--windows"], ownsTimeout: ownsTimeout) {
+    switch yabaiReply(["query", "--windows"], ownsTimeout: ownsTimeout, until: until) {
     case .exited(0, let data):
         guard let rows = json(data) as? [[String: Any]] else { return (nil, "\(what) answered unreadably") }
         list = rows
@@ -2795,9 +2801,10 @@ func sweep(_ via: String, final: Bool = false) {
         let seen = uptime()
         var read: (windows: [(id: Int, pid: pid_t, space: Int?)]?, why: String?) = (nil, nil)
         var tries: [[String: Any]] = []
+        let listDeadline = final ? seen + Double(finalListTries) * queryTimeout : nil
         for n in 1...(final ? finalListTries : 1) {
             let began = uptime()
-            read = windowList(ownsTimeout: final)
+            read = windowList(ownsTimeout: final, until: listDeadline)
             tries.append(["try": n, "ms": ms(uptime() - began), "error": read.why ?? NSNull()])
             if read.windows != nil { break }
         }

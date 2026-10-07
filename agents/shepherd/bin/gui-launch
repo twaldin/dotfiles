@@ -113,7 +113,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   output that reaches 16 MiB is refused,
   whether or not the helper exits, and fails it), runs none on its main thread, and ends each with its process
   group (a member it cannot read counts as alive). At its end, work in flight (reverts included) gets 3 s to finish
-  and its own final checks 5 s more (its final window list gets one retry: two tries of 2 s, at most 4 s in all;
+  and its own final checks 5 s more (its final window list gets one retry: one absolute 4 s deadline for both tries
+  including helper termination and reaping, each reply at most 2 s and shortened to leave cleanup time;
   one neither try reads fails the check, as does a summary with no final window list; the tries and their latency
   are the check's finalWindowList) (what does not finish fails the check, and so does a theft it can no longer
   revert), then any yabai helper still running is killed, with what it started; then, while a change a read found
