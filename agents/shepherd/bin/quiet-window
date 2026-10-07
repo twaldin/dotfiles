@@ -11,11 +11,12 @@
   quiet-window mute ID                     end summary to the shepherd only (owner busy with Tim)
   quiet-window tick                        run every minute by launchd (net.waldin.quiet-window)
 
-tick: 10 minutes before a window, every other agent with an effort brief (~/cos/efforts/<name>/brief.md)
-gets the hold notice. During the window, quiet-check --pane OWNER names processes of other agents at
-10%+ CPU; each such briefed agent gets a "stop now" prompt (at most every 4 minutes). At the end, the
-owner and the shepherd get a summary. An agent without a brief (Tim's own sessions, e.g. `terms`) is
-never messaged; its load still shows in the summary.
+tick: 10 minutes before a window, every other agent that runs work gets the hold notice: a herdr agent with
+an effort brief (~/cos/efforts/<name>/brief.md), and every omp easl tile with an easl protocol (>= 1), briefed
+or not (board CoSes spawn worker tiles whose briefs are notes on their board). During the window, quiet-check
+--pane OWNER names processes of other agents at 10%+ CPU; each such agent gets a "stop now" prompt (at most
+every 4 minutes). At the end, the owner and the shepherd get a summary. A herdr agent without a brief (Tim's
+own ad-hoc sessions) is never messaged; its load still shows in the summary.
 With ~/.config/machine-shepherd/easl.json enabled, easl agent tiles take part too: a tile may own a window,
 and omp tiles with an easl protocol get the notice, "stop now" and summary through `easl agent.prompt`
 (any other tile is skipped, never typed into).
@@ -50,8 +51,8 @@ HOLD = ("no builds, renders, encodes, benchmarks, game clients or screen capture
 # The easl switch: {"enabled": true, "cli": "<easl path>"}. A missing or unreadable file,
 # or "enabled" not true, keeps quiet-window herdr-only.
 EASL_CONF = os.path.expanduser("~/.config/machine-shepherd/easl.json")
-# Agents that run heavy work have an effort brief; Tim's own sessions have none and are never messaged
-# (2026-10-06: a hold notice landed in his fresh `terms` session).
+# herdr agents that run heavy work have an effort brief; Tim's own ad-hoc herdr sessions have none and are
+# never messaged (2026-10-06: a hold notice landed in his fresh `terms` session). easl agent tiles need none.
 EFFORTS = os.path.expanduser("~/cos/efforts")
 # Fields new in easl R1, unconfirmed until it ships: a rename is a change here only.
 TILE_PROTOCOL = "protocol"  # Agent: present once the tile's easl integration reports
@@ -157,6 +158,13 @@ def promptable(t):
     """Only an omp tile whose easl integration reports a protocol takes agent.prompt as a message;
     any other tile would get it pasted into its terminal."""
     return t.get("kind") == "omp" and type(t.get(TILE_PROTOCOL)) is int
+
+
+def told(t):
+    """True when tile t may be told to hold or stop: an omp tile with an easl protocol (>= 1) is an agent
+    that runs work, briefed in ~/cos or only on its board; any other tile needs a ~/cos brief (and is then
+    skipped by send(), never typed into)."""
+    return (promptable(t) and t[TILE_PROTOCOL] >= 1) or briefed(t.get("name"))
 
 
 def easl_prompt(t, text):
@@ -288,7 +296,7 @@ def tick():
             targets = s["notice_pending"] if s["noticed"] else [
                 p for p, n in ags.items() if p not in (owner, me) and briefed(n)] + [
                 i for i, t in tls.items() if i not in (owner, me) and t.get("name") not in (w["owner"], SHEPHERD)
-                and briefed(t.get("name"))]
+                and told(t)]
             s["notice_pending"] = [
                 p for p in targets if (p in ags or p in tls) and not send(
                     s, p, f"shepherd: QUIET WINDOW {span} for {w['label']} ({w['owner']})"
@@ -326,7 +334,7 @@ def tick():
                 s["hits"][pane] = s["hits"].get(pane, 0) + 1
                 last = s["last"].get(pane)
                 name = tls[pane].get("name") if pane in tls else ags.get(pane)
-                if pane != me and not briefed(name):
+                if pane != me and not (told(tls[pane]) if pane in tls else briefed(name)):
                     if last is None:
                         log(f"not prompting {name or pane}: no effort brief (Tim's own session?); {', '.join(procs)}")
                         s["last"][pane] = now.isoformat()

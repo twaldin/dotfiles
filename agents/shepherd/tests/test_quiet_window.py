@@ -552,6 +552,31 @@ class QuietWindow(unittest.TestCase):
         self.assertIn('w1:p2 x1, sim x1, old-omp x1', summaries[0][1])
         self.assertEqual([p for p, t in self.msgs() if 'ended' in t], ['shepherd'])
 
+    def test_a_board_worker_tile_without_a_cos_brief_is_told_to_hold_and_stop_but_an_unbriefed_pane_is_not(self):
+        # Board CoSes spawn worker tiles whose briefs live on their board (2026-10-07: studio-retro@terms got no
+        # notice); Tim's ad-hoc herdr sessions still have no brief and are never messaged.
+        worker = {'tile': 'obj_retro', 'board': 'brd_2', 'name': 'studio-retro', 'kind': 'omp',
+                  'lifecycle': {'state': 'working'}, 'pid': 4500, 'protocol': 1}
+        unbriefed_old = {'tile': 'obj_old2', 'board': 'brd_2', 'name': 'old-worker', 'kind': 'omp',
+                         'lifecycle': {'state': 'idle'}, 'pid': 4600}
+        self.set_easl(tiles=TILES + [worker, unbriefed_old])
+        self.set_agents(AGENTS + [('w1:p5', 'adhoc')])
+        wid = self.book_window(5, 35)
+        self.qw('tick')
+        self.assertIn('obj_retro', {t for t, _ in self.tile_prompts()})
+        self.assertNotIn('obj_old2', {t for t, _ in self.tile_prompts()})  # no protocol, no brief: not a target
+        self.assertNotIn('w1:p5', [p for p, _ in self.msgs()])
+        self.qw('remove', wid)
+        wid = self.book_window(-2, 30)
+        (self.root / 'qc-out.txt').write_text(
+            '  70.0%    5555  node                         studio-retro (easl tile obj_retro)  <-- not quiet\n'
+            '  65.0%    7777  vitest                       w1:p5 adhoc  <-- not quiet\n')
+        self.qw('tick')
+        stops = [t for t, x in self.tile_prompts() if 'STOP NOW' in x]
+        self.assertEqual(stops, ['obj_retro'])
+        self.assertNotIn('w1:p5', [p for p, _ in self.stops()])
+        self.assertIn('not prompting adhoc: no effort brief', self.qw_log())
+
     def test_a_typed_delivery_is_a_loud_failure_and_that_tile_is_not_prompted_again(self):
         self.set_easl(mode='typed', tiles=TILES[:1])
         wid = self.book_window(5, 35)
