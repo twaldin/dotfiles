@@ -3,7 +3,7 @@ name: mac-gui
 description: Launch, place, capture or show GUI windows on Tim's Macs (Spaces, yabai, BetterDisplay, screencapture). Use before opening any app window for testing, moving or capturing one, or when Tim asks to see one.
 ---
 
-Test windows never go on the Space Tim is using. Check which host you are on (`hostname`), then follow its section.
+Test windows go on agent Spaces first. When a run can't work there, it may use Tim's Spaces or windows rather than wait: keep it brief, never take his focused window, and move it off when done. Check which host you are on (`hostname`), then follow its section.
 
 ## Every Mac
 
