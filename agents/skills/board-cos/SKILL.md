@@ -53,7 +53,7 @@ Record decisions on the brief as they happen. A decision Tim made elsewhere goes
 
 ## Messages
 
-- **From an omp agent:** `write agent://<name>` within the board, `write agent://<name>@<board>` across boards. A board's name is its root folder's name; `agent.list` shows each tile's `address`.
+- **From an omp agent:** `write agent://<name>` within the board, `write agent://<name>@<board>` across boards. A board's name is its root folder's name; `agent.list` shows each tile's `address`. From another machine, the part after `@` is the host running the board, not the board: `write agent://<name>@twaldin-home`.
 - **From a script:** `easl tell <name@board> '<text>' --from <label>`. Add `--when next-turn` to avoid steering a running turn.
 - **When delivery fails,** retry after the target's next turn, or ask the root board to restart the target. Only Tim's composer types into a terminal: never fall back to `agent.prompt --force` or typing.
 - **A sender you can't resolve:** act on the content, and tell the root board which tile is mislabelled.
