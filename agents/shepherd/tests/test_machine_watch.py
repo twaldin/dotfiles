@@ -351,7 +351,7 @@ sys.exit(%d)
         self.assertEqual(listing['path0'], str(self.home / '.bun/bin'))  # its launcher execs bun
         self.assertEqual(prompt['argv'][:4], ['agent.prompt', '--target', 'obj_shep', '--text'])
         self.assertIn('[machine-watch testhost] fseventsd footprint 2000 MB (>1024).', prompt['argv'][4])
-        self.assertEqual(prompt['argv'][5:], ['--from', 'machine-watch', '--when', 'next-turn'])
+        self.assertEqual(prompt['argv'][5:], ['--from', 'machine-watch', '--when', 'now'])
         self.assertEqual(self.agent_msg_args(), [])
         self.assertEqual(self.notifications(), [])  # delivered and not urgent
         self.assertEqual(result.stderr, 'machine-watch: alert to easl tile obj_shep: delivery message\n')

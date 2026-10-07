@@ -657,19 +657,30 @@ class QuietWindow(unittest.TestCase):
         self.qw('tick')
         self.assertEqual(len(self.msgs()), 6, 'delivered, so no more retries')
 
-    def test_an_agents_omp_runtime_is_never_an_offender_only_its_heavy_children_are(self):
+    OMP_ROWS = ('  20.0%     300  omp                          w1:p2 canvas (agent runtime)\n'  # under 50%: not flagged
+                '  75.0%     301  omp                          w1:p4 sky  <-- not quiet\n'  # quiet-check flags a runtime at 50%+
+                '  70.0%    4242  omp                          omp shared service (owner unknown)  <-- not quiet\n'
+                '  95.0%   12345  ffmpeg                       w1:p2 canvas  <-- not quiet\n'
+                'quiet-check: 3 process(es) outside w1:p1 at >= 10% CPU\n')
+
+    def test_in_a_heavy_window_an_agents_omp_runtime_is_never_an_offender_only_its_heavy_children_are(self):
         self.book_window(-2, 30)
-        (self.root / 'qc-out.txt').write_text(
-            '  20.0%     300  omp                          w1:p2 canvas (agent runtime)\n'  # under 50%: not flagged
-            '  75.0%     301  omp                          w1:p4 sky  <-- not quiet\n'  # quiet-check flags a runtime at 50%+
-            '  70.0%    4242  omp                          omp shared service (owner unknown)  <-- not quiet\n'
-            '  95.0%   12345  ffmpeg                       w1:p2 canvas  <-- not quiet\n'
-            'quiet-check: 3 process(es) outside w1:p1 at >= 10% CPU\n')
+        (self.root / 'qc-out.txt').write_text(self.OMP_ROWS)
         self.qw('tick')
         ((pane, text),) = self.stops()
         self.assertEqual(pane, 'w1:p2')
         self.assertIn('ffmpeg pid 12345 95.0%', text)
         self.assertNotIn('omp pid', text)
+
+    def test_in_a_full_window_a_hot_omp_runtime_is_an_offender(self):
+        # Full quiet pauses tool-executing agents too, and a reviewer subagent runs inside its omp.
+        self.qw('add', stamp(-2), stamp(30), 'bench-judge', 'latency run', '--quiet', 'full', '--reason', 'sub-second bounds')
+        (self.root / 'qc-out.txt').write_text(self.OMP_ROWS)
+        self.qw('tick')
+        stops = dict(self.stops())
+        self.assertIn('omp pid 301 75.0%', stops['w1:p4'])
+        self.assertIn('ffmpeg pid 12345 95.0%', stops['w1:p2'])
+        self.assertNotIn('omp pid 300', stops['w1:p2'])  # quiet-check's own "(agent runtime)" rows stay quiet
 
     # -- easl tiles
 

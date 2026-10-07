@@ -37,8 +37,9 @@ and omp tiles with an easl protocol get the notice, reminder, "stop now" and sum
 ended, hours late for a long one; changed 2026-10-07). Any other tile is skipped, never typed into, and a
 delivery easl reports as "typed" is a loud failure with no more prompts to that tile in the window. herdr
 panes get the same texts through agent-msg (an omp inbox aside at the agent's next step).
-An agent's own omp runtime is never an offender: quiet-check tags it "(agent runtime)" below 50% CPU and flags it
-above, and quiet-window ignores both, since reading, coding and subagents run inside it. Its heavy children are named.
+In a heavy window an agent's own omp runtime is never an offender: quiet-check tags it "(agent runtime)" below 50%
+CPU and flags it above, and quiet-window ignores both, since reading, coding and subagents run inside it; its heavy
+children are named. In a full window a hot omp (quiet-check's 50%+) is an offender like any other process.
 From 3 minutes before a booking or hold until it ends (bench samples for its ARM check just before the
 start), mediaanalysisd above 50% CPU is stopped (SIGSTOP), and it is resumed (SIGCONT) once nothing runs
 or starts within 15 minutes; every stop and resume is logged (Tim approved this 2026-10-06:
@@ -370,9 +371,10 @@ def tick():
             for line in out.splitlines():
                 if "<-- not quiet" not in line:
                     continue
-                # An agent's own omp runtime is never an offender, at any CPU: quiet-check tags it "(agent runtime)"
-                # below 50% and flags it above, but reading, coding and subagents run inside it. Its children are named.
-                if re.match(r"\s*[\d.]+%\s+\d+\s+omp\s", line):
+                # In a heavy window an agent's own omp runtime is never an offender, at any CPU: quiet-check tags it
+                # "(agent runtime)" below 50% and flags it above, but reading, coding and subagents run inside it, and
+                # its heavy children are named. A full window pauses tool-executing agents too, so there a hot omp counts.
+                if not is_full(w) and re.match(r"\s*[\d.]+%\s+\d+\s+omp\s", line):
                     continue
                 # Panes that share a project folder are listed as w2:pA|w2:pB; each of them is asked.
                 m = re.match(r"\s*([\d.]+)%\s+(\d+)\s+(\S+)\s+(w\d+:p\w+(?:\|w\d+:p\w+)*)", line)

@@ -337,9 +337,10 @@ def shepherd_tile(name):
 
 
 def tile_prompt(t, text):
-    """`agent.prompt` to tile t at its next turn, addressed by tile id (a bare name can match several tiles).
+    """`agent.prompt` to tile t, steering it mid-turn when busy (`--when now`: next-turn delivery waited hours for
+    busy agents on 2026-10-07), addressed by tile id (a bare name can match several tiles).
     True when sent; a "typed" delivery means easl pasted into the terminal, which counts as a failure."""
-    out = easl("agent.prompt", "--target", t["tile"], "--text", text, "--from", "machine-watch", "--when", "next-turn")
+    out = easl("agent.prompt", "--target", t["tile"], "--text", text, "--from", "machine-watch", "--when", "now")
     if out is None:
         return False
     try:
