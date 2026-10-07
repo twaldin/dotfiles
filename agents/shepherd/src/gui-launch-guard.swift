@@ -108,17 +108,18 @@
 //     yabai (WindowLook), and so does the first sighting. Exempt, and only these: a window WindowServer has that
 //     SkyLight puts on no Space (ordered out; kCGWindowIsOnscreen is no test, it is false for a window ordered in on a
 //     Space no display shows too, and such a window on one of Tim's Spaces counts, in the end-state check too), and a
-//     window whose bounds are 2×2 px or less. A state, Spaces or bounds that cannot be read count as on his screen. An
-//     exempt window is recorded (window-exempt: id, pid, bounds, ordered state, Spaces; at the first sample of each
-//     exempt stretch and at the final sweep), never moved, never a problem, and not unknown (its window-unknown is
-//     that record, never a fault). Each is sampled again every 100 ms (with the windows on screen): one that orders in
-//     or grows past 2×2 px is judged from that sample on (parked, window-counted; its time on his screen counts from
-//     that sample); one gone is dropped. A window that counted before it went exempt is still judged on that stretch
-//     (window-unknown and the never-placed rule).
-//     --allow-caller-placement, for a caller that moves the tree's windows itself afterwards, changes only that
-//     verdict: a window off --space is still moved and recorded, but no problem when it is on a Space and off Tim's
-//     screen (his Spaces 1-4, and the Space his display shows or should show, if not --space); one on his screen,
-//     or on no Space, is a problem all the same. The start record and the summary name the placement declared.
+//     window whose bounds are 2×2 px or less (width and height both: a 1×500 strip counts). A state, Spaces or bounds
+//     that cannot be read count as on his screen. An exempt window is recorded (window-exempt: id, pid, bounds,
+//     ordered state, Spaces; at the first sample of each exempt stretch and at the final sweep), never moved, never a
+//     problem, and not unknown (its window-unknown is that record, never a fault). Each is sampled again every 100 ms
+//     (with the windows on screen): one that orders in or grows past 2×2 px is judged from that sample on (parked,
+//     window-counted; its time on his screen counts from that sample); one gone is dropped. A window that counted
+//     before it went exempt is still judged on that stretch (window-unknown and the never-placed rule).
+//     --allow-caller-placement, for a caller that moves the tree's windows itself afterwards, changes only the
+//     window-off-target verdict: a window off --space is still moved and recorded, but no problem when it is on a
+//     Space and off Tim's screen (his Spaces 1-4, and the Space his display shows or should show, if not --space); one
+//     on his screen, or on no Space, is a problem all the same. The start record and the summary name the placement
+//     declared.
 // The guard ends after --guard-seconds; when the launched tree has exited (without attach flags); when
 // --parent-pid (gui-launch) exits, even by SIGKILL; on SIGTERM/SIGINT; or (--open) when no token-bearing
 // process appeared within --adopt-timeout. On every end no new work starts (a theft then is not reverted, and is
@@ -1891,7 +1892,7 @@ func decide() -> Never {
             out["window"] = target.window(for: to) ?? NSNull()
             // The activation made at once, in this turn, after the checks of the fallback's final turn.
             let refused = unwanted(to)
-            out["immediate"] = refused == nil ? Int(to) : NSNull()
+            out["immediate"] = refused == nil ? Int(to) as Any : NSNull()
             if let refused { out["immediateRefused"] = refused }
             if let spec = row["revert"] as? [String: Any] { out["revert"] = revert(to: to, spec, immediate: refused == nil) }
         case .restored(let latency):
@@ -2419,9 +2420,9 @@ struct WindowLook {
     var gone: Bool { server?.exists == false }
 
     /// Why the window is exempt, no window of Tim's screen wherever it is: WindowServer's bounds of it are 2×2 px or
-    /// less, or WindowServer has it and SkyLight puts it on no Space (ordered out). nil: it counts, and so does one
-    /// whose state, Spaces or bounds cannot be read. kCGWindowIsOnscreen is no test: a window ordered in on a Space no
-    /// display shows is off screen too, and counts.
+    /// less (width and height both), or WindowServer has it and SkyLight puts it on no Space (ordered out). nil: it
+    /// counts, and so does one whose state, Spaces or bounds cannot be read. kCGWindowIsOnscreen is no test: a window
+    /// ordered in on a Space no display shows is off screen too, and counts.
     var exempt: String? {
         if let bounds = server?.window?.bounds, bounds.width <= 2, bounds.height <= 2 { return "2x2 px or less" }
         if server?.exists == true, let place, place.spaces.isEmpty { return "ordered out" }
