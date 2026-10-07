@@ -45,6 +45,10 @@ YABAI=/Users/twaldin/Applications/Yabai.app/Contents/MacOS/yabai
 "$YABAI" -m rule --add label=notification-overlay subrole='^AXNotificationCenter$' manage=off
 # Screen Sharing keeps a title-less, role-less window that yabai would tile full-size.
 "$YABAI" -m rule --add label=screen-sharing app='^Screen Sharing$' manage=off
+# Each native easl tab is its own window: tiled, every tab switch re-tiles the shown tab and
+# the board visibly jumps. Unmanaged, AppKit keeps the tab group at one frame, and Tim can
+# stack apps over it. No grid rule: resizing each new tab window would resize the group.
+"$YABAI" -m rule --add label=easl app='^easl$' manage=off
 
 # Spaces 6-8 on the built-in display belong to agents' GUI test windows (Tim keeps to 1-4):
 # 6 roblox, 7 canvas, 8 Minecraft labs. Float layout so a window moved there keeps its own
