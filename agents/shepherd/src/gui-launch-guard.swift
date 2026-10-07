@@ -2400,12 +2400,6 @@ func rigServerWindows() -> [ServerWindow]? {
     return (true, serverWindow(row))
 }
 
-/// Whether SkyLight's `place` is on Tim's screen (any of its Spaces is); nil: no place (unreadable).
-@Sendable func placeOnTims(_ place: WindowPlace?) -> Bool? {
-    guard let place else { return nil }
-    return place.spaces.contains { spaceWatch.showsTim(spaceId: $0) }
-}
-
 /// GR2 (bench's ruling, GR1 addendum 4 note 3): one sample of a tree window, read directly, no yabai: WindowServer's
 /// record (nil: unreadable; `exists` false: gone) and SkyLight's place (nil: unreadable). Any thread; no child process.
 struct WindowLook {
@@ -2429,9 +2423,17 @@ struct WindowLook {
         return nil
     }
 
-    /// Whether the window is on Tim's screen at this sample: it counts and SkyLight puts it on one of his Spaces (or
-    /// cannot say where it is).
-    var onTims: Bool { exempt == nil && placeOnTims(place) != false }
+    /// Whether SkyLight puts the window on Tim's screen (any of its Spaces is; SpaceWatch.showsTim). nil: it cannot
+    /// say: unreadable, or on no Space for a window not shown to exist (ordered out is exempt; gone, or WindowServer
+    /// unreadable, proves nothing).
+    var spaceOnTims: Bool? {
+        guard let place, !place.spaces.isEmpty else { return nil }
+        return place.spaces.contains { spaceWatch.showsTim(spaceId: $0) }
+    }
+
+    /// Whether the window is on Tim's screen at this sample: it counts, and SkyLight puts it on one of his Spaces or
+    /// cannot say where it is.
+    var onTims: Bool { exempt == nil && spaceOnTims != false }
 
     /// The sample, for a record: WindowServer's owner, bounds ([x, y, width, height]) and on-screen flag; SkyLight's
     /// ordered state ("in": on a Space; "out": on none), Spaces (yabai's indexes, null for one its map does not know;
@@ -2485,7 +2487,7 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
     guard firstSightings.value[id] == nil else { return }
     let look = WindowLook(id)
     let exempt = look.exempt
-    let sighting = FirstSighting(at: seen, place: look.place, exempt: exempt, onTims: exempt != nil ? false : placeOnTims(look.place))
+    let sighting = FirstSighting(at: seen, place: look.place, exempt: exempt, onTims: exempt != nil ? false : look.spaceOnTims)
     firstSightings.update { (all: inout [Int: FirstSighting]) -> Void in if all[id] == nil { all[id] = sighting } }
 }
 
