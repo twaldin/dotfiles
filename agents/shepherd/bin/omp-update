@@ -22,9 +22,13 @@ Policy (Tim, 2026-10-05, via the meta pane; hourly rotation 2026-10-07):
   100 MB, its RSS is over 1.5 GB, or its omp is more than 12 h old. Not when it still has child
   work running (timers, jobs, servers, test runs, ssh: herdr shows background jobs as idle and
   /exit would kill them), runs an in-process subagent (a transcript in its session directory
-  it holds open or wrote in the last 3 min), text is waiting in its editor, or it runs this
-  job. The restart is verified: same session file, new pid, and the memory before/after is
-  logged.
+  it holds open or wrote in the last 3 min), text is waiting in its editor, it runs this job,
+  or its session file is not on disk. A tile restarts only where `zsh -c 'command -v omp'`
+  finds omp in the easl app's environment: easl's resume runs the tile's bare `omp` through
+  zsh, and on 2026-10-07 a zsh without ~/.bun/bin killed three agents that way. The restart
+  is verified: same session file, new pid, and the memory before/after is logged; one whose
+  agent does not come back stops the host's other restarts and names the command that
+  resumes it.
 - After every restart the new omp's own log must show no extension that failed to load or
   bind, and a tile must report easl protocol >= 1 and its model within 60 s. A failure stops
   the host's other restarts and the rest of the run; when the failing host runs a version a
@@ -127,9 +131,10 @@ DEFAULT_CONFIG = {
 }
 
 # Descendants of an agent's omp that a restart may end without losing work: omp's own
-# workers and kernels are looked through (their children are checked); browser and
-# language-server subtrees are ignored whole.
-TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner/")
+# workers and kernels are looked through (their children are checked; the python runner's
+# directory is omp-python-runner-<uid> since omp 18.7.0); browser and language-server
+# subtrees are ignored whole.
+TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner(-\d+)?/")
 SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|pyright|langserver|language-server|languageserver|"
                         r"tsserver|rust-analyzer|gopls|clangd|sourcekit-lsp|lsp-mux|biome lsp|ruff server")
 # A subagent transcript written this recently counts as a running subagent even when its omp
@@ -520,7 +525,7 @@ def tile_agents(cli):
         tiles.append({"tile": True, "pane_id": t["tile"], "name": t.get("name"), "board": t.get("board"),
                       "agent_status": lc.get("state"), "lifecycle": lc, "focused": t.get("focused"),
                       "draft": t.get("draft"), "pid": t.get("pid"), "protocol": t.get("protocol"),
-                      "model": t.get("model"), "cli": cli})
+                      "model": t.get("model"), "thinking": t.get("thinking"), "cli": cli})
     return tiles, None
 
 
@@ -533,6 +538,28 @@ def tile_session(cli, tile):
     """The session file the tile's omp reported (agent.report_session), or None."""
     o = easl(cli, "object.get", "--id", tile)
     return (((o.get("object") or {}).get("props") or {}).get("agent") or {}).get("sessionPath")
+
+
+def easl_finds_omp(cli, procs):
+    """None when `zsh -c 'command -v omp'` finds omp in the environment the easl app (the one
+    `cli` belongs to) runs tile commands in, else why not. easl's `agent.restart --mode resume`
+    runs a tile's bare `omp ...` through zsh; where that finds no omp, the restart kills the
+    agent and leaves its tile at a shell (2026-10-07). The app's PATH and HOME come from its
+    process; launchd's default PATH stands in when they can't be read."""
+    app = cli.split("/Contents/")[0] + "/Contents/MacOS/"
+    env = {"HOME": HOME, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    pid = next((p for p, i in procs.items() if i["cmd"].startswith(app)), None)
+    if pid:
+        for tok in sh(["/bin/ps", "-E", "-ww", "-o", "command=", "-p", str(pid)], timeout=30).stdout.split():
+            key, eq, val = tok.partition("=")
+            if eq and key in env:
+                env[key] = val
+    r = sh(["/usr/bin/env", "-i", f"HOME={env['HOME']}", f"PATH={env['PATH']}", "SHELL=/bin/zsh",
+            "/bin/zsh", "-c", "command -v omp"], timeout=30)
+    found = (r.stdout.strip().splitlines() or [""])[-1]
+    if r.returncode == 0 and found.startswith("/"):
+        return None
+    return f"easl's zsh finds no omp (zsh -c 'command -v omp' with PATH {env['PATH']})"
 
 
 def restart_pane(row, argv):
@@ -572,6 +599,7 @@ def restart_pane(row, argv):
             break
         time.sleep(1)
     if not new or new == old:
+        row["agent_lost"] = True
         return f"failed: omp did not come back; in the pane run: omp {' '.join(keep)} {resume}"
     row["new_pid"] = new
     for _ in range(150):
@@ -614,7 +642,12 @@ def restart_tile(row, a):
             break
         time.sleep(1)
     if not new or new == old:
-        return "failed: the tile's omp did not come back with a new pid"
+        # easl's resume runs the tile's command through zsh; where that finds no omp (2026-10-07)
+        # the agent is gone and its tile sits at a shell: say how to bring it back.
+        row["agent_lost"] = True
+        flags = [f"--model={a['model']}"] * bool(a.get("model")) + [f"--thinking={a['thinking']}"] * bool(a.get("thinking"))
+        cmd = " ".join(shlex.quote(x) for x in [OMP, *flags, f"--resume={row['session']}"])
+        return f"failed: the tile's omp did not come back with a new pid; to resume it, run in the tile: {cmd}"
     row["new_pid"] = new
     time.sleep(20)
     row["mem_after_mb"] = mem_mb(new)
@@ -809,7 +842,8 @@ def host_main(params):
     procs = ps_table()
     mine = ancestors(procs)
     managed = set()
-    ext_broken = None  # the agent whose restart failed its extension check: no more restarts here
+    halt = None  # set when a restart lost its agent or failed its extension check: no more restarts here
+    easl_omp = "unchecked"  # None once zsh in easl's environment is known to find omp, else why not
     agents = []
     if params.get("manage_panes", True) and os.path.exists(HERDR):
         agents = herdr("agent", "list").get("result", {}).get("agents", [])
@@ -869,12 +903,21 @@ def host_main(params):
             row["action"] = "none"
         elif only and pane != only:
             row["action"] = "skip: not selected (--only-pane)"
-        elif ext_broken:
-            row["action"] = f"skip: extension check failed after restarting {ext_broken} on this host"
+        elif halt:
+            row["action"] = f"skip: {halt}"
+        elif not session or not os.path.isfile(session):
+            row["action"] = "skip: no session file on disk to resume"
         else:
             skip, busy = idle_gate(a, pid, procs, mine, blocked, recheck=not dry, session=session)
             if busy:
                 row["children"] = busy
+            if tile and not skip:
+                if easl_omp == "unchecked":
+                    easl_omp = easl_finds_omp(a["cli"], procs)
+                    if easl_omp:
+                        res["errors"].append(f"easl tile restarts held: {easl_omp}")
+                if easl_omp:
+                    skip = f"skip: {easl_omp}"
             if skip:
                 row["action"] = skip
             elif dry:
@@ -884,8 +927,10 @@ def host_main(params):
                     row["action"] = restart_tile(row, a) if tile else restart_pane(row, argv)
                 except Exception as e:
                     row["action"] = f"failed: {str(e)[:200]}"
+                if row.get("agent_lost"):
+                    halt = f"restarting {name or pane} lost its agent on this host"
                 if row.get("ext_check", "ok") != "ok":
-                    ext_broken = name or pane
+                    halt = f"extension check failed after restarting {name or pane} on this host"
                     res["ext_failures"].append({"pane": pane, "name": name, "version": res["installed_after"],
                                                 "problem": row["ext_check"]})
                 if row["action"].startswith(("failed", "restarted, but extension check failed")):

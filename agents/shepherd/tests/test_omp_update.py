@@ -171,6 +171,8 @@ class World:
         self.agent_start_rc, self.agent_start_err = 0, ''
         self.omp_pid = None
         self.new_omp_log = None  # JSON log lines every omp started from here on writes to ~/.omp/logs
+        self.zsh_finds_omp = True  # `zsh -c 'command -v omp'` in easl's environment resolves omp
+        self.zsh_checks, self.app_env = [], {}  # each check's argv; the easl app's environment (ps -E)
         self.next_pid = self.PID
         self.sessions = root / 'sessions'
         self.sessions.mkdir(exist_ok=True)
@@ -213,6 +215,7 @@ class World:
                    model='anthropic/claude-opus-5-5'):
         """An omp agent in an easl terminal tile, as `easl agent.list` reports it."""
         agent = {'tile': tile, 'board': board, 'name': name, 'kind': 'omp', 'protocol': 1, 'model': model,
+                 'thinking': 'xhigh',
                  'lifecycle': {'state': state, 'seen': seen, 'restored': restored}}
         for key, value in (('focused', focused), ('draft', draft)):
             if value is not MISSING:
@@ -278,6 +281,13 @@ class World:
             return self.agent_start(cmd)
         if cmd[0] == self.easl.cli:
             return self.easl.run(cmd[1:])
+        if cmd[:2] == ['/bin/ps', '-E']:
+            app = self.procs[int(cmd[-1])]['cmd']
+            return subprocess.CompletedProcess(cmd, 0, ' '.join([app, *(f'{k}={v}' for k, v in self.app_env.items())]), '')
+        if cmd[0] == '/usr/bin/env' and cmd[-3:] == ['/bin/zsh', '-c', 'command -v omp']:
+            self.zsh_checks.append(cmd)
+            found = self.zsh_finds_omp
+            return subprocess.CompletedProcess(cmd, 0 if found else 1, self.mod.OMP + '\n' if found else '', '')
         raise AssertionError(f'unexpected command {cmd}')
 
     def ps_table(self):
@@ -853,6 +863,15 @@ class TileRestart(TileSandbox):
                                      setup=lambda w: w.add_child(w.tile_pid, '/usr/bin/cargo build --release'))
         self.assertIn('cargo build', row['children'][0])
 
+    def test_omps_python_runner_is_plumbing_under_either_of_its_paths(self):
+        # omp 18.7.0 moved its eval kernels from .../T/omp-python-runner/ to .../T/omp-python-runner-<uid>/.
+        for runner in ('/var/folders/x/T/omp-python-runner/runner-1.py', '/var/folders/x/T/omp-python-runner-501/runner-2.py'):
+            with self.subTest(runner=runner):
+                world = self.new_world()
+                world.place_tile()
+                world.add_child(world.tile_pid, f'Python -u {runner}')
+                self.assertEqual(self.row(self.host())['action'], 'restarted')
+
     def test_a_tile_with_an_armed_timer_a_server_or_ssh_under_its_kernel_is_left_alone(self):
         # omp's own python runner is plumbing: what runs under it is the agent's work.
         for cmd in ('sleep 1800', 'python3 -m http.server 8765', 'ssh tim@deckbox tail -f /tmp/run.log'):
@@ -949,7 +968,9 @@ class TileFailures(TileSandbox):
         started = self.clock.now
         res = self.host()
         row = self.row(res)
-        self.assertEqual(row['action'], "failed: the tile's omp did not come back with a new pid")
+        self.assertEqual(row['action'], "failed: the tile's omp did not come back with a new pid; to resume it, run in "
+                                        f"the tile: {self.mod.OMP} --model=anthropic/claude-opus-5-5 --thinking=xhigh "
+                                        f"--resume={self.world.tile_session}")
         self.assertEqual(res['errors'], [f"obj_lead: {row['action']}"])
         self.assertEqual(self.calls('agent.restart'), [self.RESTART])
         self.assertGreaterEqual(self.clock.now - started, 120)
@@ -1037,6 +1058,58 @@ class ExtensionCheck(TileSandbox):
         self.world.new_omp_log = json.dumps({'level': 'warn', 'message': 'Claude usage fetch failed'}) + '\n'
         (row,) = self.host()['panes']
         self.assertEqual((row['action'], row['ext_check']), ('restarted', 'ok'))
+
+
+class RestartSafety(TileSandbox):
+    """2026-10-07: easl's resume ran the tiles' bare `omp` through a zsh that had no ~/.bun/bin on PATH, killed three
+    agents and left their tiles at a shell. Tiles restart only where zsh in easl's environment finds omp, a session
+    must be on disk to be resumed, and a restart that loses its agent stops the host's other restarts."""
+    DEFAULT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
+
+    def test_no_tile_restarts_while_zsh_in_easls_environment_finds_no_omp(self):
+        self.world.zsh_finds_omp = False
+        self.world.place_tile(name='lead', tile='obj_lead')
+        self.world.place_tile(name='scout', tile='obj_scout')
+        self.world.place_agent('worker', 'w1:p5', session_mb=150)  # herdr panes do not go through easl
+        res = self.host()
+        why = f"easl's zsh finds no omp (zsh -c 'command -v omp' with PATH {self.DEFAULT_PATH})"
+        self.assertEqual({p['pane']: p['action'] for p in res['panes']},
+                         {'w1:p5': 'restarted', 'obj_lead': f'skip: {why}', 'obj_scout': f'skip: {why}'})
+        self.assertEqual(self.calls('agent.restart'), [])
+        self.assertEqual(res['errors'], [f'easl tile restarts held: {why}'])
+        self.assertEqual(len(self.world.zsh_checks), 1, 'checked once per host pass')
+
+    def test_the_check_runs_in_the_easl_apps_own_environment(self):
+        cli = '/Applications/easl.app/Contents/Resources/bin/easl'
+        self.easl.cli = cli
+        self.set_switch(json.dumps({'enabled': True, 'cli': cli}))
+        self.world.procs[self.world.pid()] = {'ppid': 1, 'age_s': 9999, 'cmd': '/Applications/easl.app/Contents/MacOS/Easl'}
+        self.world.app_env = {'PATH': '/usr/bin:/bin:/usr/local/bin', 'HOME': '/Users/x', 'SHELL': '/bin/zsh'}
+        self.world.place_tile()
+        self.assertEqual(self.row(self.host())['action'], 'restarted')
+        self.assertEqual(self.world.zsh_checks, [['/usr/bin/env', '-i', 'HOME=/Users/x', 'PATH=/usr/bin:/bin:/usr/local/bin',
+                                                  'SHELL=/bin/zsh', '/bin/zsh', '-c', 'command -v omp']])
+
+    def test_a_session_not_on_disk_is_never_resumed(self):
+        self.world.place_tile(session_mb=0, age_s=13 * 3600)
+        os.remove(self.world.tile_session)
+        row = self.row(self.host())
+        self.assertEqual((row['triggers'], row['action']), (['up 13.0 h'], 'skip: no session file on disk to resume'))
+        self.assertEqual(self.mutations(), [])
+
+    def test_a_restart_that_loses_its_agent_stops_the_hosts_other_restarts_and_names_the_way_back(self):
+        self.world.place_tile(name='lead', tile='obj_lead')
+        session = self.world.tile_session
+        self.world.place_tile(name='scout', tile='obj_scout')
+        self.easl.restart_changes_pid = False
+        self.easl.after_restart = {'pid': None, 'kind': 'unknown', 'protocol': None}  # left at its shell
+        res = self.host()
+        lead = ("failed: the tile's omp did not come back with a new pid; to resume it, run in the tile: "
+                f"{self.mod.OMP} --model=anthropic/claude-opus-5-5 --thinking=xhigh --resume={session}")
+        self.assertEqual((self.row(res, 'obj_lead')['action'], self.row(res, 'obj_scout')['action']),
+                         (lead, 'skip: restarting lead lost its agent on this host'))
+        self.assertEqual(self.calls('agent.restart'), [self.RESTART])
+        self.assertEqual(res['errors'], [f'obj_lead: {lead}'])
 
 
 class TileRoll(TileSandbox):
@@ -1583,9 +1656,9 @@ class EaslCli(Sandbox):
         self.assertEqual(tiles, [
             {'tile': True, 'pane_id': 'obj_a', 'name': 'lead', 'board': 'brd_1', 'agent_status': 'done',
              'lifecycle': lead['lifecycle'], 'focused': False, 'draft': False, 'pid': 42, 'protocol': 1,
-             'model': 'anthropic/claude-opus-5-5', 'cli': self.cli},
+             'model': 'anthropic/claude-opus-5-5', 'thinking': None, 'cli': self.cli},
             {'tile': True, 'pane_id': 'obj_c', 'name': 'bare', 'board': None, 'agent_status': None,
-             'lifecycle': {}, 'focused': None, 'draft': None, 'pid': None, 'protocol': None, 'model': None,
+             'lifecycle': {}, 'focused': None, 'draft': None, 'pid': None, 'protocol': None, 'model': None, 'thinking': None,
              'cli': self.cli}])
         self.assertEqual(self.mod.tile_get(self.cli, 'obj_a')['pid'], 42)
         self.assertIsNone(self.mod.tile_get(self.cli, 'obj_b'))
