@@ -51,18 +51,23 @@
 //     the focus's 1 s, while the focus is still wanted). A window that cannot be vouched for is not focused, and
 //     the focus still has to be wanted immediately before it is made (once focus is back, it is not). The fallback
 //     activation checks the app again in the same main-queue turn that activates it. An owner query that runs out
-//     of time is an expected-slow event, and no problem, only when the window was not focused, an activation of his
-//     app (at once, or the fallback) ran and succeeded, and a read after the revert shows his app frontmost and his
-//     display on the expected Space. GR2 item 6 (live finding, roblox's runs 1 and 3): nothing is ever fronted over
-//     a system modal on screen (WindowServer owner SecurityAgent; [INFERENCE] coreautha, UserNotificationCenter,
-//     universalAccessAuthWarn): no window is focused over it, and in place of his app the modal's process is re-fronted
-//     (method modal; its activation gives focus back). When no window of his was focused (no focused window at
-//     launch, or none vouched for), and focus still goes back to his app, or there is no app to give it back to
-//     (unrestorable), the revert reads yabai's focused display and, unless it is his display (the one holding Space
-//     1), focuses it (`yabai -m display --focus`), reads it again for up to 1 s, then re-fronts any modal on screen:
-//     an app with no window on his display (Finder with none) leaves the focused display, and his keystrokes, on
-//     CanvasTest. Still not his display is a problem. The before and after focus (front app, focused window or none,
-//     focused display, modal) are focusAtLaunch and focusAtEnd;
+//     of time is an expected-slow event, and no problem, only when the window was not focused, an activation (at
+//     once, or the fallback) ran and succeeded, and a read after the revert shows the app it fronted (his, or a system
+//     modal in its place) frontmost and his display on the expected Space. GR2 item 6 (live finding, roblox's runs 1
+//     and 3): nothing is ever fronted over a system modal on screen (WindowServer owner SecurityAgent; [INFERENCE]
+//     coreautha, UserNotificationCenter, universalAccessAuthWarn): no window is focused over it, and in place of his
+//     app the modal's process is re-fronted (method modal; its activation gives focus back). Windows on screen that
+//     cannot be read cannot rule a modal out (review 3): no app is activated and no window focused for him then, a
+//     problem. The guard focuses no display (review 3): `yabai -m display --focus` focuses and raises a window of
+//     yabai's choosing (on an empty display it can click), which could front another app over a modal. When no window
+//     of his was focused (none at launch, or none vouched for), or there is no app to give focus back to
+//     (unrestorable; display-check), it checks instead: a modal on screen is re-fronted, whichever display has focus;
+//     then yabai's focused display is read, and one that is not his (the display holding Space 1) is a problem,
+//     "display restore unsupported", naming the focus before and after (an app with no window on his display, Finder
+//     with none, leaves the focused display, and his keystrokes, on CanvasTest). The check runs only while Tim has
+//     chosen no app since the theft (his takeover or switch): asked as it begins, after each read that can block, and
+//     in the turn that activates the modal. The before and after focus (front app, focused window or none, focused
+//     display, modal) are focusAtLaunch and focusAtEnd;
 //   - reads every display directly (SkyLight, the record yabai itself reads): at every Space notification, at each
 //     activation, every 20 ms through each theft and grace window (macOS can report two changes in one
 //     notification), around each Space restore, and once more at the end. Each change of Tim's display is in the
@@ -428,6 +433,10 @@ struct RestorePolicy {
     /// GR2 item 6: the system modal (SecurityAgent, an authentication prompt) the guard re-fronted instead of Tim's
     /// app: its activation gives focus back as his app's would.
     private(set) var modal: pid_t?
+    /// GR2 item 6 (review 3): how many times the app focus goes back to has changed since launch (his choice of an app,
+    /// his takeover included, or the app dropped). A restore carries the count it began with and stops once it moves:
+    /// Tim chose since.
+    private(set) var choice = 0
 
     init(userFront: pid_t?, guardUntil: Double) {
         self.userFront = userFront
@@ -460,6 +469,7 @@ struct RestorePolicy {
             }
             window.takeover(at: t)
             userFront = pid
+            choice += 1
             return inWindow ? .tookOver : .user
         }
         if pendingSince != nil && userFront == nil {  // nothing to give focus back to: the tree has lost it
@@ -469,12 +479,16 @@ struct RestorePolicy {
         }
         if window.covers(since: t) { return .system }
         userFront = pid
+        choice += 1
         return .user
     }
 
     /// The app focus goes back to joined the tree or is gone: there is none until Tim picks one, and an open theft
     /// ends when any app outside the tree is frontmost.
-    mutating func forgetUserFront() { userFront = nil }
+    mutating func forgetUserFront() {
+        userFront = nil
+        choice += 1
+    }
 
     /// Before a revert to `pid`, or its fallback activation: why it is no longer wanted (focus goes back to
     /// another app or none, or it is already back); nil: still wanted.
@@ -593,22 +607,26 @@ func vouch(_ id: Int, pending: () -> String?, ask: () -> OwnerReply?) -> Vouch {
     }
 }
 
-/// How a revert gave focus back.
+/// How a revert gave focus back. `fronted`: the system modal its fallback re-fronted in place of Tim's app (GR2 item
+/// 6; nil: his app, or nothing).
 struct RevertOutcome {
     var method = "none"
     var ok = false
     var window: Int?
     var windowError: String?
     var reason: String?
+    var fronted: pid_t?
 }
 
 /// The fallback's last step: its checks and the activation, in one turn of the main queue. GR2 item 6: `modal` when a
 /// system modal was on screen, so its process was re-fronted (pid, owner name, whether the activation was made) and
-/// nothing else was fronted over it.
+/// nothing else was fronted over it; `refused` (review 3) when the windows on screen could not be read, so a modal
+/// could not be ruled out and nothing was fronted (why).
 enum FinalTurn {
     case activated(Bool)
     case modal(pid_t, String, Bool)
     case unwanted(String)
+    case refused(String)
 }
 
 /// A revert: only while `unwanted` finds nothing against it (the app is still the process it was taken from,
@@ -647,14 +665,15 @@ func performRevert(window: Int?, unwanted: () -> String?, confirm: (Int) -> Vouc
         }
     }
     switch activate() {
-    case .unwanted(let why):
+    case .unwanted(let why), .refused(let why):
         outcome.reason = why
     case .activated(let ok):
         outcome.method = "activate"
         outcome.ok = ok
-    case .modal(_, _, let ok):
+    case .modal(let modal, _, let ok):
         outcome.method = "modal"
         outcome.ok = ok
+        outcome.fronted = modal
     }
     return outcome
 }
@@ -668,19 +687,25 @@ struct PostFallbackRead {
 }
 
 /// The owner query before a revert's focus ran out of time. It is expected-slow, and no problem, only if the window
-/// was not focused (the owner check refused it, or focus was back first), an activation of `pid` ran and succeeded
-/// (`immediate`, the one made at once in the turn that decided the theft, or the revert's fallback, which its checks
-/// let run), and `read`, taken after the revert, shows `pid` frontmost and Tim's display on `expectedSpace`. Returns
-/// why it is a problem; nil: expected-slow.
-func ownerTimeoutProblem(_ outcome: RevertOutcome, immediate: Bool, to pid: pid_t, expectedSpace: Int?, read: PostFallbackRead?) -> String? {
+/// was not focused (the owner check refused it, or focus was back first), an activation ran and succeeded (the one
+/// made at once in the turn that decided the theft, which fronted `immediate`, or the revert's fallback, which its
+/// checks let run), and `read`, taken after the revert, shows the app that activation fronted frontmost and Tim's
+/// display on `expectedSpace`. That app is `pid`, or (GR2 item 6, review 3) the system modal re-fronted in its place.
+/// Returns why it is a problem; nil: expected-slow.
+func ownerTimeoutProblem(_ outcome: RevertOutcome, immediate: pid_t?, to pid: pid_t, expectedSpace: Int?, read: PostFallbackRead?) -> String? {
     if outcome.method == "window" { return "window \(outcome.window ?? 0) was focused without its owner vouched for" }
-    if !immediate {
-        guard outcome.method == "activate" else { return "no activation gave focus back: the fallback activation did not run: \(outcome.reason ?? "no reason recorded")" }
-        guard outcome.ok else { return "no activation gave focus back: the fallback activation of pid \(pid) failed" }
+    let fellBack = outcome.method == "activate" || outcome.method == "modal"
+    if immediate == nil {
+        guard fellBack else { return "no activation gave focus back: the fallback activation did not run: \(outcome.reason ?? "no reason recorded")" }
+        guard outcome.ok else { return "no activation gave focus back: the fallback activation of pid \(outcome.fronted ?? pid) failed" }
     }
+    let front = fellBack && outcome.ok ? outcome.fronted ?? pid : immediate ?? pid
     guard let read else { return "no read was taken after the activation" }
     if let error = read.error { return "the read after the activation failed: \(error)" }
-    guard read.front == pid else { return "after the activation \(read.front.map { "pid \($0)" } ?? "no app") is frontmost, not pid \(pid)" }
+    guard read.front == front else {
+        let modal = front == pid ? "" : " (the system modal re-fronted in place of pid \(pid))"
+        return "after the activation \(read.front.map { "pid \($0)" } ?? "no app") is frontmost, not pid \(front)\(modal)"
+    }
     guard let expectedSpace, read.space == expectedSpace else {
         return "after the activation Tim's display shows \(read.space.map { "Space \($0)" } ?? "a Space yabai does not list"), not Space \(expectedSpace.map { String($0) } ?? "?")"
     }
@@ -1799,8 +1824,10 @@ func unknownWindow(_ id: Int) -> String { "yabai knows no window \(id)" }
 ///   an answer missing: none in time), "duringQuery" (activation rows) comes while the first owner query runs,
 ///   "afterVouch" (activation rows) comes once an owner answer vouched for the window, before the focus,
 ///   "focus": "fail" fails the focus, "duringFocus" (`{"procs", "t", "activate"}`) happens while the focus runs,
-///   "mainQueue" (rows) is work the main queue serves before the fallback's final turn, and "afterFallback"
-///   (`{"front": pid, "space": n}`; absent: the read failed) is what the read after the revert shows;
+///   "mainQueue" (rows) is work the main queue serves before the fallback's final turn, "afterFallback"
+///   (`{"front": pid, "space": n}`; absent: the read failed) is what the read after the revert shows, and "modal"
+///   (pid) is a system modal on screen, which the activation made at once and the fallback's final turn re-front in
+///   place of his app;
 /// - `{"t", "launch": pid}` (an app launch or a scan sighting), `{"t", "move": pid}` (the check before a move);
 /// - `{"t", "space": n, "since": s, "windowSpace": n|null, "duringQuery": [activation rows]}`: Tim's display
 ///   showed Space n at some moment from `since` (default t) until t, the activations came while the query ran,
@@ -1866,7 +1893,7 @@ func decide() -> Never {
         if !result.dropped.isEmpty { out["dropped"] = result.dropped.map(Int.init) }
     }
     var activation: ([String: Any]) -> [String: Any] = { _ in [:] }
-    func revert(to: pid_t, _ spec: [String: Any], immediate: Bool) -> [String: Any] {
+    func revert(to: pid_t, _ spec: [String: Any], immediate: pid_t?) -> [String: Any] {
         var queries = 0
         var timedOut = false
         var activated: pid_t?
@@ -1913,6 +1940,10 @@ func decide() -> Never {
                 // the activation, with nothing between them.
                 queued = (spec["mainQueue"] as? [[String: Any]] ?? []).map { activation($0) }
                 if let why = unwanted(to) { return .unwanted(why) }
+                if let modal = pid(spec["modal"]) {  // a system modal on screen: re-fronted in place of his app
+                    activated = modal
+                    return .modal(modal, "SecurityAgent", true)
+                }
                 activated = to
                 return .activated(true)
             })
@@ -1948,11 +1979,14 @@ func decide() -> Never {
             out["decision"] = "restore"
             out["to"] = Int(to)
             out["window"] = target.window(for: to) ?? NSNull()
-            // The activation made at once, in this turn, after the checks of the fallback's final turn.
+            // The activation made at once, in this turn, after the checks of the fallback's final turn (a system modal
+            // the revert names, `modal`, is re-fronted in place of his app).
             let refused = unwanted(to)
-            out["immediate"] = refused == nil ? Int(to) as Any : NSNull()
+            let spec = row["revert"] as? [String: Any]
+            let fronted = refused == nil ? spec.flatMap { pid($0["modal"]) } ?? to : nil
+            out["immediate"] = fronted.map { Int($0) as Any } ?? NSNull()
             if let refused { out["immediateRefused"] = refused }
-            if let spec = row["revert"] as? [String: Any] { out["revert"] = revert(to: to, spec, immediate: refused == nil) }
+            if let spec { out["revert"] = revert(to: to, spec, immediate: fronted) }
         case .restored(let latency):
             out["decision"] = "restored"
             out["latencyMs"] = ms(latency)
@@ -3240,17 +3274,34 @@ let shownWatch = ShownWindows()
 /// universalAccessAuthWarn.
 let systemModalOwners: Set<String> = ["SecurityAgent", "coreautha", "UserNotificationCenter", "universalAccessAuthWarn"]
 
-/// A system modal on screen now (WindowServer's windows on screen; the rig's stand-in): its owner's pid and name. nil:
-/// none, or the windows on screen cannot be read. Any thread; no child process.
-@Sendable func systemModal() -> (pid: pid_t, name: String)? {
-    for w in shownWindows() ?? [] {
-        if let pid = w.pid, let name = w.owner, systemModalOwners.contains(name) { return (pid, name) }
-    }
-    return nil
+/// What the windows on screen showed of system modals (review 3: an unreadable read is not "none").
+enum ModalSample {
+    case absent
+    case modal(pid_t, String)
+    case unreadable
 }
 
-@Sendable func modalRecord(_ modal: (pid: pid_t, name: String)?) -> Any {
-    modal.map { ["pid": Int($0.pid), "name": $0.name] as [String: Any] } ?? NSNull()
+/// Why nothing is fronted while the windows on screen cannot be read (GR2 item 6, review 3).
+let modalUnknown = "the windows on screen could not be read, so a system modal could not be ruled out"
+
+/// A system modal on screen now (WindowServer's windows on screen; the rig's stand-in): its owner's pid and name;
+/// absent, from a read that names none; unreadable, when the windows on screen cannot be read, which never counts as
+/// none: nothing is fronted then. Any thread; no child process.
+@Sendable func systemModal() -> ModalSample {
+    guard let rows = shownWindows() else { return .unreadable }
+    for w in rows {
+        if let pid = w.pid, let name = w.owner, systemModalOwners.contains(name) { return .modal(pid, name) }
+    }
+    return .absent
+}
+
+/// A modal sample for a record: {pid, name}, null (none), or "unreadable".
+@Sendable func modalRecord(_ sample: ModalSample) -> Any {
+    switch sample {
+    case .absent: return NSNull()
+    case .modal(let pid, let name): return ["pid": Int(pid), "name": name] as [String: Any]
+    case .unreadable: return "unreadable"
+    }
 }
 
 /// yabai's focused display, by index; nil: the query failed or named none. Off main.
@@ -3258,40 +3309,65 @@ let systemModalOwners: Set<String> = ["SecurityAgent", "coreautha", "UserNotific
     ((yabai(["query", "--displays", "--display"]) as? [String: Any])?["index"] as? NSNumber)?.intValue
 }
 
+/// An app record (describe, rigApp) for a problem's text.
+@Sendable func appText(_ app: Any?) -> String {
+    guard let app = app as? [String: Any] else { return "no app" }
+    return "\(app["name"].map { "\($0)" } ?? "?") (pid \(app["pid"].map { "\($0)" } ?? "?"))"
+}
+
 /// GR2 item 6 (live, roblox's runs 1 and 3): re-activating an app that has no window on Tim's display (Finder with
 /// none) leaves yabai's focused display, and the key window's screen, where a tree activation took them (CanvasTest),
-/// so his keystrokes could land there. When no window of his was focused, the restore reads the focused display and,
-/// unless it is Tim's (the display holding Space 1, from the baseline), focuses his (`yabai -m display --focus`) and
-/// reads it again every 20 ms for up to 1 s. A system modal on screen then is re-fronted after that focus, so nothing
-/// stays fronted over it. Still not his display: a problem. Returns the record (restore-call's `display`).
-/// restoreQueue.
-@Sendable func refocusTimsDisplay(after what: String) -> [String: Any] {
-    let before = focusedDisplay()
-    var record: [String: Any] = ["display": timDisplay ?? NSNull(), "before": before ?? NSNull(), "focus": NSNull(),
-                                 "modal": NSNull()]
-    var after = before
-    if let tim = timDisplay, before != tim {
-        switch yabaiReply(["display", "--focus", String(tim)], timeout: focusTimeout) {
-        case .exited(0, _): record["focus"] = "ok"
-        case .exited(let code, _): record["focus"] = "exit \(code)"
-        case .timedOut: record["focus"] = "no answer within \(focusTimeout) s"
-        case .refused(let why): record["focus"] = why
-        }
-        let until = uptime() + 1
-        after = focusedDisplay()
-        while after != tim && uptime() < until {
-            usleep(20_000)
-            after = focusedDisplay()
-        }
-        if let modal = systemModal() {
-            let ok = DispatchQueue.main.sync { activate(modal.pid) }
-            record["modal"] = ["pid": Int(modal.pid), "name": modal.name, "refronted": ok] as [String: Any]
-        }
+/// so his keystrokes could land there. Review 3: the guard focuses no display. `yabai -m display --focus` is not
+/// display-only: yabai focuses and raises the first window on that display's Space (on an empty display it can post
+/// mouse clicks), which could front another app over a system modal, or a tree window not yet parked, without any of
+/// the restore target's checks. So when no window of Tim's was focused for the restore, this checks instead: a system
+/// modal on screen is re-fronted, whichever display has focus (unless it is frontmost already); then yabai's focused
+/// display is read, and one that is not his (the display holding Space 1, from the baseline) is a problem, "display
+/// restore unsupported", naming the focus before (at launch) and now: nothing is focused for it. A modal sample that
+/// cannot be read is a problem, and nothing is fronted. Each step is still Tim's to want: `wanted` (main; nil: still
+/// wanted, else why not: he chose an app since) is asked as the check begins, after each read that can block, and in
+/// the main-queue turn that activates the modal; once it is not, the check stops (`reason`), no problem. Returns the
+/// record (restore-call's `display`; display-check). restoreQueue.
+@Sendable func checkTimsDisplay(after what: String, wanted: @escaping () -> String?) -> [String: Any] {
+    var record: [String: Any] = ["display": timDisplay ?? NSNull(), "focused": NSNull(), "modal": NSNull(), "ok": NSNull(),
+                                 "reason": NSNull()]
+    func stopped() -> Bool {
+        guard let why = DispatchQueue.main.sync(execute: wanted) else { return false }
+        record["reason"] = why
+        return true
     }
-    record["after"] = after ?? NSNull()
-    record["ok"] = timDisplay != nil && after == timDisplay
-    if record["ok"] as? Bool != true {
-        problem("focus was not given back to Tim's display (\(timDisplay.map { "display \($0)" } ?? "unknown")) after \(what): yabai's focused display is \(after.map { "display \($0)" } ?? "unreadable")")
+    if stopped() { return record }
+    switch systemModal() {
+    case .unreadable:
+        record["modal"] = "unreadable"
+        problem("after \(what), \(modalUnknown) or re-fronted")
+    case .modal(let pid, let name):
+        let turn = DispatchQueue.main.sync { () -> (why: String?, front: Bool, ok: Bool) in
+            if let why = wanted() { return (why, false, false) }
+            if frontmost().pid == pid { return (nil, true, false) }
+            return (nil, false, activate(pid))
+        }
+        if let why = turn.why {
+            record["reason"] = why
+            return record
+        }
+        record["modal"] = ["pid": Int(pid), "name": name, "frontmost": turn.front, "refronted": turn.ok] as [String: Any]
+    case .absent:
+        break
+    }
+    let focused = focusedDisplay()
+    if stopped() { return record }
+    record["focused"] = focused ?? NSNull()
+    let ok = timDisplay != nil && focused == timDisplay
+    record["ok"] = ok
+    if !ok {
+        let (before, front) = DispatchQueue.main.sync { () -> (String, String) in
+            let window = (focusAtLaunch["window"] as? NSNumber).map { "window \($0.intValue)" } ?? "no focused window"
+            let display = (focusAtLaunch["focusedDisplay"] as? NSNumber).map { "display \($0.intValue)" } ?? "display unknown"
+            return ("\(appText(focusAtLaunch["app"])), \(window), \(display)", appText(frontmost().app))
+        }
+        let now = focused.map { "display \($0)" } ?? "unreadable"
+        problem("display restore unsupported: after \(what), yabai's focused display is \(now), not Tim's (\(timDisplay.map { "display \($0)" } ?? "unknown")), and the guard focuses no display (yabai -m display --focus raises a window of its own choosing); focus before: \(before); after: \(front), \(now)")
     }
     return record
 }
@@ -3346,27 +3422,46 @@ let systemModalOwners: Set<String> = ["SecurityAgent", "coreautha", "UserNotific
 /// activation, with no activation or adoption served in between. `method` is how a revert it lands records it:
 /// "immediate", made in the turn that decided the theft, or "activate", the revert's fallback. GR2 item 6: with a
 /// system modal on screen, Tim's app is never fronted over it: the modal's process is re-fronted instead (method
-/// "modal"), and its activation gives focus back. main.
+/// "modal"), and its activation gives focus back. Review 3: windows on screen that cannot be read cannot rule a modal
+/// out, so nothing is fronted then (refused; a problem). main.
 @Sendable func finalActivation(_ pid: pid_t, method: String = "activate") -> FinalTurn {
     if let why = policy.unwanted(pid) { return .unwanted(why) }
     guard revalidateTarget(pid) else { return .unwanted("pid \(pid) joined the tree or is another process now") }
-    if let modal = systemModal() {
+    switch systemModal() {
+    case .modal(let modal, let name):
         lastRestore.update { $0 = ("modal", nil) }
-        policy.fronted(modal: modal.pid)
-        return .modal(modal.pid, modal.name, activate(modal.pid))
+        policy.fronted(modal: modal)
+        return .modal(modal, name, activate(modal))
+    case .unreadable:
+        let why = "\(modalUnknown): \(method == "immediate" ? "the activation at once" : "the revert's fallback activation") of pid \(pid) was not made"
+        problem(why)
+        return .refused(why)
+    case .absent:
+        lastRestore.update { $0 = (method, nil) }
+        return .activated(activate(pid))
     }
-    lastRestore.update { $0 = (method, nil) }
-    return .activated(activate(pid))
+}
+
+/// Why no window is focused for Tim now (GR2 item 6): a system modal on screen, or one that cannot be ruled out
+/// (review 3). nil: a read named none. Any thread.
+@Sendable func modalBlocksFocus() -> String? {
+    switch systemModal() {
+    case .modal(let pid, let name): return "a system modal (\(name), pid \(pid)) is on screen: no window is focused over it"
+    case .unreadable: return "\(modalUnknown): no window is focused"
+    case .absent: return nil
+    }
 }
 
 /// Gives focus back to Tim's app `pid`, which a tree process took at `stolenAt` (uptime), after the activation made
-/// at once in the turn that decided the theft (`immediate`: it ran and succeeded): unless focus is back by then,
-/// performRevert with the live checks, the focus by window id once its owner is vouched for, and the fallback
-/// activation (cooperative on macOS 14+: a slow app answers late) in one main-queue turn with its checks. An owner
-/// query that ran out of time is settled after it. GR2 item 6: no window is focused over a system modal; and unless a
-/// window of his was focused, while focus still goes back to `pid`, Tim's display is focused again
-/// (refocusTimsDisplay; restore-call's `display`). restoreQueue, scheduled by main, so the guard's end waits for it.
-@Sendable func revert(to pid: pid_t, stolenAt: Double, immediate: Bool) {
+/// at once in the turn that decided the theft (`immediate`: the app it fronted, his or a system modal in its place;
+/// nil: it did not run or failed): unless focus is back by then, performRevert with the live checks, the focus by
+/// window id once its owner is vouched for, and the fallback activation (cooperative on macOS 14+: a slow app answers
+/// late) in one main-queue turn with its checks. An owner query that ran out of time is settled after it. GR2 item 6:
+/// no window is focused over a system modal, nor while one cannot be ruled out; and unless a window of his was
+/// focused, Tim's display is checked (checkTimsDisplay; restore-call's `display`) while Tim has chosen no app since the
+/// theft (`choice`, RestorePolicy.choice then) and focus still goes back to `pid`. restoreQueue, scheduled by main, so
+/// the guard's end waits for it.
+@Sendable func revert(to pid: pid_t, stolenAt: Double, immediate: pid_t?, choice: Int) {
     let began = uptime()
     var ownerTimeout: (query: [String], allowed: Double)?
     let outcome = performRevert(
@@ -3378,9 +3473,7 @@ let systemModalOwners: Set<String> = ["SecurityAgent", "coreautha", "UserNotific
             return check.vouch
         },
         focus: { id in
-            if let modal = systemModal() {
-                return "a system modal (\(modal.name), pid \(modal.pid)) is on screen: no window is focused over it"
-            }
+            if let why = modalBlocksFocus() { return why }
             let prior = lastRestore.value
             lastRestore.update { $0 = ("window", id) }
             let reply = yabaiReply(["window", "--focus", String(id)], timeout: focusTimeout)
@@ -3394,11 +3487,14 @@ let systemModalOwners: Set<String> = ["SecurityAgent", "coreautha", "UserNotific
         },
         activate: { DispatchQueue.main.sync { finalActivation(pid) } })
     var display: Any = NSNull()
-    if outcome.method != "window" && DispatchQueue.main.sync(execute: { policy.userFront == pid }) {
-        display = refocusTimsDisplay(after: "the revert to pid \(pid)")
+    if outcome.method != "window" {
+        display = checkTimsDisplay(after: "the revert to pid \(pid)") {
+            if policy.choice != choice { return "Tim chose an app since the theft: focus stays where he put it" }
+            return policy.userFront == pid ? nil : "focus no longer goes back to pid \(pid)"
+        }
     }
     let done = uptime()
-    emit(["event": "restore-call", "to": Int(pid), "immediate": immediate, "method": outcome.method, "window": outcome.window ?? NSNull(),
+    emit(["event": "restore-call", "to": Int(pid), "immediate": immediate != nil, "method": outcome.method, "window": outcome.window ?? NSNull(),
           "ok": outcome.ok, "windowError": outcome.windowError ?? NSNull(), "reason": outcome.reason ?? NSNull(),
           "display": display, "callMs": ms(done - began), "sinceTheftMs": ms(done - stolenAt)])
     if let ownerTimeout {
@@ -3411,21 +3507,24 @@ let systemModalOwners: Set<String> = ["SecurityAgent", "coreautha", "UserNotific
 /// timeout, the revert's latency (from the theft to its return; fallbackMs), whether the activation made at once
 /// ran, and the read after the revert; expected-slow only as ownerTimeoutProblem rules, otherwise a problem too. The
 /// read: the frontmost app (NSWorkspace's) and SkyLight's Space for Tim's display, every 25 ms for up to 1 s after
-/// the revert (an activation lands asynchronously), until both are what is expected; taken when an activation of his
-/// app (at once, or the fallback) ran and succeeded. restoreQueue.
-@Sendable func settleOwnerTimeout(_ query: [String], allowed: Double, outcome: RevertOutcome, immediate: Bool, to pid: pid_t,
+/// the revert (an activation lands asynchronously), until both are what is expected; taken when an activation (at
+/// once, `immediate`, the app it fronted; or the fallback) ran and succeeded. The app expected frontmost is the one that
+/// activation fronted: Tim's, or the system modal re-fronted in its place (GR2 item 6, review 3). restoreQueue.
+@Sendable func settleOwnerTimeout(_ query: [String], allowed: Double, outcome: RevertOutcome, immediate: pid_t?, to pid: pid_t,
                                   fallbackMs: NSDecimalNumber) {
     let fellBack = uptime()
     var read: PostFallbackRead?
     var shown: [String: Any] = [:]
-    if immediate || (outcome.method == "activate" && outcome.ok) {
+    let activated = (outcome.method == "activate" || outcome.method == "modal") && outcome.ok
+    let front = activated ? outcome.fronted ?? pid : immediate ?? pid
+    if immediate != nil || activated {
         while true {
-            let (front, app) = DispatchQueue.main.sync { frontmost() }
+            let (now, app) = DispatchQueue.main.sync { frontmost() }
             let space = spaceWatch.sample(via: "fallback-check")
-            read = PostFallbackRead(front: front, space: space?.index, error: space == nil ? "SkyLight's record shows no display holding Space 1" : nil)
+            read = PostFallbackRead(front: now, space: space?.index, error: space == nil ? "SkyLight's record shows no display holding Space 1" : nil)
             shown = ["front": app, "space": space?.index ?? NSNull(), "spaceId": space.map { NSNumber(value: $0.id) } ?? NSNull(),
                      "afterMs": ms(uptime() - fellBack), "error": read?.error ?? NSNull()]
-            if read?.front == pid, let index = space?.index, index == spacePolicy.value.expected { break }
+            if read?.front == front, let index = space?.index, index == spacePolicy.value.expected { break }
             if uptime() - fellBack >= 1 { break }
             usleep(25_000)
         }
@@ -3434,8 +3533,8 @@ let systemModalOwners: Set<String> = ["SecurityAgent", "coreautha", "UserNotific
     let why = ownerTimeoutProblem(outcome, immediate: immediate, to: pid, expectedSpace: expected, read: read)
     let record: [String: Any] = [
         "event": "owner-query-timeout", "query": query, "timeoutS": decimal(allowed, 1), "to": Int(pid),
-        "window": outcome.window ?? NSNull(), "method": outcome.method, "immediate": immediate, "fallbackMs": fallbackMs,
-        "expected": ["pid": Int(pid), "space": expected.map(spaceField) ?? NSNull()] as [String: Any],
+        "window": outcome.window ?? NSNull(), "method": outcome.method, "immediate": immediate != nil, "fallbackMs": fallbackMs,
+        "expected": ["pid": Int(front), "space": expected.map(spaceField) ?? NSNull()] as [String: Any],
         "read": read == nil ? NSNull() as Any : shown as Any, "expectedSlow": why == nil, "problem": why ?? NSNull(),
     ]
     ownerTimeouts.update { $0.append(record) }
@@ -3482,8 +3581,8 @@ func refreshTarget(_ pid: pid_t, attempt: Int = 0) {
         case .vouched:
             if let why = pending() {
                 reason = why
-            } else if let modal = systemModal() {  // GR2 item 6: nothing is fronted over a system modal
-                windowError = "a system modal (\(modal.name), pid \(modal.pid)) is on screen: no window is focused over it"
+            } else if let why = modalBlocksFocus() {  // GR2 item 6: nothing is fronted over a system modal
+                windowError = why
             } else if case .exited(0, _) = yabaiReply(["window", "--focus", String(window)], timeout: focusTimeout) {
                 focused = true
             } else {
@@ -3954,21 +4053,25 @@ func onActivation(_ pid: pid_t, app: Any, running: NSRunningApplication?, at t: 
         // turn; the revert (his window by id once its owner is vouched for, unless focus is back by then) follows.
         let window = restoreTarget.value.window(for: to)
         var atOnce: [String: Any] = ["ok": false, "reason": NSNull()]
+        var fronted: pid_t?  // the app the activation at once fronted: his, or a system modal in its place
         if stopping {
             atOnce["reason"] = "the guard's end began: not run"
         } else {
             switch finalActivation(to, method: "immediate") {
-            case .activated(let ok): atOnce["ok"] = ok
+            case .activated(let ok):
+                atOnce["ok"] = ok
+                if ok { fronted = to }
             case .modal(let modal, let name, let ok):
                 atOnce["ok"] = ok
                 atOnce["modal"] = ["pid": Int(modal), "name": name] as [String: Any]
-            case .unwanted(let why): atOnce["reason"] = why
+                if ok { fronted = modal }
+            case .unwanted(let why), .refused(let why): atOnce["reason"] = why
             }
         }
-        let immediate = atOnce["ok"] as? Bool == true
         emit(context.merging(["event": "activation", "app": app, "tree": true, "decision": "restore", "to": Int(to),
                               "restoreWindow": window ?? NSNull(), "immediate": atOnce, "at": now]) { $1 })
-        schedule("revert to pid \(to)", on: restoreQueue) { revert(to: to, stolenAt: t, immediate: immediate) }
+        let (immediate, choice) = (fronted, policy.choice)
+        schedule("revert to pid \(to)", on: restoreQueue) { revert(to: to, stolenAt: t, immediate: immediate, choice: choice) }
         observe(pid)
         yabaiQueue.async { sweep("activation") }
     case .restored(let latency):
@@ -3993,10 +4096,15 @@ func onActivation(_ pid: pid_t, app: Any, running: NSRunningApplication?, at t: 
         emit(context.merging(["event": "activation", "app": app, "tree": false, "decision": "system", "at": now]) { $1 })
     case .unrestorable:
         emit(context.merging(["event": "activation", "app": app, "tree": true, "decision": "unrestorable", "at": now]) { $1 })
-        // GR2 item 6: no app or window to give focus back to, but Tim's display is focused again (display-restore).
+        // GR2 item 6: no app or window to give focus back to; a system modal is re-fronted and Tim's display is
+        // checked (display-check; review 3: no display is focused), unless he chooses an app first.
         if !stopping {
-            schedule("display restore after pid \(pid)", on: restoreQueue) {
-                emit(refocusTimsDisplay(after: "the unrestorable activation of pid \(pid)").merging(["event": "display-restore", "pid": Int(pid)]) { $1 })
+            let choice = policy.choice
+            schedule("display check after pid \(pid)", on: restoreQueue) {
+                let record = checkTimsDisplay(after: "the unrestorable activation of pid \(pid)") {
+                    policy.choice == choice ? nil : "Tim chose an app since the activation: focus stays where he put it"
+                }
+                emit(record.merging(["event": "display-check", "pid": Int(pid)]) { $1 })
             }
         }
     case .afterGuard:
