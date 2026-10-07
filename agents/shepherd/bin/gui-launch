@@ -89,6 +89,12 @@ and/or guards one that something else starts, then checks that nothing took it.
   the window's Spaces and display from SkyLight (firstSpace, firstDisplay, firstAt). A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
   (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen.
+  Helper windows (bench's ruling): "on Tim's screen" means ordered in on one of his Spaces (SkyLight) with
+  WindowServer bounds larger than 2x2 px; what cannot be read counts as on it. Exempt, and only these: a window
+  SkyLight puts on no Space (ordered out; not merely off screen: a window on one of Tim's Spaces that no display
+  shows counts, at the end too) and one of 2x2 px or less, such as easl's 1x1 window and its ordered-out 500x500
+  helpers. Each is recorded (window-exempt: id, pid, bounds, ordered state, Spaces), never moved, never a problem;
+  the guard samples it every 100 ms and judges one that orders in or grows past 2x2 px from that sample on.
   A window yabai will not place or name the owner of, a window list
   that fails, and a tree window still off the target after its move are recorded as they happen; the tree's
   windows the final sweep cannot locate are a problem, and so is a tree window still off the target after its move
@@ -111,7 +117,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   displays stops polling, and in one turn of its main queue takes its last read, is sealed and has the summary's
   records taken (a change still waiting for its notification then fails the check, however young; a Space
   notification after the seal is a problem, never dropped unrecorded).
-- Check: no tree window on Spaces 1-4 or on the Space his display shows (unless it is the target), none the guard
+- Check: no tree window on Spaces 1-4 or on the Space his display shows (unless it is the target; but a window the
+  guard's final sweep found exempt, which the check lists as exemptWindows), none the guard
   found back on his screen, and no tree window off the target after the guard's move (but as
   --allow-caller-placement excuses); Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
@@ -130,7 +137,8 @@ and/or guards one that something else starts, then checks that nothing took it.
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
-space-unrestorable, window, window-unknown, window-located, window-list-failed, window-off-target, final-window-list,
+space-unrestorable, window, window-unknown, window-located, window-exempt, window-list-failed, window-off-target,
+final-window-list,
 yabai-timeout,
 problem, fault, guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
 previousFront (the app frontmost before it: in the tree or not, for how long, quit or hidden; whether it just closed
@@ -386,9 +394,16 @@ def revert_latencies(summary):
     return by_method
 
 
+def final_exempt(summary):
+    """The tree windows the guard's final sweep found exempt (bench's ruling, GR1 addendum 4 note 3: ordered out, or
+    2x2 px or less, read from WindowServer and SkyLight; no window of Tim's screen), by id, with why."""
+    return {e.get('window'): e.get('reason') for e in summary.get('exemptWindows') or [] if e.get('final')}
+
+
 def problems(summary, windows, focus_before, focus_after, shown_before, shown_after, target):
     """Why the launch took Tim's screen, or can't vouch that it didn't: tree windows on Spaces 1-4 or on the Space his
-    display shows (unless that is the target), a changed frontmost app, his display showing another Space or moved
+    display shows (unless that is the target), but those the guard's final sweep found exempt (final_exempt), a changed
+    frontmost app, his display showing another Space or moved
     off his Space by the tree (even if brought back), the active display moved (yabai's focused display, or AppKit's
     main screen: the two can disagree, so both count), the guard's fault or its problems (yabai timeouts, work
     unsettled or killed at its end, tree windows back on his screen or off the target, a final window list it could
@@ -400,8 +415,9 @@ def problems(summary, windows, focus_before, focus_after, shown_before, shown_af
     found.extend(summary.get('problems') or [])
     if not summary.get('finalWindowList'):
         found.append('the guard recorded no final read of the tree\'s windows: they cannot be vouched for')
+    exempt = final_exempt(summary)
     for w in windows:
-        if w.get('pid') not in tree:
+        if w.get('pid') not in tree or w.get('id') in exempt:
             continue
         if w.get('space') in TIM_SPACES:
             found.append('window %s of %s (pid %s, "%s") is on Space %s'
@@ -508,15 +524,16 @@ def main():
           'revertLatencyMs': revert_latencies(summary),
           'spaceRestored': len([e for e in summary.get('spaceRestores') or [] if e.get('event') == 'space-restored']),
           'spaceHistory': summary.get('spaceHistory') or [], 'ownerQueryTimeouts': summary.get('ownerQueryTimeouts') or [],
-          'windowFaults': summary.get('windowFaults') or [],
+          'windowFaults': summary.get('windowFaults') or [], 'exemptWindows': summary.get('exemptWindows') or [],
           'placement': 'caller' if args.allow_caller_placement else 'target',
           'finalWindowList': summary.get('finalWindowList')})
     if found:
         die('FAILED: ' + '; '.join(found), 1)
     latencies = [r['latencyMs'] for r in summary.get('reverted') or []]
-    print('gui-launch: ok: %d window(s) of the tree, none on Spaces 1-4; %d process(es) adopted; %d activation(s) reverted%s; frontmost %s'
-          % (len(windows), len(attached), len(latencies), ' (max %.1f ms)' % max(latencies) if latencies else '',
-             name(summary.get('frontAtEnd'))), file=sys.stderr)
+    exempt = len([w for w in windows if w.get('id') in final_exempt(summary)])
+    print('gui-launch: ok: %d window(s) of the tree, none on Spaces 1-4%s; %d process(es) adopted; %d activation(s) reverted%s; frontmost %s'
+          % (len(windows), ' but %d exempt (ordered out, or 2x2 px or less)' % exempt if exempt else '', len(attached),
+             len(latencies), ' (max %.1f ms)' % max(latencies) if latencies else '', name(summary.get('frontAtEnd'))), file=sys.stderr)
 
 
 if __name__ == '__main__':

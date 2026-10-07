@@ -670,6 +670,24 @@ class GuiLaunch(unittest.TestCase):
         self.assertEqual(self.check_event(result)['problems'],
                          ['window 9004 of Probe (pid 500, "tab") is on Space 6, the one Tim\'s display shows'])
 
+    def test_a_helper_window_the_guards_final_sweep_found_exempt_is_no_problem_in_the_check(self):
+        # GR2 (bench's ruling, GR1 addendum 4 note 3): easl's 1x1 helper (9006) is on Tim's Space 4 at the end, and the
+        # guard's final sweep found it 2x2 px or less (WindowServer): exempt, listed, no problem. One the guard found
+        # exempt only before its end (9007, ordered out then) is judged as any window: on Space 3, a problem.
+        self.machine(windows=[{'id': 9006, 'pid': 500, 'app': 'Probe', 'title': '', 'space': 4},
+                              {'id': 9007, 'pid': 500, 'app': 'Probe', 'title': 'root', 'space': 3}])
+        exempt = [{'event': 'window-exempt', 'window': 9006, 'reason': '2x2 px or less', 'final': True, 'bounds': [0, 981, 1, 1]},
+                  {'event': 'window-exempt', 'window': 9007, 'reason': 'ordered out', 'final': False, 'bounds': [0, 482, 500, 500]}]
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(exemptWindows=exempt))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        check = self.check_event(result)
+        self.assertEqual(check['problems'], ['window 9007 of Probe (pid 500, "root") is on Space 3'])
+        self.assertEqual(check['exemptWindows'], exempt)
+        self.machine(windows=[{'id': 9006, 'pid': 500, 'app': 'Probe', 'title': '', 'space': 4}])
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(exemptWindows=exempt))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1 window(s) of the tree, none on Spaces 1-4 but 1 exempt (ordered out, or 2x2 px or less)', result.stderr)
+
     def test_the_check_fails_when_tims_display_shows_another_space_unless_he_switched_himself(self):
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), shows_after=6)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -2392,6 +2410,97 @@ class Guard(unittest.TestCase):
         _, result = self.end_rig(process, lines, root)
         self.assertIn("window 89243 of the tree (reported by ax-created) was never placed before it went: yabai -m query --windows "
                       "--window 89243 exited 1; nothing showed it off Tim's screen, so its time there cannot be bounded", result['problems'])
+
+    # Helper windows (GR2, bench's ruling, GR1 addendum 4 note 3). perf's 06:50Z proof launch
+    # (~/dev/easl-lanes/perf-lead/window-watch.log and gui-launch.jsonl): every easl launch has a 1x1 window at (0,981),
+    # on screen for ~1 s, that yabai never lists (window-unknown in every GR1 launch), and 500x500 helpers that are
+    # ordered out. As GR2 was written, each would fail every easl launch.
+
+    def test_an_ordered_out_helper_window_is_recorded_never_moved_and_no_problem(self):
+        # Window 89261 is 500x500 and ordered out (SkyLight: on no Space; kCGWindowIsOnscreen false); yabai even lists
+        # it on Tim's Space 4. Exempt: recorded (window-exempt), never moved, no problem, at the final sweep too.
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={89261: {'spaces': [], 'display': None}})
+        row = {'id': 89261, 'pid': easl, 'app': 'easl', 'title': '', 'space': 4, 'has-focus': False}
+        put(root / 'window-89261.json', json.dumps(row))
+        put(root / 'windows.json', json.dumps([row]))
+        put(root / 'onscreen.json', json.dumps([[89261, easl, 500, 500, False]]))
+        self.send(process, 'window 89261')
+        exempt = lines.until(lambda r: r.get('event') == 'window-exempt', 10)[-1]
+        self.assertEqual({k: exempt[k] for k in ('window', 'pid', 'reason', 'via', 'final', 'bounds', 'onScreen', 'ordered', 'spaceIds', 'yabai')},
+                         {'window': 89261, 'pid': easl, 'reason': 'ordered out', 'via': 'ax-created', 'final': False,
+                          'bounds': [0, 0, 500, 500], 'onScreen': False, 'ordered': 'out', 'spaceIds': [], 'yabai': {'space': 4, 'pid': easl}})
+        time.sleep(0.3)  # the poll samples it again: still exempt, nothing more is recorded
+        seen, result = self.end_rig(process, lines, root)
+        self.assertEqual((result['problems'], result['moves'], result['windowFaults']), ([], [], []))
+        self.assertEqual([(e['window'], e['via'], e['final']) for e in result['exemptWindows']],
+                         [(89261, 'ax-created', False), (89261, 'final', True)])
+        self.assertNotIn('window', [e.get('event') for e in seen])
+
+    def test_a_one_pixel_helper_window_yabai_never_lists_is_recorded_and_no_problem(self):
+        # Window 89263 is 1x1, on screen on Tim's Space 4, and yabai never lists it: exempt (2x2 px or less), recorded,
+        # never unknown, and no problem, though it stays past the 3 s a window yabai will not place is asked about.
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={89263: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[89263, easl, 1, 1]]))
+        self.send(process, 'window 89263')
+        exempt = lines.until(lambda r: r.get('event') == 'window-exempt', 10)[-1]
+        self.assertEqual({k: exempt[k] for k in ('window', 'pid', 'reason', 'bounds', 'onScreen', 'ordered', 'spaces', 'spaceIds', 'yabai')},
+                         {'window': 89263, 'pid': easl, 'reason': '2x2 px or less', 'bounds': [0, 0, 1, 1], 'onScreen': True,
+                          'ordered': 'in', 'spaces': [4], 'spaceIds': [104],
+                          'yabai': {'error': 'yabai -m query --windows --window 89263 exited 1'}})
+        time.sleep(3.2)
+        seen, result = self.end_rig(process, lines, root)
+        self.assertEqual((result['problems'], result['windowFaults']), ([], []))
+        self.assertNotIn('window-unknown', [e.get('event') for e in seen])
+
+    def test_a_helper_window_that_grows_past_two_pixels_counts_from_that_sample(self):
+        # Judged at every sample: window 89264 is 1x1 on Tim's Space 4 when Accessibility reports it (exempt); 0.6 s later
+        # it is 3x3 and yabai lists it there. The poll's sample finds it counting: it is parked (window-counted) and its
+        # time on Tim's screen counts from that sample, not from its sighting: no problem.
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={89264: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[89264, easl, 1, 1]]))
+        self.send(process, 'window 89264')
+        lines.until(lambda r: r.get('event') == 'window-exempt', 10)
+        time.sleep(0.6)
+        put(root / 'window-89264.json', json.dumps({'id': 89264, 'pid': easl, 'app': 'easl', 'title': 'root', 'space': 4}))
+        put(root / 'onscreen.json', json.dumps([[89264, easl, 3, 3]]))
+        moved = lines.until(lambda r: r.get('event') == 'window' and r.get('id') == 89264, 10)[-1]
+        self.assertEqual({k: moved[k] for k in ('from', 'to', 'moved', 'via', 'firstExempt', 'firstOnTimsScreen')},
+                         {'from': 4, 'to': 6, 'moved': True, 'via': 'window-counted', 'firstExempt': '2x2 px or less',
+                          'firstOnTimsScreen': False})
+        self.assertLess(moved['onTimSpaceMs'], 250)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+
+    def test_a_window_on_one_of_tims_spaces_no_display_shows_counts_at_the_end(self):
+        # kCGWindowIsOnscreen is no test: window 89270 (800x600) is ordered in on Tim's Space 2, which no display shows,
+        # so WindowServer has it off screen. The final sweep finds it there: not exempt, and a problem.
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={89270: {'spaces': [102], 'display': 'D1'}})
+        row = {'id': 89270, 'pid': easl, 'app': 'easl', 'title': 'root', 'space': 2, 'has-focus': False}
+        put(root / 'window-89270.json', json.dumps(row))
+        put(root / 'windows.json', json.dumps([row]))
+        put(root / 'onscreen.json', json.dumps([[89270, easl, 800, 600, False]]))
+        seen, result = self.end_rig(process, lines, root)
+        self.assertNotIn('window-exempt', [e.get('event') for e in seen])
+        self.assertEqual(result['exemptWindows'], [])
+        self.assertIn("window 89270 of the tree (easl, pid %d) was on Tim's Space 2 at the guard's end" % easl, result['problems'])
+
+    def test_a_window_whose_bounds_or_spaces_cannot_be_read_counts(self):
+        # What cannot be read counts as on Tim's screen: window 89275 is on screen with bounds WindowServer cannot give
+        # (and, the second time, no SkyLight read of its Spaces); yabai lists it on Tim's Space 4 0.5 s after
+        # Accessibility reported it: its time there counts from that sighting, a problem.
+        for skylight in ({89275: {'spaces': [104], 'display': 'D1'}}, {}):
+            with self.subTest(skylight=skylight):
+                process, lines, root, easl = self.late_rig(onscreen=True, skylight=skylight)
+                put(root / 'onscreen.json', json.dumps([[89275, easl, None, None]]))
+                self.send(process, 'window 89275')
+                time.sleep(0.5)
+                put(root / 'window-89275.json', json.dumps({'id': 89275, 'pid': easl, 'app': 'easl', 'title': 'root', 'space': 4}))
+                seen = lines.until(lambda r: r.get('event') == 'window' and r.get('id') == 89275, 10)
+                self.assertNotIn('window-exempt', [e.get('event') for e in seen])
+                self.assertGreaterEqual(seen[-1]['onTimSpaceMs'], 450)
+                _, result = self.end_rig(process, lines, root)
+                self.assertTrue(any(p.startswith("window 89275 of the tree (easl, pid %d) was on Tim's screen for " % easl)
+                                    for p in result['problems']), result['problems'])
 
 
 if __name__ == '__main__':
