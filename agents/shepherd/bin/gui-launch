@@ -86,8 +86,11 @@ and/or guards one that something else starts, then checks that nothing took it.
   viewing with no create event and no Space change). A tree window found on Tim's screen (Spaces 1-4, or the Space
   his display shows, unless that is the target) after the guard saw it elsewhere, or at the guard's end, fails the
   check, created or not. A new window's first moments there, where macOS opens it, are a move whose onTimSpaceMs
-  counts from its first Accessibility sighting: past 250 ms that fails the check. At that sighting the guard reads
-  the window's Spaces and display from SkyLight (firstSpace, firstDisplay, firstAt). A window yabai will not place
+  counts from its first sighting: past 250 ms that fails the check regardless of the move's destination or caller
+  placement. At that sighting the guard reads the window's Spaces and display from SkyLight (firstSpace, firstDisplay,
+  firstAt). Every membership in a Tim Space counts, even when yabai's one index is the target. Each sweep samples
+  both listed and all known IDs, including omitted windows after their 3 s retries end; a new WindowServer ID gets
+  its own first sighting and park/retry, even with no AX event or yabai row. A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
   (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen, also when
   the guard ends within those 3 s.

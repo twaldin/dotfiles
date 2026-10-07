@@ -1889,7 +1889,7 @@ class Guard(unittest.TestCase):
             put(root / ('window-%d.json' % w['id']), json.dumps(w))
         show(root, 100 + shown)
         if onscreen:
-            put(root / 'onscreen.json', '[]')
+            put(root / 'onscreen.json', json.dumps([[w['id'], w['pid'], 800, 600, False] for w in windows]))
             flags = list(flags) + ['--onscreen', str(root / 'onscreen.json')]
         if skylight is not None:
             put(root / 'skylight-windows.json', json.dumps({str(k): v for k, v in skylight.items()}))
@@ -1968,23 +1968,27 @@ class Guard(unittest.TestCase):
         # out, and the guard recorded nothing. Here window 9001 sits on Space 6 and yabai refuses to move it; then
         # yabai stops answering window queries, Accessibility reports window 9002, and the guard ends.
         probe, _ = self.probe(self.java)
-        process, lines, root = self.rig(windows=[{'id': 9001, 'pid': probe.pid, 'app': 'Probe', 'title': 'probe', 'space': 6, 'has-focus': False}])
+        process, lines, root = self.rig(windows=[{'id': 9001, 'pid': probe.pid, 'app': 'Probe', 'title': 'probe', 'space': 6, 'has-focus': False}],
+                                        onscreen=True, skylight={9001: {'spaces': [106], 'display': 'D1'}})
         self.send(process, 'root %d' % probe.pid, 'sweep')
         off = lines.until(lambda row: row.get('event') == 'window-off-target', 10)[-1]
         self.assertEqual({k: off[k] for k in ('window', 'pid', 'space', 'target', 'reason')},
                          {'window': 9001, 'pid': probe.pid, 'space': 6, 'target': 7, 'reason': 'yabai -m window 9001 --space 7 exited 1'})
         put(root / 'windows-mode', 'hang')
+        put(root / 'onscreen.json', json.dumps([[9001, probe.pid, 800, 600, False], [9002, probe.pid, 800, 600, False]]))
         self.send(process, 'window 9002')
         unknown = lines.until(lambda row: row.get('event') == 'window-unknown', 10)[-1]
         self.assertEqual((unknown['window'], unknown['reason']), (9002, 'yabai -m query --windows --window 9002 did not answer within 2.0 s'))
         seen, result = self.end_rig(process, lines, root)
         self.assertIn('window-list-failed', [e.get('event') for e in seen])
-        self.assertIn("the tree's windows could not be located at the guard's end: yabai -m query --windows did not answer within 2.0 s",
+        self.assertIn("the tree's windows could not be located at the guard's end: " + result['finalWindowList']['tries'][-1]['error'],
                       result['problems'])
-        self.assertIn("window 9002 of the tree could not be located at the guard's end: "
-                      "yabai -m query --windows --window 9002 did not answer within 2.0 s", result['problems'])
+        final_unknown = [f for f in result['windowFaults'] if f['event'] == 'window-unknown' and f['window'] == 9002][-1]
+        self.assertIn("window 9002 of the tree could not be located at the guard's end: " + final_unknown['reason'],
+                      result['problems'])
         self.assertEqual([(m['id'], m['from'], m['to'], m['moved']) for m in result['moves']], [(9001, 6, 6, False)])
-        self.assertEqual([f['event'] for f in result['windowFaults']], ['window-off-target', 'window-unknown', 'window-list-failed'])
+        self.assertEqual([f['event'] for f in result['windowFaults']][:2], ['window-off-target', 'window-unknown'])
+        self.assertIn('window-list-failed', [f['event'] for f in result['windowFaults']])
 
     def test_a_space_change_no_read_saw_is_a_breach_once_its_notification_goes_unexplained(self):
         # GP1: SkyLight tells only the Space shown now. In a theft window Tim's display goes 1 -> 3 -> 1 between two
@@ -2336,7 +2340,8 @@ class Guard(unittest.TestCase):
                 for wid, s in ((9001, 6), (9002, 2), (9003, 1))]
         for flags, placement, failing in (([], 'target', {9001, 9002, 9003}), (['--allow-caller-placement'], 'caller', {9002, 9003})):
             with self.subTest(flags=flags):
-                process, lines, root = self.rig(windows=rows, flags=flags)
+                process, lines, root = self.rig(windows=rows, flags=flags, onscreen=True,
+                                              skylight={w['id']: {'spaces': [100 + w['space']], 'display': 'D1'} for w in rows})
                 self.assertEqual(self.rig_start['placement'], placement)
                 self.send(process, 'root %d' % probe.pid, 'sweep')
                 for _ in rows:
@@ -2363,12 +2368,12 @@ class Guard(unittest.TestCase):
          'moved': True, 'via': 'ax-created'},
     ]
 
-    def tab_rig(self, onscreen=False):
+    def tab_rig(self):
         """The tab receipt's run in the rig (--space 5, Tim's display on Space 3; this yabai applies moves): the tree's
         two tab windows created on his Space and moved to Space 5, as there. Then window 88296 is back on Space 3 in
         yabai's answers. The rig, its lines, its directory, and the tree's pid."""
         easl, _ = self.probe(self.java)
-        process, lines, root = self.rig(space=5, shown=3, onscreen=onscreen)
+        process, lines, root = self.rig(space=5, shown=3, onscreen=True, skylight={})
         put(root / 'moves', 'apply')
         self.send(process, 'root %d' % easl.pid)
         rows = []
@@ -2376,6 +2381,10 @@ class Guard(unittest.TestCase):
             row = {'id': e['id'], 'pid': easl.pid, 'app': e['app'], 'title': e['title'], 'space': e['from'], 'has-focus': False}
             put(root / ('window-%d.json' % e['id']), json.dumps(row))
             rows.append(row)
+            places = json.loads((root / 'skylight-windows.json').read_text())
+            places[str(e['id'])] = {'spaces': [103], 'display': 'D1'}
+            put(root / 'skylight-windows.json', json.dumps(places))
+            put(root / 'onscreen.json', json.dumps([[w['id'], easl.pid, 800, 600, False] for w in rows]))
             self.send(process, 'window %d' % e['id'])
             moved = lines.until(lambda r, wid=e['id']: r.get('event') == 'window' and r.get('id') == wid, 10)[-1]
             self.assertEqual({k: moved[k] for k in ('id', 'app', 'title', 'from', 'to', 'moved', 'via')},
@@ -2383,6 +2392,8 @@ class Guard(unittest.TestCase):
         again = dict(rows[1], space=3)
         put(root / 'window-88296.json', json.dumps(again))
         put(root / 'windows.json', json.dumps([dict(rows[0], space=5), again]))
+        put(root / 'skylight-windows.json', json.dumps({'88295': {'spaces': [105], 'display': 'D1'},
+                                                       '88296': {'spaces': [103], 'display': 'D1'}}))
         return process, lines, root, easl.pid
 
     def back_on_tims_space(self, easl, via):
@@ -2403,9 +2414,9 @@ class Guard(unittest.TestCase):
     def test_a_tree_window_shown_again_with_no_event_at_all_is_found_on_screen_and_fails_the_check(self):
         # GR2 (addendum 2), the receipt's case: no create event, no Space change. The guard reads the windows on screen
         # (here the rig's stand-in file) every 100 ms; window 88296 comes on screen, and the tree's windows are re-checked.
-        process, lines, root, easl = self.tab_rig(onscreen=True)
+        process, lines, root, easl = self.tab_rig()
         began = time.monotonic()
-        put(root / 'onscreen.json', json.dumps([[101, 1], [88296, easl]]))
+        put(root / 'onscreen.json', json.dumps([[88295, easl, 800, 600, False], [88296, easl, 800, 600, True]]))
         moved = lines.until(lambda r: r.get('event') == 'window' and r.get('via') == 'window-shown', 10)[-1]
         self.assertLess(time.monotonic() - began, 2)
         self.assertEqual((moved['id'], moved['from'], moved['to'], moved['seenBefore']), (88296, 3, 5, 5))
@@ -2467,7 +2478,8 @@ class Guard(unittest.TestCase):
     def test_a_window_yabai_lists_late_is_moved_once_listed_and_its_time_on_tims_space_counts_from_first_sight(self):
         # GR2: asked about every 50 ms for 3 s, moved as soon as yabai lists it (1.4 s here); SkyLight's read at its first
         # sighting puts it on Tim's Space 4, so its time there counts from then: more than 250 ms, a problem.
-        process, lines, root, easl = self.late_rig(skylight={89243: {'spaces': [104], 'display': 'D1'}})
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={89243: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[89243, easl, 800, 600, False]]))
         self.send(process, 'window 89243')
         time.sleep(1.4)
         put(root / 'window-89243.json', json.dumps({'id': 89243, 'pid': easl, 'app': 'easl', 'title': 'root', 'space': 4}))
@@ -2486,7 +2498,8 @@ class Guard(unittest.TestCase):
 
     def test_a_window_yabai_never_lists_that_skylight_shows_on_display_2_is_no_problem(self):
         # GR2: SkyLight proves where it was: Space 10, on display D2, never on Tim's screen.
-        process, lines, root, easl = self.late_rig(skylight={89250: {'spaces': [110], 'display': 'D2'}})
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={89250: {'spaces': [110], 'display': 'D2'}})
+        put(root / 'onscreen.json', json.dumps([[89250, easl, 800, 600, False]]))
         self.send(process, 'window 89250')
         unknown = lines.until(lambda r: r.get('event') == 'window-unknown', 10)[-1]
         self.assertEqual({k: unknown[k] for k in ('window', 'reason', 'firstSpace', 'firstDisplay', 'firstOnTimsScreen', 'space', 'display')},
@@ -2663,6 +2676,79 @@ class Guard(unittest.TestCase):
         self.assertGreater(moved['onTimSpaceMs'], 800, moved)
         _, result = self.end_rig(process, lines, root)
         self.assertTrue(any(p.startswith('window %d ' % wid) and 'more than 250 ms' in p for p in result['problems']),
+                        result['problems'])
+
+    def test_slow_exposure_is_a_problem_even_when_caller_placement_lands_on_another_off_tim_space(self):
+        # Review 1: a move to Space 7 instead lands on CanvasTest's Space 10, but only after >250 ms on Tim's Space.
+        wid = 89320
+        probe, _ = self.probe(self.java)
+        process, lines, root = self.rig(onscreen=True, skylight={wid: {'spaces': [102], 'display': 'D1'}},
+                                        flags=['--allow-caller-placement'])
+        self.send(process, 'root %d' % probe.pid)
+        put(root / ('window-%d.json' % wid), json.dumps({'id': wid, 'pid': probe.pid, 'app': 'Probe', 'space': 2}))
+        put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, False]]))
+        put(root / 'moves', 'apply')
+        put(root / 'move-delay', '0.4')
+        put(root / 'move-destination', '10')
+        self.send(process, 'window %d' % wid)
+        moved = lines.until(lambda r: r.get('event') == 'window' and r.get('id') == wid, 10)[-1]
+        self.assertEqual((moved['from'], moved['to'], moved['moved']), (2, 10, False))
+        self.assertGreater(moved['onTimSpaceMs'], 350)
+        _, result = self.end_rig(process, lines, root)
+        offs = [r for r in result['windowFaults'] if r.get('event') == 'window-off-target' and r['window'] == wid]
+        self.assertTrue(offs, result)
+        self.assertTrue(all(r['excused'] == 'caller placement' for r in offs), offs)
+        self.assertTrue(any(p.startswith('window %d ' % wid) and 'more than 250 ms' in p for p in result['problems']),
+                        result['problems'])
+
+    def test_every_skylight_membership_counts_even_when_yabai_reports_the_target_or_caller_space(self):
+        # Review 1: >2x2 sticky/all-Spaces window in both Space 7 (or caller Space 6) and Tim's Space 2.
+        wid = 89321
+        probe, _ = self.probe(self.java)
+        for at, flags in ((7, []), (6, ['--allow-caller-placement'])):
+            with self.subTest(yabai_space=at):
+                process, lines, root = self.rig(onscreen=True, skylight={wid: {'spaces': [100 + at, 102], 'display': 'D1'}},
+                                                flags=flags)
+                self.send(process, 'root %d' % probe.pid)
+                row = {'id': wid, 'pid': probe.pid, 'app': 'Probe', 'space': at, 'has-focus': False}
+                put(root / ('window-%d.json' % wid), json.dumps(row))
+                put(root / 'windows.json', json.dumps([row]))
+                put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, False]]))
+                _, result = self.end_rig(process, lines, root)
+                self.assertIn("window %d of the tree (Probe, pid %d) was on Tim's Space 2 at the guard's end" % (wid, probe.pid),
+                              result['problems'])
+                self.assertEqual(result['exemptWindows'], [])
+                if flags:
+                    offs = [r for r in result['windowFaults'] if r.get('event') == 'window-off-target' and r['window'] == wid]
+                    self.assertTrue(offs, result)
+                    self.assertTrue(all(r['excused'] is None for r in offs), offs)
+
+    def test_a_known_window_omitted_by_yabai_is_resampled_on_space_change_after_retries_end(self):
+        # Review 1: the window was proven off Tim's screen for its 3 s retries. Later membership changes while yabai
+        # still omits it; even an off-screen WindowServer row counts on Tim's hidden Space 2. No new AX/shown event.
+        wid = 89322
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [110], 'display': 'D2'}})
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False]]))
+        self.send(process, 'window %d' % wid)
+        lines.until(lambda r: r.get('event') == 'window-unknown' and r.get('window') == wid, 10)
+        put(root / 'skylight-windows.json', json.dumps({str(wid): {'spaces': [102], 'display': 'D1'}}))
+        self.send(process, 'notify')
+        time.sleep(0.5)
+        put(root / 'onscreen.json', '[]')  # close before the final sample: it must not trust stale off-Tim evidence
+        _, result = self.end_rig(process, lines, root)
+        self.assertTrue(any(p.startswith('window %d ' % wid) for p in result['problems']), result['problems'])
+
+    def test_a_windowserver_discovery_is_tracked_even_when_ax_and_yabai_never_report_it(self):
+        # Review 1 STANDARDS: a WindowServer-only tree window used to disappear without any per-window tracking.
+        wid = 89323
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+        self.send(process, 'activate %d' % easl)
+        lines.until(lambda r: r.get('event') == 'activation', 10)
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, True]]))
+        time.sleep(0.6)
+        put(root / 'onscreen.json', '[]')
+        _, result = self.end_rig(process, lines, root)
+        self.assertTrue(any(p.startswith('window %d ' % wid) and 'window-shown' in p for p in result['problems']),
                         result['problems'])
 
 
