@@ -189,7 +189,10 @@ def promptable(t):
 def told(t):
     """True when tile t may be told to hold or stop: an omp tile with an easl protocol (>= 1) is an agent
     that runs work, briefed in ~/cos or only on its board; any other tile needs a ~/cos brief (and is then
-    skipped by send(), never typed into)."""
+    skipped by send(), never typed into). A tile with no agent name is Tim's own ad-hoc session (2026-10-07
+    20:24Z: his unnamed tiktok tile got a STOP NOW): never told, only logged."""
+    if not t.get("name"):
+        return False
     return (promptable(t) and t[TILE_PROTOCOL] >= 1) or briefed(t.get("name"))
 
 
@@ -399,9 +402,11 @@ def tick():
                 s["hits"][pane] = s["hits"].get(pane, 0) + 1
                 last = s["last"].get(pane)
                 name = tls[pane].get("name") if pane in tls else ags.get(pane)
-                if pane != me and not (told(tls[pane]) if pane in tls else briefed(name)):
+                focused = pane in tls and tls[pane].get("focused")  # Tim is working in it: his call, not a STOP
+                if pane != me and (focused or not (told(tls[pane]) if pane in tls else briefed(name))):
                     if last is None:
-                        log(f"not prompting {name or pane}: no effort brief (Tim's own session?); {', '.join(procs)}")
+                        why_not = "Tim has it focused" if focused else "no effort brief (Tim's own session?)"
+                        log(f"not prompting {name or pane}: {why_not}; {', '.join(procs)}")
                         s["last"][pane] = now.isoformat()
                     continue
                 if last is None or now - dt.datetime.fromisoformat(last) >= dt.timedelta(minutes=REPEAT_MIN):

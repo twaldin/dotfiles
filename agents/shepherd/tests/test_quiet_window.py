@@ -766,6 +766,30 @@ class QuietWindow(unittest.TestCase):
         self.assertNotIn('w1:p5', [p for p, _ in self.stops()])
         self.assertIn('not prompting adhoc: no effort brief', self.qw_log())
 
+    def test_tims_own_tiles_are_never_told_to_stop_an_unnamed_one_nor_the_one_he_has_focused(self):
+        # 2026-10-07 20:24Z: Tim's unnamed tiktok tile (an omp with a protocol) got a STOP NOW for a 14% Python.
+        adhoc = {'tile': 'obj_adhoc', 'board': 'brd_3', 'kind': 'omp', 'lifecycle': {'state': 'idle'},
+                 'pid': 4700, 'protocol': 1, 'focused': False}
+        watched = {'tile': 'obj_watch', 'board': 'brd_2', 'name': 'watched', 'kind': 'omp',
+                   'lifecycle': {'state': 'working'}, 'pid': 4800, 'protocol': 1, 'focused': True}
+        self.set_easl(tiles=TILES + [adhoc, watched])
+        wid = self.book_window(5, 35)
+        self.qw('tick')
+        noticed = {t for t, _ in self.tile_prompts()}
+        self.assertNotIn('obj_adhoc', noticed)  # no hold notice to Tim's ad-hoc session either
+        self.assertIn('obj_watch', noticed)  # a focused agent tile still gets its hold notice
+        self.qw('remove', wid)
+        self.book_window(-2, 30)
+        (self.root / 'qc-out.txt').write_text(
+            '  70.0%    5555  node                         sim (easl tile obj_sim)  <-- not quiet\n'
+            '  14.1%    4848  Python                       obj_adhoc (easl tile obj_adhoc)  <-- not quiet\n'
+            '  60.0%    4949  vitest                       watched (easl tile obj_watch)  <-- not quiet\n')
+        self.qw('tick')
+        stops = [t for t, x in self.tile_prompts() if 'STOP NOW' in x]
+        self.assertEqual(stops, ['obj_sim'])
+        self.assertIn('not prompting obj_adhoc: no effort brief', self.qw_log())
+        self.assertIn('not prompting watched: Tim has it focused', self.qw_log())
+
     def test_tile_messages_steer_a_working_agent_mid_turn_instead_of_waiting_for_its_turn_to_end(self):
         # `--when next-turn` held every notice and STOP NOW until the target's turn ended: hours late (2026-10-07).
         self.set_easl()
