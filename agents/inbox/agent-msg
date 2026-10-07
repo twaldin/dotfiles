@@ -165,7 +165,8 @@ def main():
         tell(cli, address, text, None if from_tile else args.sender or sender())
     origin = args.sender or tile_address(agents) or sender()
     if host and host != local:
-        remote(host, name, text, origin)
+        # A tile's `name@board` means nothing on another machine: name this host, where a reply lands.
+        remote(host, name, text, origin if args.sender else f"{origin.partition('@')[0]}@{local}")
     info = agent(name)
     inbox = live_inbox(info)
     if inbox:

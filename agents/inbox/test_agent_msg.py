@@ -38,6 +38,14 @@ else:
     sys.exit(1)
 '''
 
+# Stands in for ssh to another machine: records the remote command and answers as agent-msg there.
+FAKE_SSH = '''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['FAKE_SSH_LOG'], 'a') as f:
+    f.write(json.dumps(sys.argv[1:]) + '\\n')
+print('agent-msg: queued for peer')
+'''
+
 
 class AgentMsg(unittest.TestCase):
     def setUp(self):
@@ -45,7 +53,7 @@ class AgentMsg(unittest.TestCase):
         self.root = Path(self.tmp.name)
         bin_dir = self.root / 'bin'
         bin_dir.mkdir()
-        for name, script in (('herdr', FAKE_HERDR), ('easl', FAKE_EASL)):
+        for name, script in (('herdr', FAKE_HERDR), ('easl', FAKE_EASL), ('ssh', FAKE_SSH)):
             (bin_dir / name).write_text(script)
             (bin_dir / name).chmod(0o755)
         self.typed = self.root / 'typed.jsonl'
@@ -53,7 +61,8 @@ class AgentMsg(unittest.TestCase):
         # Run as if from a herdr pane, even when the suite itself runs in an easl tile.
         inherited = {k: v for k, v in os.environ.items() if not k.startswith('EASL_')}
         self.env = {**inherited, 'HOME': str(self.root), 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
-                    'FAKE_TYPED': str(self.typed), 'FAKE_TOLD': str(self.told_log)}
+                    'FAKE_TYPED': str(self.typed), 'FAKE_TOLD': str(self.told_log),
+                    'FAKE_SSH_LOG': str(self.root / 'ssh.jsonl')}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -149,6 +158,16 @@ class AgentMsg(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         [[_, typed]] = self.typed_prompts()
         self.assertIn("agent-msg meta@dotfiles '<text>'", typed)
+
+    def test_a_tile_writing_to_another_machine_gives_this_host_as_its_reply_address(self):
+        # On the other machine `meta@dotfiles` would name a board it doesn't have.
+        local = socket.gethostname().split('.')[0]
+        result = self.send(self.omp_agent(), target='peer@elsewhere', tiles=[self.tile('meta')], sender=(),
+                           EASL_TILE_ID='obj_meta')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [ssh] = [json.loads(line) for line in (self.root / 'ssh.jsonl').read_text().splitlines()]
+        self.assertEqual(ssh[-2], 'elsewhere')
+        self.assertTrue(ssh[-1].endswith(f"--from meta@{local}"), ssh[-1])
 
     def test_call_from_an_older_tile_inbox_still_reaches_the_tile(self):
         # Tiles started before 2026-10-07 strip `@twaldin-home` and pass --herdr-only.
