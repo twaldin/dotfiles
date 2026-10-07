@@ -790,6 +790,26 @@ class QuietWindow(unittest.TestCase):
         self.assertIn('not prompting obj_adhoc: no effort brief', self.qw_log())
         self.assertIn('not prompting watched: Tim has it focused', self.qw_log())
 
+    def test_a_step_the_queue_admitted_to_the_holds_background_lane_is_not_told_to_stop(self):
+        # bench's heavy-only-holds ruling: the queue admits one foreign step per heavy hold at `taskpolicy -b`, nice 10.
+        # 2026-10-07 22:2xZ quiet-window still told its owner STOP NOW (a GR2 swiftc build under ticket 332).
+        self.set_easl()
+        wid = self.book_window(-2, 30, 'render')
+        child = subprocess.Popen(['sleep', '30'])  # a real descendant of the ticket's pid (this test process)
+        self.addCleanup(child.kill)
+        queue = self.root / '.local' / 'state' / 'machine-ok' / 'queue'
+        queue.mkdir(parents=True)
+        ticket = {'pid': os.getpid(), 'state': 'running', 'lane': 'heavy-hold', 'hold': wid, 'agent': 'sim'}
+        (queue / '0000000332.json').write_text(json.dumps(ticket))
+        (self.root / 'qc-out.txt').write_text(
+            f'  65.4%   {child.pid:5d}  swift-frontend               sim (easl tile obj_sim)  <-- not quiet\n')
+        self.qw('tick')
+        self.assertEqual([t for t, x in self.tile_prompts() if 'STOP NOW' in x], [])
+        # The same step outside that hold's lane (another hold's ticket) is still told.
+        (queue / '0000000332.json').write_text(json.dumps({**ticket, 'hold': 'some-other-hold'}))
+        self.qw('tick')
+        self.assertEqual([t for t, x in self.tile_prompts() if 'STOP NOW' in x], ['obj_sim'])
+
     def test_tile_messages_steer_a_working_agent_mid_turn_instead_of_waiting_for_its_turn_to_end(self):
         # `--when next-turn` held every notice and STOP NOW until the target's turn ended: hours late (2026-10-07).
         self.set_easl()
