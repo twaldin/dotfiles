@@ -930,6 +930,11 @@ class SessionModel(unittest.TestCase):
         self.assertEqual(self.mod.session_model(self.write({'type': 'session'})), (None, None))
         self.assertEqual(self.mod.session_model('/nonexistent/session.jsonl'), (None, None))
 
+    def test_a_configured_thinking_setting_beats_the_level_it_resolved_to(self):
+        path = self.write({'type': 'model_change', 'model': 'openai-codex/gpt-6.1-sol'},
+                          {'type': 'thinking_level_change', 'thinkingLevel': 'low', 'configured': 'auto'})
+        self.assertEqual(self.mod.session_model(path), ('openai-codex/gpt-6.1-sol', 'auto'))
+
 
 class Migrate(TileSandbox):
     FLAGS = ['--model', 'opus', '--thinking', 'high']

@@ -1084,7 +1084,8 @@ def drop_flags(flags, names):
 def session_model(path):
     """(model, thinking level) the session last recorded (its last model_change and
     thinking_level_change entries), each None when absent or unreadable. omp writes them at
-    start and on every switch, so they name what the agent runs now, not the default role."""
+    start and on every switch, so they name what the agent runs now, not the default role. The
+    thinking setting is the configured one when recorded (`auto` resolves per turn), else the level."""
     model = thinking = None
     try:
         with open(path, errors="replace") as f:
@@ -1097,8 +1098,8 @@ def session_model(path):
                     continue
                 if e.get("type") == "model_change" and e.get("model"):
                     model = e["model"]
-                elif e.get("type") == "thinking_level_change" and e.get("thinkingLevel"):
-                    thinking = e["thinkingLevel"]
+                elif e.get("type") == "thinking_level_change" and (e.get("configured") or e.get("thinkingLevel")):
+                    thinking = e.get("configured") or e["thinkingLevel"]
     except OSError:
         pass
     return model, thinking
