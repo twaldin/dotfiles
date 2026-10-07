@@ -21,6 +21,7 @@ import os
 import platform
 import pwd
 import queue
+import re
 import select
 import shutil
 import signal
@@ -46,6 +47,9 @@ SPACES = [{'index': i, 'display': 1, 'is-visible': i == 2, 'has-focus': i == 2} 
 DISPLAYS = [{'id': 1, 'index': 1}, {'id': 43, 'index': 2}]
 TERMINAL = {'pid': 100, 'name': 'Ghostty', 'bundle': 'com.mitchellh.ghostty'}
 LAUNCHED = {'pid': 500, 'name': 'Probe', 'bundle': 'net.waldin.probe'}
+# The guard's record of its final window list (GR2): read at the first try.
+FINAL_LIST = {'event': 'final-window-list', 'ok': True, 'retried': False, 'limitS': 4.0, 'ms': 12.5,
+              'tries': [{'try': 1, 'ms': 12.4, 'error': None}]}
 
 FAKE_YABAI = '''#!%(python)s
 import json, sys
@@ -236,7 +240,8 @@ def build_c(source, out):
 
 def summary(tree=(500,), front=TERMINAL, user=TERMINAL, reverted=(), **more):
     return dict({'tree': list(tree), 'roots': list(tree[:1]), 'frontAtLaunch': TERMINAL, 'frontAtEnd': front,
-                 'userFront': user, 'reverted': list(reverted), 'moves': [], 'endReason': 'tree-exited'}, **more)
+                 'userFront': user, 'reverted': list(reverted), 'moves': [], 'endReason': 'tree-exited',
+                 'finalWindowList': FINAL_LIST}, **more)
 
 
 def events(stdout):
@@ -771,6 +776,18 @@ class GuiLaunch(unittest.TestCase):
                 result = self.run_gui_launch('--space', '7', '--', '-n', '-a', str(self.app), summary=summary(**more))
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn(message, self.check_event(result)['problems'][0])
+
+    def test_the_check_names_the_final_window_list_and_fails_without_one(self):
+        # GR2 (item 5): the guard's final window list, with its tries and their latency, is in the check; a summary with
+        # no final window list cannot vouch for the tree's windows, and fails the check.
+        retried = dict(FINAL_LIST, retried=True, tries=[{'try': 1, 'ms': 2001.0, 'error': 'yabai -m query --windows did not answer within 2.0 s'},
+                                                        {'try': 2, 'ms': 15.0, 'error': None}])
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(finalWindowList=retried))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.check_event(result)['finalWindowList'], retried)
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(finalWindowList=None))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.check_event(result)['problems'], ["the guard recorded no final read of the tree's windows: they cannot be vouched for"])
 
     def test_the_check_fails_when_the_active_display_moved_by_yabai_or_by_appkit(self):
         # yabai: the focus left Tim's display for CanvasTest although his app is frontmost again.
@@ -1621,18 +1638,23 @@ class Guard(unittest.TestCase):
         self.assertEqual((end['unsettled'], end['killed']), ([], []))
         self.assertEqual(end['problems'], ["call c came after the guard's end began: not run"])
 
-    def test_the_end_s_own_stage_gets_its_own_three_seconds(self):
+    def test_the_end_s_own_stage_gets_its_own_five_seconds(self):
+        # GR2: 5 s (was 3 s), room for the final window list's two tries of 2 s. Three calls of 1.2 s finish; the
+        # fourth, which never answers, is cut at the stage's end (it had what was left, under 1.5 s, not its 2 s); the
+        # fifth is refused.
         process, lines, _ = self.helpers()
         began = time.monotonic()
-        self.send(process, *['final 2 slow12'] * 4 + ['end'])  # 1.2 s each, and nothing else in flight
-        seen = lines.until(lambda row: 'end' in row, 15)
+        self.send(process, *['final 2 slow12'] * 3 + ['final 2 stuck', 'final 2 quick', 'end'])
+        seen = lines.until(lambda row: 'end' in row, 20)
         took = time.monotonic() - began
         finals = [row for row in seen if 'final' in row]
-        self.assertEqual([r['final'] for r in finals], [1, 2, 3, 4])
-        self.assertEqual(finals[:2], [{'final': n, 'reply': 'exit', 'code': 0, 'out': '{"slow12": 1}\n'} for n in (1, 2)])
-        self.assertIn(finals[2]['reply'], ('timeout', 'refused'))
-        self.assertEqual(finals[3], {'final': 4, 'reply': 'refused', 'why': 'the guard is ending: yabai -m slow12 not run'})
-        self.assertTrue(took < 3.9, took)  # not the 4.8 s the four calls would take
+        self.assertEqual([r['final'] for r in finals], [1, 2, 3, 4, 5])
+        self.assertEqual(finals[:3], [{'final': n, 'reply': 'exit', 'code': 0, 'out': '{"slow12": 1}\n'} for n in (1, 2, 3)])
+        self.assertEqual(finals[3], {'final': 4, 'reply': 'timeout'})
+        self.assertEqual(finals[4], {'final': 5, 'reply': 'refused', 'why': 'the guard is ending: yabai -m quick not run'})
+        self.assertTrue(any(re.match(r'^yabai -m stuck did not answer within 1\.[0-4] s$', p) for p in seen[-1]['end']['problems']),
+                        seen[-1]['end']['problems'])
+        self.assertTrue(4.9 < took < 6.5, took)  # not the 3.6 s + 30 s the calls would take
 
     def test_a_helper_that_writes_past_the_cap_is_refused_as_a_problem(self):
         # GN6: the refusal is recorded, so the check cannot come out clean on an answer the guard never read.
@@ -2262,6 +2284,31 @@ class Guard(unittest.TestCase):
         self.assertEqual((moved['id'], moved['from'], moved['to'], moved['seenBefore']), (88296, 3, 5, 5))
         _, result = self.end_rig(process, lines, root)
         self.assertEqual([p for p in result['problems'] if p.startswith('window ')], [self.back_on_tims_space(easl, 'window-shown')])
+
+    def test_the_final_window_list_gets_one_retry_and_a_list_it_reads_is_no_problem(self):
+        # GR2 (item 5): roblox's run saw the final `yabai -m query --windows` miss its 2.0 s once, and the check failed
+        # on that alone. Here it hangs once: the retry reads it, no problem, and the tries are recorded with their latency.
+        process, lines, root = self.rig()
+        put(root / 'windows-mode', 'hang-once')
+        seen, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+        final = result['finalWindowList']
+        self.assertEqual((final['ok'], final['retried'], final['limitS'], [t['try'] for t in final['tries']]), (True, True, 4.0, [1, 2]))
+        self.assertEqual([t['error'] for t in final['tries']], ['yabai -m query --windows did not answer within 2.0 s', None])
+        self.assertGreaterEqual(final['tries'][0]['ms'], 1900)
+        self.assertIn('final-window-list', [e.get('event') for e in seen])
+
+    def test_a_final_window_list_neither_try_reads_fails_the_check_within_four_seconds(self):
+        # GR2 (item 5): can't vouch, not ok. Two tries of 2.0 s, at most 4.0 s for the list.
+        process, lines, root = self.rig()
+        put(root / 'windows-mode', 'hang')
+        _, result = self.end_rig(process, lines, root)
+        final = result['finalWindowList']
+        self.assertEqual((final['ok'], [t['error'] for t in final['tries']]),
+                         (False, ['yabai -m query --windows did not answer within 2.0 s'] * 2))
+        self.assertLessEqual(final['ms'], 4100)
+        self.assertIn("the tree's windows could not be located at the guard's end: yabai -m query --windows did not answer within 2.0 s",
+                      result['problems'])
 
 
 if __name__ == '__main__':

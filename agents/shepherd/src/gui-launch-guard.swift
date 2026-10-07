@@ -98,7 +98,9 @@
 // --parent-pid (gui-launch) exits, even by SIGKILL; on SIGTERM/SIGINT; or (--open) when no token-bearing
 // process appeared within --adopt-timeout. On every end no new work starts (a theft then is not reverted, and is
 // a problem); work in flight, including reverts still queued, gets 3 s to settle; the end's own work (the final
-// scan, sweep and focus read) gets its own 3 s; then every yabai helper still running is killed with its process
+// scan, sweep and focus read) gets its own 5 s (GR2: its window list may take two tries of 2 s, at most 4 s in all;
+// one the retry reads is no problem, one neither try reads fails the check, and the tries and their latency are in
+// the summary, finalWindowList); then every yabai helper still running is killed with its process
 // group (SIGTERM, then SIGKILL) and reaped. Work that has not finished by then is a problem for the check; nothing
 // is printed after guard-end. It never quits what it launched. An Objective-C exception, whether AppKit's loop caught
 // it or nothing did, ends the guard at once instead, whatever the defaults say, within 0.5 s whether or not anyone
@@ -1466,9 +1468,10 @@ func schedule(_ what: String, on queue: DispatchQueue, _ body: @escaping () -> V
     return true
 }
 
-/// How long work in flight gets to finish once the guard ends, and how long the end's own work then gets.
+/// How long work in flight gets to finish once the guard ends, and how long the end's own work then gets: GR2, 5 s,
+/// room for the final window list's two tries of 2 s (finalListTries) and the rest of the end's work.
 let settleSeconds = 3.0
-let finalSeconds = 3.0
+let finalSeconds = 5.0
 
 /// The guard's end, on every path (and in --helpers), once inFlight is closed: work in flight gets
 /// `settleSeconds`; then `finalWork` gets its own `finalSeconds` (no yabai call it starts runs past them); then
@@ -2411,29 +2414,61 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
     }
 }
 
+/// GR2 (item 5): the final sweep's window list gets one retry: two tries of queryTimeout each, at most 2 × 2.0 s =
+/// 4.0 s in all (within the end's own finalSeconds). Roblox's run saw one try run out of time, and the check fail on
+/// it. A list neither try reads is window-list-failed, and the check fails: the tree's windows cannot be vouched for.
+let finalListTries = 2
+/// The final sweep's tries (finalWindowList in the summary and the check): each one's latency and why it failed.
+let finalWindowList = Locked([String: Any]())
+
+/// One read of yabai's window list: each window's id, pid and Space; or why it could not be read (a list that
+/// fails, runs out of time, or has a row without an id or pid). `ownsTimeout`: the caller records a timeout.
+@Sendable func windowList(ownsTimeout: Bool) -> (windows: [(id: Int, pid: pid_t, space: Int?)]?, why: String?) {
+    let what = "yabai -m query --windows"
+    let list: [[String: Any]]
+    switch yabaiReply(["query", "--windows"], ownsTimeout: ownsTimeout) {
+    case .exited(0, let data):
+        guard let rows = json(data) as? [[String: Any]] else { return (nil, "\(what) answered unreadably") }
+        list = rows
+    case .exited(let code, _): return (nil, "\(what) exited \(code)")
+    case .timedOut(let allowed): return (nil, "\(what) did not answer within \(String(format: "%.1f", allowed)) s")
+    case .refused(let why): return (nil, why)
+    }
+    var windows: [(id: Int, pid: pid_t, space: Int?)] = []
+    for row in list {
+        guard let id = (row["id"] as? NSNumber)?.intValue, let pid = (row["pid"] as? NSNumber)?.int32Value else {
+            return (nil, "\(what) answered a row without an id or pid")
+        }
+        windows.append((id, pid, (row["space"] as? NSNumber)?.intValue))
+    }
+    return (windows, nil)
+}
+
 /// Parks every tree window yabai lists off the target, and keeps the Space of each it lists on it (windowSpaces). A
 /// list that fails, or has a row without an id or pid, is window-list-failed: where the tree's windows are is unknown
 /// until a list answers. A list that answers places or drops every window that was unknown (park records again those
-/// it still cannot place).
+/// it still cannot place). The final sweep (`final`) reads the list in up to finalListTries tries, records them
+/// (final-window-list), and owns their timeouts: one that the retry makes good is no problem.
 func sweep(_ via: String, final: Bool = false) {
     tracked("sweep (\(via))", final: final) {
         let seen = uptime()
-        let what = "yabai -m query --windows"
-        let list: [[String: Any]]
-        switch yabaiReply(["query", "--windows"]) {
-        case .exited(0, let data):
-            guard let rows = json(data) as? [[String: Any]] else { return windowListFailed(via: via, why: "\(what) answered unreadably") }
-            list = rows
-        case .exited(let code, _): return windowListFailed(via: via, why: "\(what) exited \(code)")
-        case .timedOut(let allowed): return windowListFailed(via: via, why: "\(what) did not answer within \(String(format: "%.1f", allowed)) s")
-        case .refused(let why): return windowListFailed(via: via, why: why)
+        var read: (windows: [(id: Int, pid: pid_t, space: Int?)]?, why: String?) = (nil, nil)
+        var tries: [[String: Any]] = []
+        for n in 1...(final ? finalListTries : 1) {
+            let began = uptime()
+            read = windowList(ownsTimeout: final)
+            tries.append(["try": n, "ms": ms(uptime() - began), "error": read.why ?? NSNull()])
+            if read.windows != nil { break }
         }
-        var windows: [(id: Int, pid: pid_t, space: Int?)] = []
-        for row in list {
-            guard let id = (row["id"] as? NSNumber)?.intValue, let pid = (row["pid"] as? NSNumber)?.int32Value else {
-                return windowListFailed(via: via, why: "\(what) answered a row without an id or pid")
-            }
-            windows.append((id, pid, (row["space"] as? NSNumber)?.intValue))
+        if final {
+            let record: [String: Any] = ["event": "final-window-list", "ok": read.windows != nil, "tries": tries,
+                                         "retried": tries.count > 1, "limitS": decimal(Double(finalListTries) * queryTimeout, 1),
+                                         "ms": ms(uptime() - seen)]
+            finalWindowList.update { $0 = record }
+            emit(record)
+        }
+        guard let windows = read.windows else {
+            return windowListFailed(via: via, why: read.why ?? "yabai -m query --windows could not be read")
         }
         windowListFailure.update { $0 = nil }
         windowsUnknown.update { $0.removeAll() }
@@ -3251,7 +3286,7 @@ func scanOnce() {
 // MARK: - End
 
 /// Ends the guard (main): no new work starts; on endQueue, work in flight (reverts still queued included) settles
-/// within its 3 s, then the final scan, sweep and focus read get their own 3 s (unless gui-launch is gone): the
+/// within its 3 s, then the final scan, sweep and focus read get their own 5 s (unless gui-launch is gone): the
 /// tree's windows that the final sweep cannot locate are a problem. Then the helpers still running are ended; then,
 /// while a change a read found still waits for its Space notification, the end waits for it (at most
 /// NoticeFeed.limit, the poll still running); then the Space watch's poll stops (off main). Then, in one main-queue
@@ -3295,6 +3330,7 @@ func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  //
     let records: [String: Any] = [
         "reverted": reverted, "moves": moves.value, "spaceRestores": spaceEvents.value, "problems": problems.value,
         "spaceHistory": spaceWatch.history, "ownerQueryTimeouts": ownerTimeouts.value, "windowFaults": windowFaults.value,
+        "finalWindowList": finalWindowList.value.isEmpty ? NSNull() as Any : finalWindowList.value as Any,
         "timSpace": ["atLaunch": timSpaceAtLaunch ?? NSNull(), "expected": spacePolicy.value.expected.map(spaceField) ?? NSNull()] as [String: Any],
     ]
     if orphaned { unlink(summaryPath) }  // gui-launch is gone: nobody reads it

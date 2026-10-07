@@ -94,10 +94,13 @@ and/or guards one that something else starts, then checks that nothing took it.
   "caller" or "target"). macOS still lets an app activate itself and
   opens its new windows on the Space Tim is viewing: the guard undoes both within milliseconds, it cannot prevent
   them. The guard exits when gui-launch does, even by SIGKILL. It bounds every yabai call over its exit and its
-  output (2 s; a timeout fails the check, but for the owner query above; output that reaches 16 MiB is refused,
+  output (2 s; a timeout fails the check, but for the owner query above and a final window list its retry reads;
+  output that reaches 16 MiB is refused,
   whether or not the helper exits, and fails it), runs none on its main thread, and ends each with its process
   group (a member it cannot read counts as alive). At its end, work in flight (reverts included) gets 3 s to finish
-  and its own final checks 3 s more (what does not finish fails the check, and so does a theft it can no longer
+  and its own final checks 5 s more (its final window list gets one retry: two tries of 2 s, at most 4 s in all;
+  one neither try reads fails the check, as does a summary with no final window list; the tries and their latency
+  are the check's finalWindowList) (what does not finish fails the check, and so does a theft it can no longer
   revert), then any yabai helper still running is killed, with what it started; then, while a change a read found
   waits for its Space notification, it waits for that (at most 0.5 s, still polling); then its watch of the
   displays stops polling, and in one turn of its main queue takes its last read, is sealed and has the summary's
@@ -113,7 +116,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   unchanged, by both yabai's focused display and AppKit's main screen; no fault, no yabai timeout but an
   expected-slow owner query, no gap or failed read of his display in a theft window, no change a read found
   without a Space notification within 0.5 s, no tree window the guard could
-  not locate at its end, no unsettled or killed work. The guard gives focus back without moving the active display,
+  not locate at its end (a final window list neither try read included), no unsettled or killed work. The guard
+  gives focus back without moving the active display,
   so a theft from another display can leave it there (yabai still reported it after Superwhisper got focus back):
   that fails the check, and a click on his display clears it. A reverted activation alone does not fail it: the
   check lists the revert latencies by method (immediate re-activation, window focus, re-activation, and
@@ -121,8 +125,8 @@ and/or guards one that something else starts, then checks that nothing took it.
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
-space-unrestorable, window, window-unknown, window-list-failed, window-off-target, yabai-timeout, problem, fault,
-guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
+space-unrestorable, window, window-unknown, window-list-failed, window-off-target, final-window-list, yabai-timeout,
+problem, fault, guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
 previousFront (the app frontmost before it: in the tree or not, for how long, quit or hidden; whether it just closed
 its last window is not known): diagnostics only. The launched program's own output
 goes to stderr. gui-launch never quits what it launched: the caller tears it down.
@@ -381,12 +385,15 @@ def problems(summary, windows, focus_before, focus_after, shown_before, shown_af
     display shows (unless that is the target), a changed frontmost app, his display showing another Space or moved
     off his Space by the tree (even if brought back), the active display moved (yabai's focused display, or AppKit's
     main screen: the two can disagree, so both count), the guard's fault or its problems (yabai timeouts, work
-    unsettled or killed at its end, tree windows back on his screen or off the target)."""
+    unsettled or killed at its end, tree windows back on his screen or off the target, a final window list it could
+    not read), or no final window list recorded at all."""
     tree = set(summary.get('tree') or [])
     found = []
     if summary.get('fault'):
         found.append(summary['fault'])
     found.extend(summary.get('problems') or [])
+    if not summary.get('finalWindowList'):
+        found.append('the guard recorded no final read of the tree\'s windows: they cannot be vouched for')
     for w in windows:
         if w.get('pid') not in tree:
             continue
@@ -496,7 +503,8 @@ def main():
           'spaceRestored': len([e for e in summary.get('spaceRestores') or [] if e.get('event') == 'space-restored']),
           'spaceHistory': summary.get('spaceHistory') or [], 'ownerQueryTimeouts': summary.get('ownerQueryTimeouts') or [],
           'windowFaults': summary.get('windowFaults') or [],
-          'placement': 'caller' if args.allow_caller_placement else 'target'})
+          'placement': 'caller' if args.allow_caller_placement else 'target',
+          'finalWindowList': summary.get('finalWindowList')})
     if found:
         die('FAILED: ' + '; '.join(found), 1)
     latencies = [r['latencyMs'] for r in summary.get('reverted') or []]
