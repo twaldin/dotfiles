@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""gui-launch --space <agent Space | display:<screen>> [--guard-seconds 60] [--adopt-timeout 30] [--hide] [--attach-exe <path> --attach-argv <needle>] [-- <open args | executable [args]>]
+"""gui-launch --space <agent Space | display:<screen>> [--guard-seconds 60] [--adopt-timeout 30] [--hide] [--allow-caller-placement] [--attach-exe <path> --attach-argv <needle>] [-- <open args | executable [args]>]
 
 Launches a GUI app for an agent run without taking Tim's screen (twaldin-home: he works on Spaces 1-4),
 and/or guards one that something else starts, then checks that nothing took it.
@@ -80,8 +80,13 @@ and/or guards one that something else starts, then checks that nothing took it.
   to his windows. It moves
   every tree window to the target Space by id as Accessibility reports it created or focused (and again whenever the
   tree activates or the active Space changes); a window yabai will not place or name the owner of, a window list
-  that fails, and a tree window still off the target after its move are recorded as they happen, and the tree's
-  windows the final sweep cannot locate are a problem. macOS still lets an app activate itself and
+  that fails, and a tree window still off the target after its move are recorded as they happen; the tree's
+  windows the final sweep cannot locate are a problem, and so is a tree window still off the target after its move
+  (window-off-target). --allow-caller-placement is for a caller that moves the tree's windows itself afterwards:
+  the guard still moves and records them, but a window off the target is then no problem if it is on a Space and
+  off Tim's screen (Spaces 1-4, or the Space his display shows or should show, unless that is the target); on his
+  screen, or on no Space, it is a problem all the same. The check names the placement declared (placement:
+  "caller" or "target"). macOS still lets an app activate itself and
   opens its new windows on the Space Tim is viewing: the guard undoes both within milliseconds, it cannot prevent
   them. The guard exits when gui-launch does, even by SIGKILL. It bounds every yabai call over its exit and its
   output (2 s; a timeout fails the check, but for the owner query above; output that reaches 16 MiB is refused,
@@ -93,7 +98,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   displays stops polling, and in one turn of its main queue takes its last read, is sealed and has the summary's
   records taken (a change still waiting for its notification then fails the check, however young; a Space
   notification after the seal is a problem, never dropped unrecorded).
-- Check: no tree window on Spaces 1-4; Tim's frontmost app unchanged (the app he had at launch, or the one
+- Check: no tree window on Spaces 1-4 and no tree window off the target after the guard's move (but as
+  --allow-caller-placement excuses); Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
   himself); no Space the tree showed his display in a theft window, each one a breach even when the guard brought
   his Space back (the check shows both), no Space notification in a theft window that no change of his display
@@ -176,6 +182,9 @@ def parse(argv):
     ap.add_argument('--adopt-timeout', type=float, default=30.0,
                     help='with open arguments: seconds to wait for a process carrying the launch token (> 0)')
     ap.add_argument('--hide', action='store_true', help='open -j: launch the app hidden')
+    ap.add_argument('--allow-caller-placement', action='store_true',
+                    help='the caller moves the tree\'s windows itself afterwards: a tree window off the target after the guard\'s '
+                         'move is recorded, and no problem when it is on a Space and off Tim\'s screen')
     ap.add_argument('--attach-exe', metavar='PATH', help='with --attach-argv: also guard processes running this executable (real path) ...')
     ap.add_argument('--attach-argv', metavar='NEEDLE', help='... one of whose arguments contains NEEDLE')
     args = ap.parse_args(own)
@@ -416,6 +425,8 @@ def main():
         guard_argv = [guard['path'], '--space', str(space), '--guard-seconds', str(args.guard_seconds),
                       '--adopt-timeout', str(args.adopt_timeout), '--yabai', YABAI, '--summary', summary_path,
                       '--parent-pid', str(os.getpid())]
+        if args.allow_caller_placement:
+            guard_argv += ['--allow-caller-placement']
         if args.attach_exe is not None:
             guard_argv += ['--attach-exe', args.attach_exe, '--attach-argv', args.attach_argv]
         if launch:
@@ -472,7 +483,8 @@ def main():
           'revertLatencyMs': revert_latencies(summary),
           'spaceRestored': len([e for e in summary.get('spaceRestores') or [] if e.get('event') == 'space-restored']),
           'spaceHistory': summary.get('spaceHistory') or [], 'ownerQueryTimeouts': summary.get('ownerQueryTimeouts') or [],
-          'windowFaults': summary.get('windowFaults') or []})
+          'windowFaults': summary.get('windowFaults') or [],
+          'placement': 'caller' if args.allow_caller_placement else 'target'})
     if found:
         die('FAILED: ' + '; '.join(found), 1)
     latencies = [r['latencyMs'] for r in summary.get('reverted') or []]

@@ -81,7 +81,11 @@
 //     yabai lists when the tree activates or the active Space changes, is moved by id to --space. A window whose
 //     location or owner yabai will not give, a window list that fails, and a tree window still off --space after
 //     its move are recorded as they happen; the tree's windows that the final sweep still cannot locate are a
-//     problem.
+//     problem, and so is each tree window still off --space after its move (window-off-target; GR2, addendum 1).
+//     --allow-caller-placement, for a caller that moves the tree's windows itself afterwards, changes only that
+//     verdict: a window off --space is still moved and recorded, but no problem when it is on a Space and off Tim's
+//     screen (his Spaces 1-4, and the Space his display shows or should show, if not --space); one on his screen,
+//     or on no Space, is a problem all the same. The start record and the summary name the placement declared.
 // The guard ends after --guard-seconds; when the launched tree has exited (without attach flags); when
 // --parent-pid (gui-launch) exits, even by SIGKILL; on SIGTERM/SIGINT; or (--open) when no token-bearing
 // process appeared within --adopt-timeout. On every end no new work starts (a theft then is not reverted, and is
@@ -111,7 +115,8 @@
 // the one locked turn in which the guard's end may signal it, so no released pid is ever signalled.
 //
 // usage: gui-launch-guard --space N --guard-seconds S --yabai PATH --summary PATH [--parent-pid P]
-//            [--adopt-timeout S] [--attach-exe E --attach-argv N] [(--exec | --open) -- <argv to spawn>]
+//            [--adopt-timeout S] [--allow-caller-placement] [--attach-exe E --attach-argv N]
+//            [(--exec | --open) -- <argv to spawn>]
 //        gui-launch-guard --screens   screen name -> CGDirectDisplayID (yabai's display "id"), as JSON
 //        gui-launch-guard --decide    tree, restore and Space decisions for synthetic processes on stdin (tests)
 //        gui-launch-guard --resolve [--token T] [--attach-exe E --attach-argv N]
@@ -119,6 +124,7 @@
 //        gui-launch-guard --helpers --yabai PATH
 //                                     yabai calls and the guard's end, driven from stdin (tests)
 //        gui-launch-guard --rig --space N --yabai PATH --displays PATH --summary PATH [--guard-seconds S]
+//            [--allow-caller-placement]
 //                                     the guard in a session without a GUI: a stand-in yabai, a file standing in
 //                                     for SkyLight's displays, and its events driven from stdin (tests)
 // build: swiftc -O -swift-version 5 -target arm64-apple-macos13 \
@@ -2096,6 +2102,9 @@ var space = 0, guardSeconds = 60.0, adoptTimeout = 30.0
 var yabaiPath = "", summaryPath = ""
 var mode: String?  // "exec" or "open"
 var resolving = false, helperTest = false, rigTest = false
+/// --allow-caller-placement (GR2, addendum 1): the caller moves the tree's windows itself afterwards, so a tree window
+/// off --space after the guard's move is no problem, but only when it is off Tim's screen (onTimsScreen) and on a Space.
+var allowCallerPlacement = false
 var displaysPath: String?
 var parentWatch: pid_t?
 var attachExe: String?, attachNeedle: String?, givenToken: String?
@@ -2107,6 +2116,7 @@ while !argv.isEmpty {
     if flag == "--resolve" { resolving = true; continue }
     if flag == "--helpers" { helperTest = true; continue }
     if flag == "--rig" { rigTest = true; continue }
+    if flag == "--allow-caller-placement" { allowCallerPlacement = true; continue }
     guard !argv.isEmpty else { fail("\(flag) needs a value") }
     let value = argv.removeFirst()
     switch flag {
@@ -2136,14 +2146,14 @@ guard givenToken == nil else { fail("--token is for --resolve; a launch makes it
 if rigTest {
     guard space > 0, guardSeconds > 0, guardSeconds.isFinite, !yabaiPath.isEmpty, !summaryPath.isEmpty, displaysPath != nil,
           mode == nil, matcher == nil, parentWatch == nil else {
-        fail("usage: --rig --space N --yabai PATH --displays PATH --summary PATH [--guard-seconds S]")
+        fail("usage: --rig --space N --yabai PATH --displays PATH --summary PATH [--guard-seconds S] [--allow-caller-placement]")
     }
 } else {
     guard displaysPath == nil else { fail("--displays is for --rig: the guard reads Tim's display from SkyLight") }
     guard space > 0, guardSeconds > 0, guardSeconds.isFinite, adoptTimeout > 0, adoptTimeout.isFinite,
           !yabaiPath.isEmpty, !summaryPath.isEmpty, (mode == nil) == launchArgv.isEmpty, mode != nil || matcher != nil else {
         fail("usage: --space N --guard-seconds S --yabai PATH --summary PATH [--parent-pid P] [--adopt-timeout S] " +
-             "[--attach-exe E --attach-argv N] [(--exec | --open) -- argv]")
+             "[--allow-caller-placement] [--attach-exe E --attach-argv N] [(--exec | --open) -- argv]")
     }
 }
 if mode == "open" && launchArgv.first != "/usr/bin/open" { fail("--open launches /usr/bin/open, not \(launchArgv[0])") }
@@ -2280,10 +2290,26 @@ func windowFields(_ w: [String: Any]?) -> [String: Any] {
     recordWindowFault(["event": "window-list-failed", "via": via, "reason": why])
 }
 
-/// Tree window `w` (`id`) is on Space `at`, not --space, and was not moved there.
+/// GR2: whether a tree window on Space `s` is on Tim's screen: on one of his Spaces (1-4), or on the Space his display
+/// shows (as last read) or should show, unless that is --space itself (he went there himself). Any thread.
+@Sendable func onTimsScreen(_ s: Int) -> Bool {
+    guard s != space else { return false }
+    return timSpaces.contains(s) || s == spaceWatch.shownIndex || s == spacePolicy.value.expected
+}
+
+/// Tree window `w` (`id`) is on Space `at`, not --space, and was not moved there: a problem (GR2, addendum 1), unless
+/// the caller declared that it places the tree's windows itself (--allow-caller-placement) and the window is on a
+/// Space and off Tim's screen. The fault is recorded either way, with whether it was excused.
 @Sendable func windowOffTarget(_ id: Int, _ w: [String: Any], at: Int, via: String, why: String) {
+    let excused = allowCallerPlacement && at != 0 && !onTimsScreen(at)
     recordWindowFault(["event": "window-off-target", "window": id, "pid": w["pid"] ?? NSNull(), "app": w["app"] ?? "",
-                       "space": at, "target": space, "via": via, "reason": why])
+                       "space": at, "target": space, "via": via, "reason": why,
+                       "excused": excused ? "caller placement" as Any : NSNull()])
+    if !excused {
+        let pid = (w["pid"] as? NSNumber).map { "pid \($0)" } ?? "pid unknown"
+        let place = at == 0 ? "on no Space" : onTimsScreen(at) ? "on Tim's Space \(at)" : "on Space \(at)"
+        problem("window \(id) of the tree (\(w["app"] as? String ?? "?"), \(pid)) is \(place), not on --space \(space), after the guard's move (\(via)): \(why)")
+    }
 }
 
 /// Moves one tree window to the target Space by id, after checking yabai knows it and that it is the tree's (its
@@ -2725,6 +2751,13 @@ final class SpaceWatch {
     var history: [[String: Any]] {
         lock.lock(); defer { lock.unlock() }
         return trail
+    }
+
+    /// The index of the Space Tim's display showed at the last read; nil: none read yet, or a Space yabai's map does
+    /// not know.
+    var shownIndex: Int? {
+        lock.lock(); defer { lock.unlock() }
+        return shown.flatMap { map?.indexes[$0] }
     }
 
     /// Starts reading with `rows` (SkyLight's displays, or the rig's stand-in) and yabai's map from the baseline;
@@ -3180,6 +3213,7 @@ func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  //
             "frontAtLaunch": describe(frontAtLaunch), "frontAtEnd": describe(workspace.frontmostApplication),
             "userFront": describe(policy.userFront.flatMap { NSRunningApplication(processIdentifier: $0) }),
             "restorePending": theft != nil, "focusAtLaunch": focusAtLaunch, "focusAtEnd": end,
+            "placement": allowCallerPlacement ? "caller" : "target",
         ]) { _, new in new }
         summary.merge(records) { _, new in new }
         let data = try! JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys, .withoutEscapingSlashes])
@@ -3484,6 +3518,7 @@ let startRecord: [String: Any] = [
     "space": space, "guardSeconds": guardSeconds, "front": describe(frontAtLaunch), "focus": focusAtLaunch,
     "timSpace": timSpaceAtLaunch ?? NSNull(), "restoreWindow": baseline.target.window ?? NSNull(),
     "restoreWindowSpace": baseline.target.windowSpace ?? NSNull(), "attach": attachRecord, "activationPolicy": appKitPolicy,
+    "placement": allowCallerPlacement ? "caller" : "target",
 ]
 if launchArgv.isEmpty {
     started = true

@@ -615,6 +615,17 @@ class GuiLaunch(unittest.TestCase):
         self.assertEqual(check['revertLatencyMs'], {'window': [3.4, 2.0], 'activate': [1.2]})
         self.assertIn('3 activation(s) reverted (max 3.4 ms); frontmost Ghostty (pid 100)', result.stderr)
 
+    def test_allow_caller_placement_reaches_the_guard_and_the_check_names_the_placement(self):
+        # GR2 (addendum 1): the guard rules on a tree window off the target (a problem, unless the caller declared that
+        # it places the tree's windows itself and the window is off Tim's screen); the check names the placement declared.
+        for flags, placement in (([], 'target'), (['--allow-caller-placement'], 'caller')):
+            with self.subTest(flags=flags):
+                result = self.run_gui_launch('--space', '7', *flags, '--', '-a', str(self.app))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                argv = self.guard_args()
+                self.assertEqual(argv[argv.index('--parent-pid') + 2:argv.index('--open')], flags)
+                self.assertEqual(self.check_event(result)['placement'], placement)
+
     def test_adopted_processes_count_in_the_check(self):
         self.machine(windows=[{'id': 9003, 'pid': 700, 'app': 'java', 'title': 'Minecraft', 'space': 3}])
         adopted = [{'pid': 700, 'rule': 'exe-argv', 'via': 'scan', 'event': 'attached'}]
@@ -1719,9 +1730,9 @@ class Guard(unittest.TestCase):
 
     # The rig: the guard without a GUI ---------------------------------------------------------------------
 
-    def rig_argv(self, windows=()):
-        """What a --rig guard (--space 7) reads, in a directory of its own: RIG_YABAI, with yabai's Spaces as
-        rig_spaces() says, answered 0.6 s late, and `windows` its window list; Tim's display on Space 1. Its argv,
+    def rig_argv(self, windows=(), flags=()):
+        """What a --rig guard (--space 7, and `flags`) reads, in a directory of its own: RIG_YABAI, with yabai's Spaces
+        as rig_spaces() says, answered 0.6 s late, and `windows` its window list; Tim's display on Space 1. Its argv,
         and the directory."""
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))
         yabai = root / 'yabai'
@@ -1736,12 +1747,12 @@ class Guard(unittest.TestCase):
             put(root / ('window-%d.json' % w['id']), json.dumps(w))
         show(root, 101)
         return [str(self.binary), '--rig', '--space', '7', '--guard-seconds', '60', '--yabai', str(yabai),
-                '--displays', str(root / 'displays.json'), '--summary', str(root / 'summary.json')], root
+                '--displays', str(root / 'displays.json'), '--summary', str(root / 'summary.json')] + list(flags), root
 
-    def rig(self, windows=()):
+    def rig(self, windows=(), flags=()):
         """A --rig guard as rig_argv() sets it up. The process, its stdout lines, and its directory; its start event
         (guarding) is self.rig_start."""
-        argv, root = self.rig_argv(windows)
+        argv, root = self.rig_argv(windows, flags)
         process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         lines = Lines(process.stdout)
         self.addCleanup(lambda: (process.kill(), process.wait(), lines.thread.join(5), process.stdin.close(), process.stdout.close()))
@@ -2145,6 +2156,31 @@ class Guard(unittest.TestCase):
         self.assertEqual(result['spaceRestores'], [])
         self.assertEqual(result['timSpace']['expected'], 3)
         self.assertEqual(result['spaceHistory'][-1]['spaceId'], 103)
+
+    def test_a_tree_window_off_target_after_its_move_fails_the_check_unless_the_caller_places_it_off_tims_screen(self):
+        # GR2 (addendum 1): a tree window still off --space after the guard's move (yabai refuses each move here) was a
+        # fault only, and the check passed. It is a problem now. --allow-caller-placement, for a caller that moves the
+        # tree's windows itself, excuses one on a Space off Tim's screen (9001, on Space 6), never one on his Spaces (9002,
+        # on Space 2) or on the Space his display shows (9003, on Space 1); the faults are recorded either way.
+        probe, _ = self.probe(self.java)
+        rows = [{'id': wid, 'pid': probe.pid, 'app': 'Probe', 'title': 'probe', 'space': s, 'has-focus': False}
+                for wid, s in ((9001, 6), (9002, 2), (9003, 1))]
+        for flags, placement, failing in (([], 'target', {9001, 9002, 9003}), (['--allow-caller-placement'], 'caller', {9002, 9003})):
+            with self.subTest(flags=flags):
+                process, lines, root = self.rig(windows=rows, flags=flags)
+                self.assertEqual(self.rig_start['placement'], placement)
+                self.send(process, 'root %d' % probe.pid, 'sweep')
+                for _ in rows:
+                    lines.until(lambda row: row.get('event') == 'window-off-target', 10)
+                _, result = self.end_rig(process, lines, root)
+                self.assertEqual(result['placement'], placement)
+                offs = [f for f in result['windowFaults'] if f['event'] == 'window-off-target']
+                self.assertEqual({(f['window'], f['space'], f['excused']) for f in offs},
+                                 {(9001, 6, 'caller placement' if flags else None), (9002, 2, None), (9003, 1, None)})
+                moved = [p for p in result['problems'] if "after the guard's move" in p]
+                self.assertEqual({int(p.split()[1]) for p in moved}, failing, result['problems'])
+                self.assertIn("window 9002 of the tree (Probe, pid %d) is on Tim's Space 2, not on --space 7, after the guard's move "
+                              "(activation): yabai -m window 9002 --space 7 exited 1" % probe.pid, moved)
 
 
 if __name__ == '__main__':
