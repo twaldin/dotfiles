@@ -23,17 +23,22 @@
 //     to give it back to, with any app outside the tree) and 2 s after. Inside it no activation and no Space
 //     change is ever Tim's; outside it every activation outside the tree and every Space change is. His HID
 //     input is logged as a hint (sinceInputMs), never used as authority;
-//   - reverts activations: when a tree process becomes frontmost, it focuses Tim's restore-target window by id,
-//     or re-activates his app when there is none or the focus fails. The target is his focused window at launch
+//   - reverts activations: when a tree process becomes frontmost, it re-activates Tim's app at once, in the turn
+//     that decides the activation (GR2: it never waits for yabai), after the checks the fallback's final turn makes
+//     (below); then, unless focus is back by then, it focuses his restore-target window by id, or re-activates his
+//     app again when there is none or the focus fails. An app activation cannot hand focus to another process: the
+//     app is checked by pid and start time in the turn that activates it; a window id can pass to another process
+//     unseen, so only a window is vouched for. The target is his focused window at launch
 //     or after an app switch of his own, never a tree member's window. Before the focus, his app is checked again
 //     (the same process, by pid and start time, outside the tree, still the one focus goes back to, the theft
 //     still open), and so is the window's owner, by a query made for that focus: its answer counts only if no
 //     activation, Space change or change of the restore target came while it ran (else it is asked again, within
 //     the focus's 1 s, while the focus is still wanted). A window that cannot be vouched for is not focused, and
-//     the focus still has to be wanted immediately before it is made. The fallback activation checks the
-//     app again in the same main-queue turn that activates it. An owner query that runs out of time is an
-//     expected-slow event, and no problem, only when the window was not focused, the fallback activation ran, and
-//     a read after it shows his app frontmost and his display on the expected Space;
+//     the focus still has to be wanted immediately before it is made (once focus is back, it is not). The fallback
+//     activation checks the app again in the same main-queue turn that activates it. An owner query that runs out
+//     of time is an expected-slow event, and no problem, only when the window was not focused, an activation of his
+//     app (at once, or the fallback) ran and succeeded, and a read after the revert shows his app frontmost and his
+//     display on the expected Space;
 //   - reads every display directly (SkyLight, the record yabai itself reads): at every Space notification, at each
 //     activation, every 20 ms through each theft and grace window (macOS can report two changes in one
 //     notification), around each Space restore, and once more at the end. Each change of Tim's display is in the
@@ -523,7 +528,7 @@ func performRevert(window: Int?, unwanted: () -> String?, confirm: (Int) -> Vouc
     return outcome
 }
 
-/// What a read taken after a fallback activation showed: the frontmost app, and the Space Tim's display shows
+/// What a read taken after a revert's activation showed: the frontmost app, and the Space Tim's display shows
 /// (nil with `error`: the read failed).
 struct PostFallbackRead {
     var front: pid_t?
@@ -532,18 +537,21 @@ struct PostFallbackRead {
 }
 
 /// The owner query before a revert's focus ran out of time. It is expected-slow, and no problem, only if the window
-/// was not focused (the owner check refused it), the fallback activation ran (its checks let it) and succeeded, and
-/// `read`, taken after it, shows `pid` frontmost and Tim's display on `expectedSpace`. Returns why it is a problem;
-/// nil: expected-slow.
-func ownerTimeoutProblem(_ outcome: RevertOutcome, to pid: pid_t, expectedSpace: Int?, read: PostFallbackRead?) -> String? {
+/// was not focused (the owner check refused it, or focus was back first), an activation of `pid` ran and succeeded
+/// (`immediate`, the one made at once in the turn that decided the theft, or the revert's fallback, which its checks
+/// let run), and `read`, taken after the revert, shows `pid` frontmost and Tim's display on `expectedSpace`. Returns
+/// why it is a problem; nil: expected-slow.
+func ownerTimeoutProblem(_ outcome: RevertOutcome, immediate: Bool, to pid: pid_t, expectedSpace: Int?, read: PostFallbackRead?) -> String? {
     if outcome.method == "window" { return "window \(outcome.window ?? 0) was focused without its owner vouched for" }
-    guard outcome.method == "activate" else { return "the fallback activation did not run: \(outcome.reason ?? "no reason recorded")" }
-    guard outcome.ok else { return "the fallback activation of pid \(pid) failed" }
-    guard let read else { return "no read was taken after the fallback" }
-    if let error = read.error { return "the read after the fallback failed: \(error)" }
-    guard read.front == pid else { return "after the fallback \(read.front.map { "pid \($0)" } ?? "no app") is frontmost, not pid \(pid)" }
+    if !immediate {
+        guard outcome.method == "activate" else { return "no activation gave focus back: the fallback activation did not run: \(outcome.reason ?? "no reason recorded")" }
+        guard outcome.ok else { return "no activation gave focus back: the fallback activation of pid \(pid) failed" }
+    }
+    guard let read else { return "no read was taken after the activation" }
+    if let error = read.error { return "the read after the activation failed: \(error)" }
+    guard read.front == pid else { return "after the activation \(read.front.map { "pid \($0)" } ?? "no app") is frontmost, not pid \(pid)" }
     guard let expectedSpace, read.space == expectedSpace else {
-        return "after the fallback Tim's display shows \(read.space.map { "Space \($0)" } ?? "a Space yabai does not list"), not Space \(expectedSpace.map { String($0) } ?? "?")"
+        return "after the activation Tim's display shows \(read.space.map { "Space \($0)" } ?? "a Space yabai does not list"), not Space \(expectedSpace.map { String($0) } ?? "?")"
     }
     return nil
 }
@@ -1627,13 +1635,15 @@ func unknownWindow(_ id: Int) -> String { "yabai knows no window \(id)" }
 /// tree before the front app and its window become the restore target. Each Space row and each activation starts a
 /// new epoch, as the live guard's events do. A row is one of
 /// - `{"t", "activate": pid, "focused": {"id", "pid", "space"}, "revert": {…}}`: an activation; `focused`, the
-///   window yabai reports focused afterwards; `revert`, the revert a tree activation starts: "verify" is what each
+///   window yabai reports focused afterwards. A tree activation's row reports "immediate", the app the activation
+///   made at once in its own turn activates (null, with "immediateRefused", when the fallback's checks refuse it);
+///   `revert`, the revert it starts: "verify" is what each
 ///   owner query answers in turn (`{"pid", "space"}`, "gone", or null; a single answer stands for a list of one;
 ///   an answer missing: none in time), "duringQuery" (activation rows) comes while the first owner query runs,
 ///   "afterVouch" (activation rows) comes once an owner answer vouched for the window, before the focus,
 ///   "focus": "fail" fails the focus, "duringFocus" (`{"procs", "t", "activate"}`) happens while the focus runs,
 ///   "mainQueue" (rows) is work the main queue serves before the fallback's final turn, and "afterFallback"
-///   (`{"front": pid, "space": n}`; absent: the read failed) is what the read after a fallback shows;
+///   (`{"front": pid, "space": n}`; absent: the read failed) is what the read after the revert shows;
 /// - `{"t", "launch": pid}` (an app launch or a scan sighting), `{"t", "move": pid}` (the check before a move);
 /// - `{"t", "space": n, "since": s, "windowSpace": n|null, "duringQuery": [activation rows]}`: Tim's display
 ///   showed Space n at some moment from `since` (default t) until t, the activations came while the query ran,
@@ -1699,7 +1709,7 @@ func decide() -> Never {
         if !result.dropped.isEmpty { out["dropped"] = result.dropped.map(Int.init) }
     }
     var activation: ([String: Any]) -> [String: Any] = { _ in [:] }
-    func revert(to: pid_t, _ spec: [String: Any]) -> [String: Any] {
+    func revert(to: pid_t, _ spec: [String: Any], immediate: Bool) -> [String: Any] {
         var queries = 0
         var timedOut = false
         var activated: pid_t?
@@ -1760,7 +1770,7 @@ func decide() -> Never {
         if timedOut {
             var read = PostFallbackRead(error: "Tim's display could not be read")
             if let shown = spec["afterFallback"] as? [String: Any] { read = PostFallbackRead(front: pid(shown["front"]), space: number(shown["space"])?.intValue) }
-            let why = ownerTimeoutProblem(outcome, to: to, expectedSpace: spaces.expected, read: read)
+            let why = ownerTimeoutProblem(outcome, immediate: immediate, to: to, expectedSpace: spaces.expected, read: read)
             out["ownerTimeout"] = ["expectedSlow": why == nil, "problem": why ?? NSNull()] as [String: Any]
         }
         return out
@@ -1779,7 +1789,11 @@ func decide() -> Never {
             out["decision"] = "restore"
             out["to"] = Int(to)
             out["window"] = target.window(for: to) ?? NSNull()
-            if let spec = row["revert"] as? [String: Any] { out["revert"] = revert(to: to, spec) }
+            // The activation made at once, in this turn, after the checks of the fallback's final turn.
+            let refused = unwanted(to)
+            out["immediate"] = refused == nil ? Int(to) : NSNull()
+            if let refused { out["immediateRefused"] = refused }
+            if let spec = row["revert"] as? [String: Any] { out["revert"] = revert(to: to, spec, immediate: refused == nil) }
         case .restored(let latency):
             out["decision"] = "restored"
             out["latencyMs"] = ms(latency)
@@ -2451,21 +2465,23 @@ func frontmost() -> (pid: pid_t?, app: Any) {
     return (found, timedOut)
 }
 
-/// The fallback's final turn, on the main queue: focus still goes back to `pid` with the theft still open (main's
-/// policy), `pid` is still the process it was taken from and outside the tree, and then the activation, with no
-/// activation or adoption served in between. main.
-@Sendable func finalActivation(_ pid: pid_t) -> FinalTurn {
+/// An activation of Tim's app `pid` in one main-queue turn with its checks: focus still goes back to `pid` with the
+/// theft still open (main's policy), `pid` is still the process it was taken from and outside the tree, and then the
+/// activation, with no activation or adoption served in between. `method` is how a revert it lands records it:
+/// "immediate", made in the turn that decided the theft, or "activate", the revert's fallback. main.
+@Sendable func finalActivation(_ pid: pid_t, method: String = "activate") -> FinalTurn {
     if let why = policy.unwanted(pid) { return .unwanted(why) }
     guard revalidateTarget(pid) else { return .unwanted("pid \(pid) joined the tree or is another process now") }
-    lastRestore.update { $0 = ("activate", nil) }
+    lastRestore.update { $0 = (method, nil) }
     return .activated(activate(pid))
 }
 
-/// Gives focus back to Tim's app `pid`, which a tree process took at `stolenAt` (uptime): performRevert with the
-/// live checks, the focus by window id, and the fallback activation (cooperative on macOS 14+: a slow app answers
-/// late) in one main-queue turn with its checks. An owner query that ran out of time is settled after it.
-/// restoreQueue, scheduled by main, so the guard's end waits for it.
-@Sendable func revert(to pid: pid_t, stolenAt: Double) {
+/// Gives focus back to Tim's app `pid`, which a tree process took at `stolenAt` (uptime), after the activation made
+/// at once in the turn that decided the theft (`immediate`: it ran and succeeded): unless focus is back by then,
+/// performRevert with the live checks, the focus by window id once its owner is vouched for, and the fallback
+/// activation (cooperative on macOS 14+: a slow app answers late) in one main-queue turn with its checks. An owner
+/// query that ran out of time is settled after it. restoreQueue, scheduled by main, so the guard's end waits for it.
+@Sendable func revert(to pid: pid_t, stolenAt: Double, immediate: Bool) {
     let began = uptime()
     var ownerTimeout: (query: [String], allowed: Double)?
     let outcome = performRevert(
@@ -2477,10 +2493,11 @@ func frontmost() -> (pid: pid_t?, app: Any) {
             return check.vouch
         },
         focus: { id in
+            let prior = lastRestore.value
             lastRestore.update { $0 = ("window", id) }
             let reply = yabaiReply(["window", "--focus", String(id)], timeout: focusTimeout)
             if case .exited(0, _) = reply { return nil }
-            lastRestore.update { $0 = ("", nil) }
+            lastRestore.update { $0 = prior }
             switch reply {
             case .exited(let code, _): return "exit \(code)"
             case .timedOut: return "no answer within \(focusTimeout) s"
@@ -2489,24 +2506,27 @@ func frontmost() -> (pid: pid_t?, app: Any) {
         },
         activate: { DispatchQueue.main.sync { finalActivation(pid) } })
     let done = uptime()
-    emit(["event": "restore-call", "to": Int(pid), "method": outcome.method, "window": outcome.window ?? NSNull(),
+    emit(["event": "restore-call", "to": Int(pid), "immediate": immediate, "method": outcome.method, "window": outcome.window ?? NSNull(),
           "ok": outcome.ok, "windowError": outcome.windowError ?? NSNull(), "reason": outcome.reason ?? NSNull(),
           "callMs": ms(done - began), "sinceTheftMs": ms(done - stolenAt)])
     if let ownerTimeout {
-        settleOwnerTimeout(ownerTimeout.query, allowed: ownerTimeout.allowed, outcome: outcome, to: pid, fallbackMs: ms(done - stolenAt))
+        settleOwnerTimeout(ownerTimeout.query, allowed: ownerTimeout.allowed, outcome: outcome, immediate: immediate, to: pid,
+                           fallbackMs: ms(done - stolenAt))
     }
 }
 
 /// The owner query before a revert's focus ran out of time: an owner-query-timeout event with the query, its
-/// timeout, the fallback's latency (from the theft to the fallback's return) and the read after it; expected-slow
-/// only as ownerTimeoutProblem rules, otherwise a problem too. The read: NSWorkspace's frontmost app and SkyLight's
-/// Space for Tim's display, every 25 ms for up to 1 s after the fallback (its activation lands asynchronously),
-/// until both are what is expected. restoreQueue.
-@Sendable func settleOwnerTimeout(_ query: [String], allowed: Double, outcome: RevertOutcome, to pid: pid_t, fallbackMs: NSDecimalNumber) {
+/// timeout, the revert's latency (from the theft to its return; fallbackMs), whether the activation made at once
+/// ran, and the read after the revert; expected-slow only as ownerTimeoutProblem rules, otherwise a problem too. The
+/// read: the frontmost app (NSWorkspace's) and SkyLight's Space for Tim's display, every 25 ms for up to 1 s after
+/// the revert (an activation lands asynchronously), until both are what is expected; taken when an activation of his
+/// app (at once, or the fallback) ran and succeeded. restoreQueue.
+@Sendable func settleOwnerTimeout(_ query: [String], allowed: Double, outcome: RevertOutcome, immediate: Bool, to pid: pid_t,
+                                  fallbackMs: NSDecimalNumber) {
     let fellBack = uptime()
     var read: PostFallbackRead?
     var shown: [String: Any] = [:]
-    if outcome.method == "activate" && outcome.ok {
+    if immediate || (outcome.method == "activate" && outcome.ok) {
         while true {
             let (front, app) = DispatchQueue.main.sync { frontmost() }
             let space = spaceWatch.sample(via: "fallback-check")
@@ -2519,16 +2539,16 @@ func frontmost() -> (pid: pid_t?, app: Any) {
         }
     }
     let expected = spacePolicy.value.expected
-    let why = ownerTimeoutProblem(outcome, to: pid, expectedSpace: expected, read: read)
+    let why = ownerTimeoutProblem(outcome, immediate: immediate, to: pid, expectedSpace: expected, read: read)
     let record: [String: Any] = [
         "event": "owner-query-timeout", "query": query, "timeoutS": decimal(allowed, 1), "to": Int(pid),
-        "window": outcome.window ?? NSNull(), "method": outcome.method, "fallbackMs": fallbackMs,
+        "window": outcome.window ?? NSNull(), "method": outcome.method, "immediate": immediate, "fallbackMs": fallbackMs,
         "expected": ["pid": Int(pid), "space": expected.map(spaceField) ?? NSNull()] as [String: Any],
         "read": read == nil ? NSNull() as Any : shown as Any, "expectedSlow": why == nil, "problem": why ?? NSNull(),
     ]
     ownerTimeouts.update { $0.append(record) }
     emit(record)
-    // Bench's ruling, decided here: a timeout that the read after the fallback did not clear is a problem.
+    // Bench's ruling, decided here: a timeout that the read after the revert did not clear is a problem.
     if let why { problem("yabai -m \(query.joined(separator: " ")) did not answer within \(String(format: "%.1f", allowed)) s: \(why)") }
 }
 
@@ -2979,9 +2999,18 @@ func onActivation(_ pid: pid_t, app: Any, running: NSRunningApplication?, at t: 
             theft = ["app": app, "activatedAt": now, "t": t]
             theftPending.update { $0 = true }
         }
+        // GR2 (item 4): Tim's app is activated at once, in this turn, after the same checks as the fallback's final
+        // turn; the revert (his window by id once its owner is vouched for, unless focus is back by then) follows.
+        let window = restoreTarget.value.window(for: to)
+        var atOnce: [String: Any] = ["ok": false, "reason": NSNull()]
+        switch finalActivation(to, method: "immediate") {
+        case .activated(let ok): atOnce["ok"] = ok
+        case .unwanted(let why): atOnce["reason"] = why
+        }
+        let immediate = atOnce["ok"] as? Bool == true
         emit(context.merging(["event": "activation", "app": app, "tree": true, "decision": "restore", "to": Int(to),
-                              "restoreWindow": restoreTarget.value.window(for: to) ?? NSNull(), "at": now]) { $1 })
-        schedule("revert to pid \(to)", on: restoreQueue) { revert(to: to, stolenAt: t) }
+                              "restoreWindow": window ?? NSNull(), "immediate": atOnce, "at": now]) { $1 })
+        schedule("revert to pid \(to)", on: restoreQueue) { revert(to: to, stolenAt: t, immediate: immediate) }
         observe(pid)
         yabaiQueue.async { sweep("activation") }
     case .restored(let latency):

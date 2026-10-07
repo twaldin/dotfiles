@@ -1113,19 +1113,35 @@ class Guard(unittest.TestCase):
                                  (method, 'yabai knows no window 42', reason, activated))
 
     def test_an_owner_query_timeout_the_read_after_the_fallback_confirms_is_expected_slow(self):
-        # Bench's ruling: the window was not focused, the fallback ran, and the read after it shows Tim's app (100)
-        # frontmost and his display on the expected Space (2): no problem.
-        revert = self.decide(self.REVERT, [{'t': 1.0, 'activate': 500, 'revert': {'afterFallback': {'front': 100, 'space': 2}}}])[0]['revert']
+        # Bench's ruling: the window was not focused, an activation of Tim's app ran (GR2 item 4: the one made at once in
+        # the theft's own turn; here the fallback too), and the read after the revert shows his app (100) frontmost and
+        # his display on the expected Space (2): no problem.
+        row = self.decide(self.REVERT, [{'t': 1.0, 'activate': 500, 'revert': {'afterFallback': {'front': 100, 'space': 2}}}])[0]
+        self.assertEqual(row['immediate'], 100)
+        revert = row['revert']
         self.assertEqual((revert['method'], revert['windowError'], revert['activated']), ('activate', 'yabai did not say in time who owns window 42', 100))
+        self.assertEqual(revert['ownerTimeout'], {'expectedSlow': True, 'problem': None})
+
+    def test_a_tree_activation_activates_tims_app_at_once_and_a_slow_owner_query_then_holds_nothing_up(self):
+        # GR2 item 4 (roblox's runs: an owner-query-timeout and a revert of 1,012-1,025 ms in every one): Tim's app is
+        # activated in the turn that decides the theft, before any owner query. Here focus is back (that activation
+        # landed) before the slow owner query's revert could fall back: the window is not focused, no fallback runs, and
+        # the timeout is expected-slow, not "the fallback activation did not run".
+        spec = {'afterFallback': {'front': 100, 'space': 2}, 'mainQueue': [{'t': 1.3, 'activate': 100}]}
+        row = self.decide(self.REVERT, [{'t': 1.0, 'activate': 500, 'revert': spec}])[0]
+        self.assertEqual((row['decision'], row['immediate']), ('restore', 100))
+        revert = row['revert']
+        self.assertEqual((revert['method'], revert['activated'], revert['reason'], revert['mainQueue'][0]['decision']),
+                         ('none', None, 'focus is already back with pid 100', 'restored'))
         self.assertEqual(revert['ownerTimeout'], {'expectedSlow': True, 'problem': None})
 
     def test_an_owner_query_timeout_the_read_after_the_fallback_cannot_confirm_is_a_problem(self):
         cases = [
-            ({}, "the read after the fallback failed: Tim's display could not be read"),
-            ({'afterFallback': {'front': 500, 'space': 2}}, 'after the fallback pid 500 is frontmost, not pid 100'),
-            ({'afterFallback': {'front': 100, 'space': 6}}, "after the fallback Tim's display shows Space 6, not Space 2"),
-            ({'afterFallback': {'front': 100, 'space': 2}, 'mainQueue': [{'t': 1.3, 'activate': 100}]},
-             'the fallback activation did not run: focus is already back with pid 100'),
+            ({}, "the read after the activation failed: Tim's display could not be read"),
+            ({'afterFallback': {'front': 500, 'space': 2}}, 'after the activation pid 500 is frontmost, not pid 100'),
+            ({'afterFallback': {'front': 100, 'space': 6}}, "after the activation Tim's display shows Space 6, not Space 2"),
+            ({'afterFallback': {'front': 300, 'space': 2}, 'mainQueue': [{'t': 1.3, 'activate': 100}]},
+             'after the activation pid 300 is frontmost, not pid 100'),
         ]
         for spec, problem in cases:
             with self.subTest(spec=spec):
@@ -2016,6 +2032,27 @@ class Guard(unittest.TestCase):
         self.assertIsNone(back['sinceInputMs'])
         self.assertEqual((back['previousFront']['app']['pid'], back['previousFront']['tree']), (thief, True))
         self.end_rig(process, lines, root)
+
+    def test_a_tree_activation_gives_focus_back_at_once_while_yabai_is_slow(self):
+        # GR2 item 4, live: roblox's runs each had an owner-query-timeout and reverts of 1,012-1,025 ms, the time yabai
+        # took to say who owns Tim's window before its focus. Here yabai's window queries hang: Tim's app is activated
+        # (the rig's stand-in, rig-activate) in the turn that decides the theft, not once the 1 s owner query is over.
+        process, lines, root, tim, thief = self.theft_rig()
+        put(root / 'windows-mode', 'hang')
+        began = time.monotonic()
+        self.send(process, 'activate %d' % thief)
+        seen = lines.until(lambda row: row.get('event') == 'rig-activate', 10)
+        took = time.monotonic() - began
+        self.assertEqual(seen[-1]['pid'], tim)
+        self.assertLess(took, 0.5, "Tim's app was activated only after the owner query")
+        self.assertNotIn('restore-call', [e.get('event') for e in seen])
+        self.send(process, 'activate %d' % tim)  # macOS reports his app frontmost again
+        seen = lines.until(lambda row: row.get('event') == 'owner-query-timeout', 10)
+        self.assertEqual([(e['method'], e['latencyMs'] < 500) for e in seen if e.get('event') == 'reverted'], [('immediate', True)])
+        self.assertEqual((seen[-1]['immediate'], seen[-1]['method'], seen[-1]['expectedSlow']), (True, 'none', True))
+        put(root / 'windows-mode', 'answer')
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual([r['method'] for r in result['reverted']], ['immediate'])
 
 
 if __name__ == '__main__':

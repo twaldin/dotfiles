@@ -34,15 +34,18 @@ and/or guards one that something else starts, then checks that nothing took it.
   and 2 s after: inside it no activation and no Space change is ever taken for his, so an app macOS activates
   then never becomes the one focus goes back to and his expected Space stays the one before the theft. Outside
   it, every app switch and Space change is his. His HID input is only logged (sinceInputMs). When a tree
-  process becomes frontmost, the guard gives focus back by focusing Tim's restore-target window by id through
-  yabai (the one he had focused at launch or after his last own app switch, never a window of the tree), or by
-  re-activating his app if there is none or the focus fails (1 s). Before every focus his app is checked again,
+  process becomes frontmost, the guard re-activates Tim's app at once, in the turn that decides the activation
+  (it never waits for yabai; his app is checked first, as for the re-activation below); then, unless focus is back
+  by then, it focuses Tim's restore-target window by id through
+  yabai (the one he had focused at launch or after his last own app switch, never a window of the tree), or
+  re-activates his app again if there is none or the focus fails (1 s). Before every focus his app is checked again,
   and so is the window's owner, by a 1 s query made for that focus whose answer counts only if no activation,
   Space change or new restore target came while it ran (it is asked again only while the focus is still wanted): a
   window it cannot vouch for is not focused, and the focus must still be wanted immediately before it is made. The
   re-activation checks his app again in the same main-queue turn. An owner query that runs out of time is an
-  owner-query-timeout event, expected-slow and no problem only when the window was not focused, the re-activation
-  ran, and a read after it showed his app frontmost and his display on the expected Space; otherwise a problem.
+  owner-query-timeout event, expected-slow and no problem only when the window was not focused, an activation of
+  his app (at once, or the re-activation) ran, and a read after the revert showed his app frontmost and his display
+  on the expected Space; otherwise a problem.
   The guard reads every display directly (SkyLight, which yabai reads too) at every Space notification, every 20
   ms through each theft window, around each restore, and once more as it ends: each Space the tree shows him is a
   breach the moment it is read, and if his display shows another Space at any moment of a theft window, focusing
@@ -95,7 +98,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   not locate at its end, no unsettled or killed work. The guard gives focus back without moving the active display,
   so a theft from another display can leave it there (yabai still reported it after Superwhisper got focus back):
   that fails the check, and a click on his display clears it. A reverted activation alone does not fail it: the
-  check lists the revert latencies by method (window focus, re-activation, and expected-slow owner queries).
+  check lists the revert latencies by method (immediate re-activation, window focus, re-activation, and
+  expected-slow owner queries).
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
@@ -340,8 +344,9 @@ def space_breaches(summary):
 
 
 def revert_latencies(summary):
-    """The reverts' latencies (ms from theft to Tim's app frontmost again), by how focus was given back, and the
-    owner queries that ran out of time before a revert's focus (ms from theft to the fallback's return)."""
+    """The reverts' latencies (ms from theft to Tim's app frontmost again), by how focus was given back (immediate,
+    window, activate), and the owner queries that ran out of time before a revert's focus (ms from theft to the
+    revert's return)."""
     by_method = {}
     for r in summary.get('reverted') or []:
         by_method.setdefault(r.get('method') or 'unknown', []).append(r.get('latencyMs'))
