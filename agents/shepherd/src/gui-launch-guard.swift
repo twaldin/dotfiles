@@ -97,9 +97,10 @@
 //     without its owner or Space) is asked about again every 50 ms for 3 s after the event that reported it and moved
 //     as soon as yabai places it; then it is window-unknown (with WindowServer's and SkyLight's view of it), until
 //     yabai places it (window-located). One never placed, still there at the end or gone before it, is a problem
-//     unless every read of it showed it off Tim's screen: its time there cannot be bounded. A window list
-//     that fails and a tree window still off --space after its move are recorded as they happen; a list that leaves
-//     out an unknown window clears it only if WindowServer shows it gone. A tree window still off --space after its
+//     unless every read of it showed it off Tim's screen: its time there cannot be bounded; that holds from its first
+//     unplaced sample, so also when the guard ends within those 3 s. A window list that fails and a tree window still
+//     off --space after its move are recorded as they happen; a list that leaves out an unknown window clears it (as
+//     unknown; it stays unplaced) only if WindowServer shows it gone. A tree window still off --space after its
 //     move is a problem (window-off-target; GR2, addendum 1).
 //     Helper windows (GR2, bench's ruling, GR1 addendum 4 note 3; every easl launch has a 1×1 window on screen for
 //     ~1 s that yabai never lists, and 500×500 ones ordered out): "on Tim's screen" means ordered in on one of his
@@ -2460,10 +2461,11 @@ struct FirstSighting {
 }
 let firstSightings = Locked([Int: FirstSighting]())
 
-/// The tree windows that were window-unknown and have not been placed since (the resolution event, window-located,
-/// takes one out): when the event that reported each came, what reported it, why yabai would not place it, and
-/// whether every read of it so far showed it off Tim's screen.
-let unresolved = Locked([Int: (seen: Double, via: String, why: String, offTims: Bool)]())
+/// The tree windows unplaced at a sample and not placed since (unplacedAt; the resolution event, window-located, takes
+/// one window-unknown recorded out): when the event that reported each came, what reported it, why yabai would not
+/// place it, whether every read of it so far showed it off Tim's screen, and whether window-unknown recorded it.
+typealias Unresolved = (seen: Double, via: String, why: String, offTims: Bool, reported: Bool)
+let unresolved = Locked([Int: Unresolved]())
 
 /// GR2 (bench's ruling): the tree windows exempt at their last sample, by id (uptime of that sample). The windows-on-
 /// screen poll samples each again (ShownWindows); one that counts then is parked (window-counted), judged from that
@@ -2543,18 +2545,27 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
     }
 }
 
+/// Tree window `id` was unplaced at a sample (`look`): unresolved from then until yabai places it (the end reports
+/// one never placed, even if the guard ended within the 3 s it is asked about), from the event that reported it
+/// (`seen`, `via`); `reported` once window-unknown records it. Off Tim's screen only while its first sighting and every
+/// sample since showed it off.
+@Sendable func unplacedAt(_ id: Int, _ look: WindowLook, seen: Double, via: String, why: String, reported: Bool) {
+    let off = firstSightings.value[id]?.onTims == false && (look.gone || !look.onTims)
+    unresolved.update { (list: inout [Int: Unresolved]) -> Void in
+        let known = list[id]
+        list[id] = (seen: known?.seen ?? seen, via: known?.via ?? via, why: why, offTims: (known?.offTims ?? true) && off,
+                    reported: reported || known?.reported == true)
+    }
+}
+
 /// yabai would not place tree window `id` (`why`) for unplacedLimit since the event that reported it (`seen`), or at
 /// the final sweep: window-unknown, with what WindowServer and SkyLight show of it now. It is unresolved until yabai
 /// places it (window-located); unless WindowServer shows it gone it stays unknown, which the end reports.
 @Sendable func windowUnknown(_ id: Int, seen: Double, via: String, why: String) {
     let look = WindowLook(id)
     let now = look.place
-    let offTims = firstSightings.value[id]?.onTims == false && (look.gone || !look.onTims)
     windowsUnknown.update { $0[id] = look.gone ? nil : why }
-    unresolved.update { (list: inout [Int: (seen: Double, via: String, why: String, offTims: Bool)]) -> Void in
-        let known = list[id]
-        list[id] = (seen: known?.seen ?? seen, via: known?.via ?? via, why: why, offTims: (known?.offTims ?? true) && offTims)
-    }
+    unplacedAt(id, look, seen: seen, via: via, why: why, reported: true)
     let shown: Any = look.server.map { (state: (exists: Bool, window: ServerWindow?)) -> String in
         guard state.exists else { return "gone" }
         switch state.window?.onScreen {
@@ -2650,6 +2661,7 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
         func unplaced(_ why: String) {
             windowsUnknown.update { $0[id] = why }
             if !final && uptime() - seen < unplacedLimit {
+                unplacedAt(id, look, seen: seen, via: via, why: why, reported: false)
                 yabaiQueue.asyncAfter(deadline: .now() + unplacedInterval) { park(id, seen: seen, via: via) }
             } else {
                 windowUnknown(id, seen: seen, via: via, why: why)
@@ -2683,7 +2695,7 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false) {
         }
         let start = stretch.at
         let leftUnseen = before == nil && !onTims && stretch.onTims ? queried - start : nil
-        if let resolved = unresolved.update({ $0.removeValue(forKey: id) }) {
+        if let resolved = unresolved.update({ $0.removeValue(forKey: id) }), resolved.reported {
             var located: [String: Any] = firstFields(id).merging([
                 "event": "window-located", "window": id, "pid": Int(pid), "app": app, "space": from, "via": via,
                 "unknownMs": ms(queried - resolved.seen),

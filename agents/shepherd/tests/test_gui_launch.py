@@ -2411,6 +2411,21 @@ class Guard(unittest.TestCase):
         self.assertIn("window 89243 of the tree (reported by ax-created) was never placed before it went: yabai -m query --windows "
                       "--window 89243 exited 1; nothing showed it off Tim's screen, so its time there cannot be bounded", result['problems'])
 
+    def test_a_window_never_placed_is_a_problem_though_the_guard_ends_within_the_three_seconds_it_is_asked_about(self):
+        # GR2: never placed is a problem. Here the guard ends 0.5 s after Accessibility reported window 89280 (perf's
+        # launches: the tree can exit within seconds), within the 3 s it is asked about, and WindowServer no longer has
+        # it then. Before, the final sweep cleared it as gone and the check passed: the window-unknown record that made
+        # it a problem came only at 3 s.
+        process, lines, root, easl = self.late_rig(onscreen=True)
+        put(root / 'onscreen.json', json.dumps([[89280, easl]]))
+        self.send(process, 'window 89280')
+        time.sleep(0.5)
+        put(root / 'onscreen.json', '[]')
+        seen, result = self.end_rig(process, lines, root)
+        self.assertNotIn('window-unknown', [e.get('event') for e in seen])
+        self.assertIn("window 89280 of the tree (reported by ax-created) was never placed before it went: yabai -m query --windows "
+                      "--window 89280 exited 1; nothing showed it off Tim's screen, so its time there cannot be bounded", result['problems'])
+
     # Helper windows (GR2, bench's ruling, GR1 addendum 4 note 3). perf's 06:50Z proof launch
     # (~/dev/easl-lanes/perf-lead/window-watch.log and gui-launch.jsonl): every easl launch has a 1x1 window at (0,981),
     # on screen for ~1 s, that yabai never lists (window-unknown in every GR1 launch), and 500x500 helpers that are

@@ -88,7 +88,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   counts from its first Accessibility sighting: past 250 ms that fails the check. At that sighting the guard reads
   the window's Spaces and display from SkyLight (firstSpace, firstDisplay, firstAt). A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
-  (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen.
+  (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen, also when
+  the guard ends within those 3 s.
   Helper windows (bench's ruling): "on Tim's screen" means ordered in on one of his Spaces (SkyLight) with
   WindowServer bounds larger than 2x2 px; what cannot be read counts as on it. Exempt, and only these: a window
   SkyLight puts on no Space (ordered out; not merely off screen: a window on one of Tim's Spaces that no display
