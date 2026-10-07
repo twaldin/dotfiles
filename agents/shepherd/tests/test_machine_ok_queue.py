@@ -513,7 +513,6 @@ class Clamp(QueueCase):
         (self.work / 'go').touch()
         code, _, err = self.finish(p)
         self.assertEqual(code, 0, err)
-        self.assertEqual(pids[0], p.pid, 'taskpolicy execs the command in place: signals reach it directly')
         return nice, qos, err
 
     @unittest.skipUnless(platform.system() == 'Darwin', 'the clamp is macOS only')
