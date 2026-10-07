@@ -42,8 +42,8 @@ SWIFTC = shutil.which('swiftc')
 ARM_MAC = platform.system() == 'Darwin' and platform.machine() == 'arm64'
 HOP_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
 
-SPACES = [{'index': i, 'display': 1, 'is-visible': i == 2, 'has-focus': i == 2} for i in range(1, 10)] + \
-         [{'index': 10, 'display': 2, 'is-visible': True, 'has-focus': False}]
+SPACES = [{'index': i, 'id': 100 + i, 'display': 1, 'is-visible': i == 2, 'has-focus': i == 2} for i in range(1, 10)] + \
+         [{'index': 10, 'id': 110, 'display': 2, 'is-visible': True, 'has-focus': False}]
 DISPLAYS = [{'id': 1, 'index': 1}, {'id': 43, 'index': 2}]
 TERMINAL = {'pid': 100, 'name': 'Ghostty', 'bundle': 'com.mitchellh.ghostty'}
 LAUNCHED = {'pid': 500, 'name': 'Probe', 'bundle': 'net.waldin.probe'}
@@ -65,6 +65,9 @@ import json, signal, subprocess, sys
 config = json.load(open(%(config)r))
 if sys.argv[1:] == ['--screens']:
     print(json.dumps({'Built-in Retina Display': 1, 'CanvasTest': 43}))
+    sys.exit(0)
+if sys.argv[1:2] == ['--window-look']:
+    print(json.dumps(config.get('window_looks', {})))
     sys.exit(0)
 json.dump(sys.argv, open(%(argv_out)r, 'w'))
 if config.get('spawn') and '--' in sys.argv:
@@ -722,15 +725,47 @@ class GuiLaunch(unittest.TestCase):
                               {'id': 9007, 'pid': 500, 'app': 'Probe', 'title': 'root', 'space': 3}])
         exempt = [{'event': 'window-exempt', 'window': 9006, 'reason': '2x2 px or less', 'final': True, 'bounds': [0, 981, 1, 1]},
                   {'event': 'window-exempt', 'window': 9007, 'reason': 'ordered out', 'final': False, 'bounds': [0, 482, 500, 500]}]
-        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(exemptWindows=exempt))
+        measured = {'9006': {'exists': True, 'pid': 500, 'bounds': [0, 981, 1, 1], 'spaceIds': [104]}}
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(exemptWindows=exempt),
+                                     window_looks=measured)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         check = self.check_event(result)
         self.assertEqual(check['problems'], ['window 9007 of Probe (pid 500, "root") is on Space 3'])
         self.assertEqual(check['exemptWindows'], exempt)
         self.machine(windows=[{'id': 9006, 'pid': 500, 'app': 'Probe', 'title': '', 'space': 4}])
-        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(exemptWindows=exempt))
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(exemptWindows=exempt),
+                                     window_looks=measured)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('1 window(s) of the tree, none on Spaces 1-4 but 1 exempt (ordered out, or 2x2 px or less)', result.stderr)
+
+    def test_a_historical_final_exemption_is_revalidated_against_the_fresh_check_window(self):
+        # Review 1 STANDARDS: after its final exempt sample a helper grows/orders in before the wrapper's fresh list.
+        wid = 9010
+        exempt = [{'event': 'window-exempt', 'window': wid, 'reason': '2x2 px or less', 'final': True, 'bounds': [0, 0, 1, 1]}]
+        for at, look in ((4, {'exists': True, 'pid': 500, 'bounds': [0, 0, 800, 600], 'spaceIds': [104]}),
+                         (7, {'exists': True, 'pid': 500, 'bounds': [0, 0, 800, 600], 'spaceIds': [107, 104]}),
+                         (4, {'exists': True, 'pid': 500, 'bounds': [0, 0, 1, 1], 'spaceIds': None}),
+                         (4, {'exists': True, 'pid': 500, 'bounds': None, 'spaceIds': []}),
+                         (4, None)):
+            with self.subTest(yabai_space=at, look=look):
+                self.machine(windows=[{'id': wid, 'pid': 500, 'app': 'Probe', 'title': 'grown', 'space': at}])
+                result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(exemptWindows=exempt),
+                                             window_looks={str(wid): look})
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertTrue(any('window %d ' % wid in p for p in self.check_event(result)['problems']), result.stdout)
+                self.assertEqual(self.check_event(result)['exemptWindows'], exempt)
+
+    def test_a_readable_post_exit_ordered_out_sample_is_still_exempt_in_aqua_and_background(self):
+        wid = 9011
+        self.machine(windows=[{'id': wid, 'pid': 500, 'app': 'Probe', 'title': '', 'space': 4}])
+        exempt = [{'event': 'window-exempt', 'window': wid, 'reason': 'ordered out', 'final': True}]
+        for manager in ('Aqua', 'Background'):
+            with self.subTest(manager=manager):
+                result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), manager=manager,
+                                             summary=summary(exemptWindows=exempt),
+                                             window_looks={str(wid): {'exists': True, 'pid': 500, 'bounds': [0, 0, 500, 500], 'spaceIds': []}})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.check_event(result)['problems'], [])
 
     def test_the_check_fails_when_tims_display_shows_another_space_unless_he_switched_himself(self):
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), shows_after=6)
@@ -2750,6 +2785,18 @@ class Guard(unittest.TestCase):
         _, result = self.end_rig(process, lines, root)
         self.assertTrue(any(p.startswith('window %d ' % wid) and 'window-shown' in p for p in result['problems']),
                         result['problems'])
+
+    def test_the_rigs_read_only_window_look_uses_fresh_native_samples_without_starting_a_guard(self):
+        argv, root = self.rig_argv(onscreen=True, skylight={89330: {'spaces': [107, 102], 'display': 'D1'},
+                                                         89331: {'spaces': [], 'display': None}})
+        put(root / 'onscreen.json', json.dumps([[89330, 500, 800, 600, False], [89331, 500, None, None, False]]))
+        done = subprocess.run(argv + ['--window-look', '89330,89331,89332'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout),
+                         {'89330': {'exists': True, 'pid': 500, 'bounds': [0, 0, 800, 600], 'spaceIds': [107, 102]},
+                          '89331': {'exists': True, 'pid': 500, 'bounds': None, 'spaceIds': []},
+                          '89332': {'exists': False, 'pid': None, 'bounds': None, 'spaceIds': None}})
+        self.assertFalse((root / 'summary.json').exists())
 
 
 if __name__ == '__main__':

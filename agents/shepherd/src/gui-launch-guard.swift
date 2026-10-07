@@ -119,6 +119,9 @@
 //     from its first sighting, before any yabai query finishes: one that orders in or grows past 2×2 px is judged from
 //     the first sample that finds it counting (parked, window-counted; its exposure starts there); one gone is dropped. A window that counted
 //     before it went exempt is still judged on that stretch (window-unknown and the never-placed rule).
+//     A final exemption is not permanent: after this guard exits, the wrapper's fresh window list is checked against
+//     fresh WindowServer/SkyLight samples (--window-look, read-only, no activation or AppKit loop). A grown/ordered-in
+//     window is judged by all its current memberships; any unreadable exemption proof fails the check.
 //     --allow-caller-placement, for a caller that moves the tree's windows itself afterwards, changes only the
 //     window-off-target verdict: a window off --space is still moved and recorded, but no problem when it is on a
 //     Space and off Tim's screen (his Spaces 1-4, and the Space his display shows or should show, if not --space); one
@@ -160,6 +163,8 @@
 //            [--adopt-timeout S] [--allow-caller-placement] [--attach-exe E --attach-argv N]
 //            [(--exec | --open) -- <argv to spawn>]
 //        gui-launch-guard --screens   screen name -> CGDirectDisplayID (yabai's display "id"), as JSON
+//        gui-launch-guard --window-look ID[,ID...]   read-only WindowServer/SkyLight samples for the wrapper's check
+//                                     (--rig --onscreen PATH --skylight-windows PATH uses the test stand-ins)
 //        gui-launch-guard --decide    tree, restore and Space decisions for synthetic processes on stdin (tests)
 //        gui-launch-guard --resolve [--token T] [--attach-exe E --attach-argv N]
 //                                     tree decisions for live processes named on stdin (tests)
@@ -2163,6 +2168,7 @@ var allowCallerPlacement = false
 var displaysPath: String?
 var onscreenPath: String?  // --onscreen (rig): the file standing in for WindowServer's windows (rigServerWindows)
 var skylightWindowsPath: String?  // --skylight-windows (rig): the file standing in for SkyLight's read of windows
+var windowLookIds: String?
 var parentWatch: pid_t?
 var attachExe: String?, attachNeedle: String?, givenToken: String?
 var launchArgv: [String] = []
@@ -2189,8 +2195,17 @@ while !argv.isEmpty {
     case "--displays": displaysPath = value
     case "--onscreen": onscreenPath = value
     case "--skylight-windows": skylightWindowsPath = value
+    case "--window-look": windowLookIds = value
     default: fail("unknown flag \(flag)")
     }
+}
+if let value = windowLookIds {
+    let parts = value.split(separator: ",", omittingEmptySubsequences: false)
+    let ids = parts.compactMap { Int($0) }
+    guard !ids.isEmpty, ids.count == parts.count, ids.allSatisfy({ $0 > 0 }), mode == nil, launchArgv.isEmpty,
+          !resolving, !helperTest, attachExe == nil, attachNeedle == nil,
+          rigTest || (onscreenPath == nil && skylightWindowsPath == nil) else { fail("usage: --window-look ID[,ID...]") }
+    readWindowLooks(ids)
 }
 if helperTest { helpersMode(yabai: yabaiPath) }
 if (attachExe == nil) != (attachNeedle == nil) { fail("--attach-exe and --attach-argv go together") }
@@ -2472,6 +2487,22 @@ struct WindowLook {
         }
         return record
     }
+}
+
+/// The wrapper's post-exit exemption check needs fresh measured proof, not the earlier final exemption. No AppKit
+/// loop, activation or yabai command: raw WindowServer presence/owner/bounds and every SkyLight membership. The rig
+/// uses the same WindowLook adapter. No SpaceWatch is initialized here, so these are raw SkyLight IDs.
+func readWindowLooks(_ ids: [Int]) -> Never {
+    var rows: [String: Any] = [:]
+    for id in ids {
+        let look = WindowLook(id)
+        let w = look.server?.window
+        let bounds: Any = w?.bounds.map { [$0.origin.x, $0.origin.y, $0.width, $0.height].map { Double($0) } } ?? NSNull()
+        rows[String(id)] = ["exists": look.server.map { $0.exists as Any } ?? NSNull(), "pid": w?.pid.map { Int($0) } ?? NSNull(),
+                            "bounds": bounds, "spaceIds": look.place.map { $0.spaces.map { NSNumber(value: $0) } } ?? NSNull()]
+    }
+    writeLine(rows)
+    exit(0)
 }
 
 /// GR2: a tree window's first sighting by Accessibility: when (uptime), SkyLight's place then (nil: unreadable), why

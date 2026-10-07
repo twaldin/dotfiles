@@ -125,9 +125,12 @@ and/or guards one that something else starts, then checks that nothing took it.
   displays stops polling, and in one turn of its main queue takes its last read, is sealed and has the summary's
   records taken (a change still waiting for its notification then fails the check, however young; a Space
   notification after the seal is a problem, never dropped unrecorded).
-- Check: no tree window on Spaces 1-4 or on the Space his display shows (unless it is the target; but a window the
-  guard's final sweep found exempt, which the check lists as exemptWindows), none the guard
-  found back on his screen, and no tree window off the target after the guard's move (but as
+- Check: no tree window on Spaces 1-4 or on the Space his display shows (unless it is the target). Final exemption
+  records (exemptWindows) are historical only: after the guard exits, the wrapper re-reads each such window in its
+  fresh list via the guard's read-only --window-look (WindowServer presence, owner and bounds; all SkyLight memberships,
+  in Aqua through the same root step when needed). Still tiny/ordered-out, with every property readable: exempt;
+  grown or ordered in: judged by its current memberships; any unreadable proof fails the check.
+  None the guard found back on his screen, and no tree window off the target after the guard's move (but as
   --allow-caller-placement excuses); Tim's frontmost app unchanged (the app he had at launch, or the one
   he switched to himself during the guard); his display still showing its Space (or the one he switched to
   himself); no Space the tree showed his display in a theft window, each one a breach even when the guard brought
@@ -403,14 +406,65 @@ def revert_latencies(summary):
 
 
 def final_exempt(summary):
-    """The tree windows the guard's final sweep found exempt (bench's ruling, GR1 addendum 4 note 3: ordered out, or
-    2x2 px or less, read from WindowServer and SkyLight; no window of Tim's screen), by id, with why."""
+    """Historical final exemption records, by id and reason: candidates for a fresh read, never check authority."""
     return {e.get('window'): e.get('reason') for e in summary.get('exemptWindows') or [] if e.get('final')}
 
 
-def problems(summary, windows, focus_before, focus_after, shown_before, shown_after, target):
+def check_exemptions(summary, windows, guard, env, spaces, shown, target):
+    """Re-measure historical final exemptions through the same guard's read-only WindowLook adapter in Aqua.
+    A grown/ordered-in window is judged by its current memberships; incomplete proof fails closed."""
+    historical = final_exempt(summary)
+    candidates = [w for w in windows if w.get('id') in historical]
+    if not candidates:
+        return {}, []
+    argv = [guard['path'], '--window-look', ','.join(str(w['id']) for w in candidates)]
+    if env is not None:
+        argv, env = hop(argv)
+    try:
+        done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
+        looks = json.loads(done.stdout) if done.returncode == 0 else {}
+        if not isinstance(looks, dict):
+            looks = {}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        looks = {}
+    indexes = {s.get('id'): s['index'] for s in spaces
+               if s.get('id') is not None and isinstance(s.get('index'), int) and not isinstance(s['index'], bool) and s['index'] > 0}
+    checked, found = {}, []
+    for w in candidates:
+        wid = w['id']
+        look = looks.get(str(wid))
+        if not isinstance(look, dict):
+            look = {}
+        bounds, memberships = look.get('bounds'), look.get('spaceIds')
+        readable = (look.get('exists') is True and look.get('pid') == w.get('pid') and
+                    isinstance(bounds, list) and len(bounds) == 4 and
+                    all(isinstance(n, (int, float)) and not isinstance(n, bool) and math.isfinite(n) for n in bounds) and
+                    isinstance(memberships, list) and all(isinstance(s, int) and not isinstance(s, bool) and s > 0 for s in memberships))
+        checked[wid] = None
+        if not readable:
+            found.append('window %s of %s (pid %s) has no readable post-exit exemption proof: state, memberships or bounds unreadable'
+                         % (wid, w.get('app'), w.get('pid')))
+            continue
+        if bounds[2] <= 2 and bounds[3] <= 2:
+            checked[wid] = '2x2 px or less'
+        elif not memberships:
+            checked[wid] = 'ordered out'
+        elif any(s not in indexes for s in memberships):
+            found.append('window %s of %s (pid %s) has post-exit Space membership yabai cannot map: no exemption'
+                         % (wid, w.get('app'), w.get('pid')))
+        else:
+            tim = next((indexes[s] for s in memberships if indexes[s] in TIM_SPACES), None)
+            if tim is None and shown != target and any(indexes[s] == shown for s in memberships):
+                tim = shown
+            if tim is not None:
+                found.append('window %s of %s (pid %s, "%s") is on Space %s'
+                             % (wid, w.get('app'), w.get('pid'), w.get('title', ''), tim))
+    return checked, found
+
+
+def problems(summary, windows, focus_before, focus_after, shown_before, shown_after, target, checked, check_problems):
     """Why the launch took Tim's screen, or can't vouch that it didn't: tree windows on Spaces 1-4 or on the Space his
-    display shows (unless that is the target), but those the guard's final sweep found exempt (final_exempt), a changed
+    display shows (unless that is the target), but freshly revalidated exemptions, a changed
     frontmost app, his display showing another Space or moved off his Space by the tree (even if brought back), the
     active display moved (yabai's focused display, or AppKit's main screen: the two can disagree, so both count), the
     guard's fault or its problems (yabai timeouts, work unsettled or killed at its end, tree windows back on his screen
@@ -420,11 +474,11 @@ def problems(summary, windows, focus_before, focus_after, shown_before, shown_af
     if summary.get('fault'):
         found.append(summary['fault'])
     found.extend(summary.get('problems') or [])
+    found.extend(check_problems)
     if not summary.get('finalWindowList'):
         found.append('the guard recorded no final read of the tree\'s windows: they cannot be vouched for')
-    exempt = final_exempt(summary)
     for w in windows:
-        if w.get('pid') not in tree or w.get('id') in exempt:
+        if w.get('pid') not in tree or w.get('id') in checked:
             continue
         if w.get('space') in TIM_SPACES:
             found.append('window %s of %s (pid %s, "%s") is on Space %s'
@@ -517,7 +571,8 @@ def main():
     windows = [w for w in yabai('query', '--windows') if w.get('pid') in tree]
     spaces_after = yabai('query', '--spaces')
     focus_after, shown_after = focus(spaces_after), shown_space(spaces_after)
-    found = problems(summary, windows, focus_before, focus_after, shown_before, shown_after, space)
+    checked, check_problems = check_exemptions(summary, windows, guard, env, spaces_after, shown_after, space)
+    found = problems(summary, windows, focus_before, focus_after, shown_before, shown_after, space, checked, check_problems)
     attached = summary.get('attached') or []
     emit({'event': 'check', 'ok': not found, 'problems': found, 'space': space, 'guard': guard,
           'windows': [{k: w.get(k) for k in ('id', 'pid', 'app', 'title', 'space')} for w in windows],
@@ -537,7 +592,7 @@ def main():
     if found:
         die('FAILED: ' + '; '.join(found), 1)
     latencies = [r['latencyMs'] for r in summary.get('reverted') or []]
-    exempt = len([w for w in windows if w.get('id') in final_exempt(summary)])
+    exempt = sum(reason is not None for reason in checked.values())
     print('gui-launch: ok: %d window(s) of the tree, none on Spaces 1-4%s; %d process(es) adopted; %d activation(s) reverted%s; frontmost %s'
           % (len(windows), ' but %d exempt (ordered out, or 2x2 px or less)' % exempt if exempt else '', len(attached),
              len(latencies), ' (max %.1f ms)' % max(latencies) if latencies else '', name(summary.get('frontAtEnd'))), file=sys.stderr)
