@@ -2498,8 +2498,9 @@ func readWindowLooks(_ ids: [Int]) -> Never {
         let look = WindowLook(id)
         let w = look.server?.window
         let bounds: Any = w?.bounds.map { [$0.origin.x, $0.origin.y, $0.width, $0.height].map { Double($0) } } ?? NSNull()
+        let spaceIds: Any = look.place.map { $0.spaces.map { NSNumber(value: $0) } } ?? NSNull()
         rows[String(id)] = ["exists": look.server.map { $0.exists as Any } ?? NSNull(), "pid": w?.pid.map { Int($0) } ?? NSNull(),
-                            "bounds": bounds, "spaceIds": look.place.map { $0.spaces.map { NSNumber(value: $0) } } ?? NSNull()]
+                            "bounds": bounds, "spaceIds": spaceIds]
     }
     writeLine(rows)
     exit(0)
