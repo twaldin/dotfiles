@@ -25,6 +25,7 @@ HARDWARE_MARKER = HARDWARE_DIRECTORY / "SOURCE_SHA256"
 SCRIPT_DIRECTORY = pathlib.Path(__file__).resolve().parent
 SWIFT_SOURCE = SCRIPT_DIRECTORY / "hardware-metrics.swift"
 BRIDGE_SOURCE = SCRIPT_DIRECTORY / "hardware-metrics-bridge.h"
+EXECUTION_DIRECTORY_NAME = "sketchybar-exec"
 ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": os.path.expanduser("~"),
        "LANG": "C", "LC_ALL": "C"}
 MAX_OUTPUT = 131072
@@ -121,29 +122,109 @@ def _hash(path):
             os.close(descriptor)
 
 
-def _approved_stats_copy():
+def _verified_copy(path, expected_hash):
+    # Callers exec the path right after this returns True, so a same-uid process
+    # could still swap it between this check and exec. The per-run mkstemp
+    # copies this cache replaced had the same window.
+    uid = os.getuid()
+    if not _safe_path(path, "file", {0o500}, {uid}, {1}):
+        return False
+    descriptor = -1
+    digest = hashlib.sha256()
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0))
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != uid
+                or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o500):
+            return False
+        while True:
+            block = os.read(descriptor, 65536)
+            if not block:
+                break
+            digest.update(block)
+        current = path.lstat()
+    except OSError:
+        return False
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return ((opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
+            and digest.hexdigest() == expected_hash)
+
+
+def _remove_stale_copies(directory, name, current_hash):
+    # Removes only <other sha256>/<name> and then that slot if it is empty.
+    flags = (os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    try:
+        directory_descriptor = os.open(directory, flags)
+    except OSError:
+        return
+    try:
+        for entry in os.listdir(directory_descriptor):
+            if entry == current_hash or not re.fullmatch(r"[0-9a-f]{64}", entry):
+                continue
+            slot_descriptor = -1
+            try:
+                slot_descriptor = os.open(entry, flags, dir_fd=directory_descriptor)
+                os.unlink(name, dir_fd=slot_descriptor)
+                os.rmdir(entry, dir_fd=directory_descriptor)
+            except OSError:
+                pass
+            finally:
+                if slot_descriptor >= 0:
+                    os.close(slot_descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(directory_descriptor)
+
+
+def _execution_copy(source, name, owners, expected_hash):
+    # Gatekeeper fully assesses every new executable file, so source is run only
+    # from one verified copy per hash at $TMPDIR/sketchybar-exec/<sha256>/<name>.
+    if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        return None
     runtime_base = os.environ.get("TMPDIR", "")
     if not os.path.isabs(runtime_base):
         return None
     runtime = pathlib.Path(os.path.realpath(runtime_base))
-    if not _safe_path(runtime, "directory", {0o700}, {os.getuid()}):
+    uid = os.getuid()
+    if not _safe_path(runtime, "directory", {0o700}, {uid}):
         return None
-    destination = None
+    directory = runtime / EXECUTION_DIRECTORY_NAME
+    slot = directory / expected_hash
+    for path in (directory, slot):
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        except OSError:
+            return None
+        if not _safe_path(path, "directory", {0o700}, {uid}):
+            return None
+    execution = slot / name
+    temporary = None
     output_descriptor = -1
     source_descriptor = -1
     try:
-        output_descriptor, raw = tempfile.mkstemp(prefix=".stats-smc-exec.", dir=runtime)
-        destination = pathlib.Path(raw)
-        os.fchmod(output_descriptor, 0o500)
+        # The source is checked on every call, cache hit or not.
         source_descriptor = os.open(
-            STATS_SMC, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            source, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NONBLOCK", 0))
         opened = os.fstat(source_descriptor)
-        current = STATS_SMC.lstat()
-        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid not in {0, os.getuid()}
+        current = source.lstat()
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid not in owners
                 or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o755
                 or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
-            raise OSError("Stats SMC source is unsafe")
+            return None
+        if _verified_copy(execution, expected_hash):
+            return execution
+        output_descriptor, raw = tempfile.mkstemp(prefix="." + name + ".", dir=slot)
+        temporary = pathlib.Path(raw)
+        os.fchmod(output_descriptor, 0o500)
         digest = hashlib.sha256()
         while True:
             block = os.read(source_descriptor, 65536)
@@ -154,9 +235,12 @@ def _approved_stats_copy():
             while offset < len(block):
                 offset += os.write(output_descriptor, block[offset:])
         os.fsync(output_descriptor)
-        if digest.hexdigest() != STATS_SMC_SHA256:
-            raise OSError("Stats SMC checksum changed")
-        return destination
+        os.close(output_descriptor)
+        output_descriptor = -1
+        if digest.hexdigest() != expected_hash or not _verified_copy(temporary, expected_hash):
+            return None
+        os.replace(temporary, execution)
+        temporary = None
     except OSError:
         return None
     finally:
@@ -164,11 +248,23 @@ def _approved_stats_copy():
             os.close(source_descriptor)
         if output_descriptor >= 0:
             os.close(output_descriptor)
-        if destination is not None and _hash(destination) != STATS_SMC_SHA256:
+        if temporary is not None:
             try:
-                destination.unlink()
+                temporary.unlink()
             except OSError:
                 pass
+    _remove_stale_copies(directory, name, expected_hash)
+    return execution if _verified_copy(execution, expected_hash) else None
+
+
+def _approved_stats_copy():
+    return _execution_copy(STATS_SMC, "smc", {0, os.getuid()}, STATS_SMC_SHA256)
+
+
+def _run_verified(execution, expected_hash, arguments, timeout):
+    if not _verified_copy(execution, expected_hash):
+        return None
+    return _run([str(execution), *arguments], timeout)
 
 
 def _stats_trusted():
@@ -262,16 +358,10 @@ def _marker_values():
         execution = _native_execution_copy(binary_hash)
         if execution is None:
             return None
-        try:
-            architecture = subprocess.run(
-                ["/usr/bin/lipo", "-archs", str(execution)],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=5, check=False)
-        finally:
-            try:
-                execution.unlink()
-            except OSError:
-                pass
+        architecture = subprocess.run(
+            ["/usr/bin/lipo", "-archs", str(execution)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
     finally:
@@ -287,66 +377,16 @@ def _marker_values():
 
 
 def _native_execution_copy(expected_hash):
-    runtime_base = os.environ.get("TMPDIR", "")
-    if not os.path.isabs(runtime_base):
-        return None
-    runtime_base = pathlib.Path(os.path.realpath(runtime_base))
-    if not _safe_path(runtime_base, "directory", {0o700}, {os.getuid()}):
-        return None
-    temporary = None
-    descriptor = -1
-    source_descriptor = -1
-    try:
-        descriptor, raw = tempfile.mkstemp(prefix=".hardware-exec.", dir=runtime_base)
-        temporary = pathlib.Path(raw)
-        os.fchmod(descriptor, 0o500)
-        source_descriptor = os.open(
-            HARDWARE_BINARY, os.O_RDONLY | os.O_NOFOLLOW
-            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
-        opened = os.fstat(source_descriptor)
-        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
-                or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o755):
-            raise OSError("hardware execution source is unsafe")
-        while True:
-            chunk = os.read(source_descriptor, 65536)
-            if not chunk:
-                break
-            offset = 0
-            while offset < len(chunk):
-                offset += os.write(descriptor, chunk[offset:])
-        os.fsync(descriptor)
-        os.close(source_descriptor)
-        source_descriptor = -1
-        os.close(descriptor)
-        descriptor = -1
-        return temporary if _hash(temporary) == expected_hash else None
-    except OSError:
-        return None
-    finally:
-        if source_descriptor >= 0:
-            os.close(source_descriptor)
-        if descriptor >= 0:
-            os.close(descriptor)
-        if temporary is not None and _hash(temporary) != expected_hash:
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
+    return _execution_copy(HARDWARE_BINARY, "hardware-metrics", {os.getuid()}, expected_hash)
 
 
 def _execute_native(arguments, expected_hash):
     execution = _native_execution_copy(expected_hash)
     if execution is None:
         return None
-    try:
-        if arguments == ["--self-test"]:
-            return "" if _run_silent([str(execution), "--self-test"], 4) else None
-        return _run([str(execution), *arguments], 4)
-    finally:
-        try:
-            execution.unlink()
-        except OSError:
-            pass
+    if arguments == ["--self-test"]:
+        return "" if _run_silent([str(execution), "--self-test"], 4) else None
+    return _run([str(execution), *arguments], 4)
 
 
 def _native_state():
@@ -399,7 +439,7 @@ def _platform():
 
 
 def _smc_values(execution, arguments):
-    output = _run([str(execution)] + arguments, 4)
+    output = _run_verified(execution, STATS_SMC_SHA256, arguments, 4)
     if output is None:
         return None
     values = {}
@@ -424,7 +464,7 @@ def _temperature_state(values, platform):
 
 
 def _fan_state(execution):
-    output = _run([str(execution), "fans"], 3)
+    output = _run_verified(execution, STATS_SMC_SHA256, ["fans"], 3)
     if output is None or len(output) > 16384:
         return None
     count_match = re.search(r"^Number of fans: ([0-9]+(?:\.0+)?)$", output, re.MULTILINE)
@@ -495,25 +535,17 @@ def _power_mode():
 def collect():
     candidate = _stats_trusted()
     stats_execution = candidate if isinstance(candidate, pathlib.Path) else None
-    try:
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            native_future = pool.submit(_native_state)
-            power_future = pool.submit(_power_mode)
-            temperatures_future = (pool.submit(_smc_values, stats_execution, ["list", "-t"])
-                                   if stats_execution is not None else None)
-            fans_future = (pool.submit(_fan_state, stats_execution)
-                           if stats_execution is not None else None)
-            native = native_future.result()
-            power_mode = power_future.result()
-            values = temperatures_future.result() if temperatures_future else None
-            fans = fans_future.result() if fans_future else None
-    finally:
-        if stats_execution is not None:
-            try:
-                stats_execution.unlink()
-            except OSError:
-                values = None
-                fans = None
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        native_future = pool.submit(_native_state)
+        power_future = pool.submit(_power_mode)
+        temperatures_future = (pool.submit(_smc_values, stats_execution, ["list", "-t"])
+                               if stats_execution is not None else None)
+        fans_future = (pool.submit(_fan_state, stats_execution)
+                       if stats_execution is not None else None)
+        native = native_future.result()
+        power_mode = power_future.result()
+        values = temperatures_future.result() if temperatures_future else None
+        fans = fans_future.result() if fans_future else None
     temperatures = _temperature_state(values, _platform()) if values is not None else {
         "cpu_temp_c": None, "cpu_sensor_count": 0, "gpu_temp_c": None, "gpu_sensor_count": 0}
     return {

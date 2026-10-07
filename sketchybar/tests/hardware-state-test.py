@@ -15,6 +15,11 @@ spec = importlib.util.spec_from_file_location("hardware_state", SOURCE)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
+# Execution copies go to a scratch TMPDIR, never the live provider's cache.
+scratch_runtime = tempfile.TemporaryDirectory(prefix="hardware-state-test.")
+os.environ["TMPDIR"] = os.path.realpath(scratch_runtime.name)
+exec_cache = pathlib.Path(os.environ["TMPDIR"]) / "sketchybar-exec"
+
 
 def require(value, message):
     if not value:
@@ -53,11 +58,18 @@ Target speed: 2600.0
 Mode: manual
 """
 original_run = module._run
+original_verified_copy = module._verified_copy
+module._verified_copy = lambda path, expected_hash: True
 module._run = lambda arguments, timeout: fan_output
 fans = module._fan_state(module.STATS_SMC)
 require(len(fans) == 2 and fans[0]["index"] == 1 and fans[1]["mode"] == "manual", "fan parser rejected valid state")
 module._run = lambda arguments, timeout: fan_output.replace("Target speed: 2501.0", "Target speed: 9000.0")
 require(module._fan_state(module.STATS_SMC) is None, "out-of-range fan target was accepted")
+module._verified_copy = original_verified_copy
+unverified_runs = []
+module._run = lambda arguments, timeout: unverified_runs.append(arguments) or fan_output
+require(module._fan_state(module.STATS_SMC) is None and module._smc_values(module.STATS_SMC, ["list", "-t"]) is None
+        and not unverified_runs, "Stats SMC ran from a path that is not a verified private copy")
 module._run = original_run
 
 # macOS 26 consolidated and legacy power-mode schemas are both strict.
@@ -105,6 +117,7 @@ native = {
 }
 original_marker_values = module._marker_values
 original_execute_native = module._execute_native
+original_run_silent = module._run_silent
 module._marker_values = lambda: {"binary_sha256": "0" * 64}
 module._run_silent = lambda arguments, timeout: True
 module._run = lambda arguments, timeout: json.dumps(native, allow_nan=True)
@@ -121,6 +134,7 @@ native["gpu"]["utilization_pct"] = 25.0
 native["raw_identifier"] = "forbidden"
 require(module._native_state() is None, "extra native key was accepted")
 module._run = original_run
+module._run_silent = original_run_silent
 
 # The real output is bounded, closed, and contains no raw SMC keys or platform identity.
 module._marker_values = original_marker_values
@@ -198,12 +212,85 @@ with tempfile.TemporaryDirectory(prefix="hardware-marker-test.") as raw:
     os.chmod(binary, 0o755)
     require(execution is not None and hashlib.sha256(execution.read_bytes()).hexdigest() == approved_hash,
             "hardware execution copy did not bind approved bytes across a path swap")
-    execution.unlink()
+    binary.write_bytes(correct_arch.read_bytes())
+    os.chmod(binary, 0o755)
+
+    # Consecutive runs exec one cached copy; a tampered copy is replaced, never run.
+    cached = exec_cache / approved_hash / "hardware-metrics"
+    executions = []
+
+    def recording_run_silent(arguments, timeout):
+        details = os.lstat(arguments[0])
+        executions.append((arguments[0], details.st_ino, stat.S_IMODE(details.st_mode),
+                           hashlib.sha256(pathlib.Path(arguments[0]).read_bytes()).hexdigest()))
+        return original_run_silent(arguments, timeout)
+
+    module._run_silent = recording_run_silent
+    for _ in range(2):
+        require(module._execute_native(["--self-test"], approved_hash) == "",
+                "cached hardware helper did not run")
+    require(len(executions) == 2 and executions[0] == executions[1]
+            and executions[0][0] == str(cached) and executions[0][2:] == (0o500, approved_hash),
+            "consecutive runs did not exec the same cached hardware copy")
+    sentinel = base / "tampered-copy-ran"
+    os.chmod(cached, 0o700)
+    cached.write_bytes(b"#!/bin/sh\n/usr/bin/touch '" + str(sentinel).encode() + b"'\n")
+    os.chmod(cached, 0o500)
+    tampered_inode = cached.lstat().st_ino
+    require(module._execute_native(["--self-test"], approved_hash) == "",
+            "tampered hardware copy was not replaced")
+    require(not sentinel.exists() and executions[-1][0] == str(cached)
+            and executions[-1][1] != tampered_inode and executions[-1][2:] == (0o500, approved_hash),
+            "tampered hardware copy was executed")
+    os.chmod(cached, 0o700)
+    loosened_inode = cached.lstat().st_ino
+    require(module._execute_native(["--self-test"], approved_hash) == ""
+            and executions[-1][1] != loosened_inode and executions[-1][2:] == (0o500, approved_hash),
+            "wrong-mode hardware copy was executed")
+    require(len(executions) == 4, "hardware helper ran an unexpected number of times")
+    module._run_silent = original_run_silent
+
+    # A new approved hash replaces the old copy; cleanup removes only that exact path.
+    foreign = exec_cache / "unrelated"
+    foreign.write_bytes(b"not a cached copy")
+    other_slot = exec_cache / ("f" * 64)
+    other_slot.mkdir(mode=0o700)
+    (other_slot / "smc").write_bytes(b"another cached binary")
+    binary.write_bytes(wrong_arch.read_bytes())
+    os.chmod(binary, 0o755)
+    updated_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
+    require(module._native_execution_copy(updated_hash) == exec_cache / updated_hash / "hardware-metrics"
+            and not (exec_cache / approved_hash).exists()
+            and foreign.exists() and (other_slot / "smc").exists(),
+            "stale hardware copy cleanup was not exact")
+
+    # An unsafe cache directory or slot is refused rather than written through.
+    os.chmod(exec_cache, 0o755)
+    require(module._native_execution_copy(updated_hash) is None,
+            "hardware copy used a non-private cache directory")
+    os.chmod(exec_cache, 0o700)
+    updated_slot = exec_cache / updated_hash
+    (updated_slot / "hardware-metrics").unlink()
+    updated_slot.rmdir()
+    elsewhere = base / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    updated_slot.symlink_to(elsewhere)
+    require(module._native_execution_copy(updated_hash) is None and not any(elsewhere.iterdir()),
+            "hardware copy followed a symlinked cache slot")
+    updated_slot.unlink()
+
+    # A warm cache still refuses an unsafe source, as the per-run copies did.
+    require(module._native_execution_copy(updated_hash) is not None, "hardware cache did not rewarm")
+    os.chmod(binary, 0o700)
+    require(module._native_execution_copy(updated_hash) is None,
+            "warm hardware cache ignored a wrong-mode source")
+    os.chmod(binary, 0o755)
     fifo = base / "hardware-fifo"
     os.mkfifo(fifo, 0o755)
     module.HARDWARE_BINARY = fifo
     started = time.monotonic()
-    require(module._native_execution_copy(approved_hash) is None,
+    require(module._native_execution_copy(updated_hash) is None
+            and module._native_execution_copy(hashlib.sha256(b"uncached").hexdigest()) is None,
             "hardware execution copy accepted a FIFO")
     require(time.monotonic() - started < 1,
             "hardware execution copy did not reject a FIFO without blocking")
@@ -242,11 +329,32 @@ with tempfile.TemporaryDirectory() as temporary:
     module.STATS_SMC = stats_source
     module.STATS_SMC_SHA256 = hashlib.sha256(stats_source.read_bytes()).hexdigest()
     execution = module._approved_stats_copy()
+    require(execution is not None, "approved Stats helper was not copied")
+    first_inode = execution.lstat().st_ino
+    require(module._approved_stats_copy() == execution and execution.lstat().st_ino == first_inode,
+            "consecutive runs did not reuse the cached Stats copy")
+    os.link(stats_source, pathlib.Path(temporary) / "second-link")
+    require(module._approved_stats_copy() is None, "warm Stats cache ignored a multiply linked source")
+    (pathlib.Path(temporary) / "second-link").unlink()
     os.replace(stats_replacement, stats_source)
-    require(execution is not None
-            and hashlib.sha256(execution.read_bytes()).hexdigest() == module.STATS_SMC_SHA256,
+    require(hashlib.sha256(execution.read_bytes()).hexdigest() == module.STATS_SMC_SHA256,
             "Stats execution copy did not bind approved bytes across a path replacement")
-    execution.unlink()
+    os.chmod(execution, 0o700)
+    execution.write_bytes(b"tampered Stats helper")
+    os.chmod(execution, 0o500)
+    tampered_inode = execution.lstat().st_ino
+    stats_runs = []
+    module._run = lambda arguments, timeout: stats_runs.append(arguments)
+    require(module._smc_values(execution, ["list", "-t"]) is None and module._fan_state(execution) is None
+            and not stats_runs, "tampered Stats copy was executed")
+    module._run = original_run
+    stats_source.write_bytes(b"approved Stats helper")
+    stats_source.chmod(0o755)
+    replaced = module._approved_stats_copy()
+    require(replaced == execution and replaced.lstat().st_ino != tampered_inode
+            and stat.S_IMODE(replaced.lstat().st_mode) == 0o500
+            and hashlib.sha256(replaced.read_bytes()).hexdigest() == module.STATS_SMC_SHA256,
+            "tampered Stats copy was not replaced")
     module.STATS_SMC = original_stats_smc
     module.STATS_SMC_SHA256 = original_stats_hash
 
@@ -281,4 +389,5 @@ module._stats_trusted = original_stats_trusted
 module._smc_values = original_smc_values
 module._fan_state = original_fan_state
 
+scratch_runtime.cleanup()
 print("Hardware state tests passed")
