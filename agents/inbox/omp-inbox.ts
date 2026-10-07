@@ -77,9 +77,11 @@ function card(messages) {
   };
 }
 
+// The whole envelope body, sender and reply route included, is escaped once: only the outer
+// `<irc>` tags are the extension's own.
 function envelope({ from, text }): string {
-  const said = `Message from \`${from}\`:\n\n${text}`.replace(HARNESS_TAG, "&lt;");
-  return `<irc>\n${said}\n\nIf a response is expected, reply via \`write\` (\`path: "agent://${from}"\`, \`content: "…"\`).\n</irc>`;
+  const said = `Message from \`${from}\`:\n\n${text}\n\nIf a response is expected, reply via \`write\` (\`path: "agent://${from}"\`, \`content: "…"\`).`;
+  return `<irc>\n${said.replace(HARNESS_TAG, "&lt;")}\n</irc>`;
 }
 
 // A card as omp draws its own incoming IRC messages (pi-tui `createIrcMessageCard`, which omp
@@ -184,10 +186,12 @@ export default function (pi) {
   let watcher: fs.FSWatcher | undefined;
   // The bound root session's context: whether omp streams, what it has queued, its UI.
   let session;
-  // Messages handed to omp and not recorded yet, by id (their file's name without `.json`): when
-  // they went, and whether as `nextTurn` context, which omp records only with its next prompt.
-  const handed = new Map<string, { at: number; later: boolean }>();
-  // Messages omp dropped unrecorded (`unrecorded`): they ride the next turn that starts.
+  // Messages handed to omp and not recorded yet, by id (their file's name without `.json`), with
+  // when they went.
+  const handed = new Map<string, number>();
+  // Messages that wait for the next turn that starts: past the wake bound, or dropped unrecorded
+  // (`unrecorded`). They stay out of omp's own next-turn queue, which agent-started turns skip
+  // and a cancelled prompt empties without recording.
   const nextStart = new Set<string>();
   let recordCheck;
 
@@ -236,26 +240,20 @@ export default function (pi) {
       recent.push(now);
       wakes.set(from, recent);
     }
-    send(messages, overBudget ? "later" : "now");
+    if (overBudget) {
+      for (const message of messages) nextStart.add(message.id);
+      return;
+    }
+    send(messages, "now");
   }
 
   // `now`: a steer while omp streams (it joins the turn at the next step, cutting a `wait` short),
-  // else a new turn (`triggerTurn`: an idle custom steer without it is only appended). `later`,
-  // past the wake bound: context for omp's next turn, never a wake (`nextTurn`). `aside`: joins
-  // the turn that just started without interrupting it.
-  function send(messages, how: "now" | "later" | "aside") {
-    const idle = session.isIdle();
-    pi.sendMessage(
-      card(messages),
-      how === "later" ? { deliverAs: "nextTurn" } : how === "aside" ? { deliverAs: "aside" } : { deliverAs: "steer", triggerTurn: true },
-    );
-    if (how === "later" && idle) {
-      // omp appends an idle `nextTurn` message to the session at once, with no message_end.
-      for (const message of messages) acked(message.id);
-      return;
-    }
+  // else a new turn (`triggerTurn`: an idle custom steer without it is only appended). `aside`:
+  // joins the turn that just started without interrupting it.
+  function send(messages, how: "now" | "aside") {
+    pi.sendMessage(card(messages), how === "aside" ? { deliverAs: "aside" } : { deliverAs: "steer", triggerTurn: true });
     const at = Date.now();
-    for (const message of messages) handed.set(message.id, { at, later: how === "later" });
+    for (const message of messages) handed.set(message.id, at);
     recordCheck ??= setTimeout(unrecorded, RECORD_MS);
   }
 
@@ -275,7 +273,7 @@ export default function (pi) {
     if (!session) return;
     if (session.isIdle() && !session.hasPendingMessages()) {
       const due = Date.now() - RECORD_MS;
-      const lost = [...handed].filter(([, sent]) => !sent.later && sent.at <= due).map(([id]) => id);
+      const lost = [...handed].filter(([, at]) => at <= due).map(([id]) => id);
       for (const id of lost) {
         handed.delete(id);
         nextStart.add(id);
@@ -285,7 +283,7 @@ export default function (pi) {
         session.ui.notify(`omp-inbox: omp started no turn with ${what}; ${lost.length === 1 ? "it rides" : "they ride"} the next turn that starts`, "warning");
       }
     }
-    if ([...handed.values()].some((sent) => !sent.later)) recordCheck = setTimeout(unrecorded, RECORD_MS);
+    if (handed.size > 0) recordCheck = setTimeout(unrecorded, RECORD_MS);
   }
 
   function unbind() {
@@ -333,7 +331,7 @@ export default function (pi) {
     if (handed.size === 0 || message?.role !== "custom" || message.customType !== EASL_MESSAGE) return;
     for (const id of message.details?.ids ?? []) if (handed.has(id)) acked(id);
   });
-  // Messages omp dropped ride the turn that starts, without interrupting it.
+  // Messages waiting for a turn ride the one that starts, without interrupting it.
   pi.on("agent_start", () => {
     if (nextStart.size === 0 || !dir) return;
     const riding = waiting().filter((message) => nextStart.has(message.id));
