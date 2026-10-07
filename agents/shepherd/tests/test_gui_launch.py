@@ -194,8 +194,9 @@ int main(int argc, char **argv) {
 '''
 # The rig's yabai, reading the files in %(dir)s: `query --spaces` answers spaces.json after spaces-delay seconds
 # (yabai answering late); `query --windows` answers windows.json, `--window N` window-N.json (none: exit 1), and
-# never answers while windows-mode says hang (with hang-once, the next whole list only); `window N --space S` sets
-# the Space in window-N.json while the file moves says apply, else exits 1, as anything else (a focus) does.
+# never answers while windows-mode says hang (with hang-once, the next whole list only; a `--window N` query that hangs
+# first creates window-N-asked); `window N --space S` sets the Space in window-N.json while the file moves says apply,
+# else exits 1, as anything else (a focus) does.
 RIG_YABAI = '''#!/bin/sh
 [ "$2" = warm ] && exit 0
 dir='%(dir)s'
@@ -203,7 +204,7 @@ case "$2 $3" in
   "query --spaces") sleep "$(cat "$dir/spaces-delay")"; cat "$dir/spaces.json" ;;
   "query --windows")
     mode="$(cat "$dir/windows-mode")"
-    if [ "$mode" = hang ]; then exec sleep 30; fi
+    if [ "$mode" = hang ]; then [ -n "$5" ] && : > "$dir/window-$5-asked"; exec sleep 30; fi
     if [ "$mode" = hang-once ] && [ -z "$4" ]; then echo answer > "$dir/windows-mode"; exec sleep 30; fi
     if [ -n "$5" ]; then cat "$dir/window-$5.json" 2>/dev/null || exit 1
     elif [ "$4" = --window ]; then exit 1
@@ -2215,6 +2216,12 @@ class Guard(unittest.TestCase):
         self.assertEqual(seen[-1]['pid'], tim)
         self.assertLess(took, 0.5, "Tim's app was activated only after the owner query")
         self.assertNotIn('restore-call', [e.get('event') for e in seen])
+        # The revert asks who owns window 42 (and that query hangs) before macOS reports his app frontmost again: live,
+        # the activation lands some ms after the call; here the rig could report it before the revert has asked.
+        deadline = time.monotonic() + 5
+        while not (root / 'window-42-asked').exists():
+            self.assertLess(time.monotonic(), deadline, 'the revert never asked who owns window 42')
+            time.sleep(0.01)
         self.send(process, 'activate %d' % tim)  # macOS reports his app frontmost again
         seen = lines.until(lambda row: row.get('event') == 'owner-query-timeout', 10)
         self.assertEqual([(e['method'], e['latencyMs'] < 500) for e in seen if e.get('event') == 'reverted'], [('immediate', True)])
