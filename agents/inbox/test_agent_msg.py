@@ -150,18 +150,9 @@ class AgentMsg(unittest.TestCase):
         [[_, typed]] = self.typed_prompts()
         self.assertIn("agent-msg meta@dotfiles '<text>'", typed)
 
-    def test_herdr_only_never_delivers_through_easl_twice(self):
-        # omp-inbox in a tile runs after easl's extension handled the same write.
-        result = self.send(self.omp_agent(), tiles=[self.tile()], sender=('--herdr-only',))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.told(), [])
-        self.assertEqual(len(self.typed_prompts()), 1)
-
-    def test_herdr_only_still_resolves_this_hosts_address_easl_could_not_read(self):
-        # Briefs say `write agent://meta@twaldin-home`; easl's extension reads `@twaldin-home` as a board.
-        local = socket.gethostname().split('.')[0]
-        result = self.send(self.omp_agent(), target=f'target@{local}', tiles=[self.tile()],
-                           sender=('--herdr-only', '--from', 'meta@home'))
+    def test_call_from_an_older_tile_inbox_still_reaches_the_tile(self):
+        # Tiles started before 2026-10-07 strip `@twaldin-home` and pass --herdr-only.
+        result = self.send(self.omp_agent(), tiles=[self.tile()], sender=('--herdr-only', '--from', 'meta@home'))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.told(), [['target@dotfiles', 'status?', '--from', 'meta@home']])
         self.assertEqual(self.typed_prompts(), [])

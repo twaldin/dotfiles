@@ -146,8 +146,10 @@ def main():
     parser.add_argument('agent')
     parser.add_argument('text', nargs='+')
     parser.add_argument('--from', dest='sender')
-    # omp-inbox in an easl tile passes this: easl's own extension already tried easl for the same write.
-    parser.add_argument('--herdr-only', action='store_true')
+    # Ignored. omp-inbox loaded in tiles before 2026-10-07 passes it; drop it once those tiles restart.
+    # omp chains tool_result handlers, so whichever of easl's extension and omp-inbox delivers first
+    # clears the error and the other never runs: trying easl here can't deliver twice.
+    parser.add_argument('--herdr-only', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     text = ' '.join(args.text).strip()
     if not text:
@@ -155,10 +157,8 @@ def main():
     name, _, host = args.agent.partition('@')
     local = socket.gethostname().split('.')[0]
     cli, agents = easl_agents()
-    # `name@<this host>` is how herdr agents address everyone here, tiles included. easl's own
-    # extension can't read that form (it takes `@<host>` for a board), so --herdr-only still tries it.
-    skip_easl = args.herdr_only and host != local
-    address = None if skip_easl else easl_address(agents, name, '' if host == local else host)
+    # `name@<this host>` is how herdr agents address everyone here, tiles included.
+    address = easl_address(agents, name, '' if host == local else host)
     if address:
         # From a tile, easl names the calling tile itself, with a reply address.
         from_tile = args.sender is None and tile_address(agents)
