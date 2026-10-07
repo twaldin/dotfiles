@@ -1,0 +1,442 @@
+#!/usr/bin/python3
+"""The heavy-work queue: heavy steps on a host take turns, a fixed number at a time, first come first served.
+
+  machine-ok-queue run [--memory] [--gpu] [--gate PATH | --no-gate] [--agent NAME] -- <command> [args...]
+  machine-ok-queue status
+
+`run` takes a ticket and waits, strictly first come first served, until all four hold:
+  1. its ticket is the oldest live one still waiting (a ticket whose process died is dropped);
+  2. a slot is free: slots per host in ~/.config/machine-shepherd/slots.json, e.g. {"twaldin-home": 2};
+     built in: twaldin-home 2, twaldin-work 1, deckbox 3, any other host 1;
+  3. the gate passes: `machine-ok [--memory] [--gpu]` exits 0. That is the machine-ok next to this file as
+     invoked (~/.local/bin/machine-ok for the installed link), else the one on PATH; machine-ok itself is
+     unchanged and knows nothing of the queue. --gate PATH names another gate; --no-gate (Linux, where
+     there is no machine-ok: offload-run on deckbox) admits on a free slot alone;
+  4. no quiet-window booking or hold (quiet-windows.json, quiet-holds.json) runs or starts within 10 min,
+     30 min for a full-quiet one, unless the caller owns it.
+Then it runs the command holding the slot and exits with its status (128+N when signal N killed it).
+SIGTERM, SIGINT and SIGHUP are forwarded to the command; SIGINT is not when it came from this terminal,
+which delivered it to the command already. Only the oldest waiter samples the gate: every 30 s while the
+machine is busy. A job admitted before a hold keeps running; quiet-window's STOP NOW still covers it.
+`status` prints who runs and who waits, since when, and what pauses the queue.
+
+Files, in ~/.local/state/machine-ok/: queue/<n>.json, one ticket per waiter or runner (pid, start, cwd,
+agent, command), flock'ed by its process for as long as it lives, so a ticket nobody holds is dead;
+queue/slot-<n>.lock, flock'ed by the process running in that slot, so a crash or kill frees the slot by
+itself; queue/counter and queue/queue.lock, the ticket counter and the lock every ticket read and write
+takes; queue.jsonl, one line per admit and release (wait s, run s, gate sample), per cancel, and per
+ticket waiting more than 30 min (naming the slot holders). macOS has no flock(1), hence Python.
+"""
+import datetime as dt
+import fcntl
+import json
+import os
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+STATE = os.path.expanduser("~/.local/state/machine-ok")
+QUEUE = os.path.join(STATE, "queue")
+LOG = os.path.join(STATE, "queue.jsonl")
+CONF = os.path.expanduser("~/.config/machine-shepherd")
+SLOTS = os.path.join(CONF, "slots.json")
+WINDOWS = (os.path.join(CONF, "quiet-windows.json"), os.path.join(CONF, "quiet-holds.json"))
+DEFAULT_SLOTS = {"twaldin-home": 2, "twaldin-work": 1, "deckbox": 3}
+HOLD_LEAD_MIN, FULL_HOLD_LEAD_MIN = 10, 30
+# Seconds: a ticket waiting longer is logged once; a waiter's look at the queue; the head's gate re-sample
+# while the machine is busy. The environment overrides them for tests.
+LONG_WAIT_S = float(os.environ.get("MACHINE_OK_QUEUE_LONG_WAIT", 30 * 60))
+POLL_S = float(os.environ.get("MACHINE_OK_QUEUE_POLL", "2"))
+GATE_RETRY_S = float(os.environ.get("MACHINE_OK_QUEUE_GATE_RETRY", "30"))
+FORWARDED = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+USAGE = ("usage: machine-ok-queue run [--memory] [--gpu] [--gate PATH | --no-gate] [--agent NAME] -- <command> [args...]\n"
+         "       machine-ok-queue status")
+
+
+class Stopped(Exception):
+    """A signal ended the wait before admission."""
+
+    def __init__(self, sig):
+        super().__init__(sig)
+        self.sig = sig
+
+
+def host():
+    return os.environ.get("SHEPHERD_HOST") or socket.gethostname().split(".")[0]
+
+
+def slot_count():
+    try:
+        with open(SLOTS) as f:
+            n = json.load(f).get(host())
+        if isinstance(n, int) and n > 0:
+            return n
+    except (OSError, ValueError, AttributeError):
+        pass
+    return DEFAULT_SLOTS.get(host(), 1)
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def stamp(t=None):
+    return (t or now()).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def since(text):
+    return (now() - dt.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)).total_seconds()
+
+
+def span(seconds):
+    s = int(seconds)
+    return f"{s // 3600}h{s // 60 % 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
+
+
+def log(event, **fields):
+    os.makedirs(STATE, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(json.dumps({"ts": stamp(), "event": event, "host": host(), **fields}) + "\n")
+
+
+def say(text):
+    print(f"machine-ok-queue: {text}", file=sys.stderr, flush=True)
+
+
+def identity():
+    """(agent, pane): the easl tile, else the herdr agent named for this pane (its pane id when unnamed)."""
+    pane = os.environ.get("HERDR_PANE_ID")
+    if os.environ.get("EASL_TILE_ID"):
+        return os.environ["EASL_TILE_ID"], pane
+    if not pane:
+        return None, None
+    try:
+        out = subprocess.run(["herdr", "agent", "list"], capture_output=True, text=True, timeout=5).stdout
+        names = {a["pane_id"]: a.get("name") for a in json.loads(out)["result"]["agents"]}
+        return names.get(pane) or pane, pane
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return pane, pane
+
+
+class Lock:
+    """The queue lock: every ticket read and write happens under it, so nobody reads a half-written ticket."""
+
+    def __enter__(self):
+        os.makedirs(QUEUE, exist_ok=True)
+        self.fd = os.open(os.path.join(QUEUE, "queue.lock"), os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self.fd)
+
+
+def tickets():
+    """Live tickets, oldest first, as (number, row); dead ones are removed. Call under Lock."""
+    rows = []
+    for name in os.listdir(QUEUE):
+        stem, ext = os.path.splitext(name)
+        if ext != ".json" or not stem.isdigit():
+            continue
+        path = os.path.join(QUEUE, name)
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except FileNotFoundError:
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                with os.fdopen(os.dup(fd)) as f:
+                    try:
+                        rows.append((int(stem), json.load(f)))
+                    except ValueError:
+                        rows.append((int(stem), {}))
+                continue
+            os.unlink(path)  # nobody holds it: its process is gone
+        finally:
+            os.close(fd)
+    return sorted(rows, key=lambda r: r[0])
+
+
+def held_slots(rows):
+    return {r.get("slot"): r for _, r in rows if r.get("state") == "running"}
+
+
+def hold_ahead(me):
+    """The first quiet-window booking or hold that runs now or starts within its lead, unless one of `me` owns it."""
+    t = now()
+    for path in WINDOWS:
+        try:
+            with open(path) as f:
+                rows = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for w in rows if isinstance(rows, list) else []:
+            try:
+                start = dt.datetime.strptime(w["start"].rstrip("Z"), "%Y-%m-%dT%H:%M").replace(tzinfo=dt.timezone.utc)
+                end = dt.datetime.strptime(w["end"].rstrip("Z"), "%Y-%m-%dT%H:%M").replace(tzinfo=dt.timezone.utc)
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+            lead = dt.timedelta(minutes=FULL_HOLD_LEAD_MIN if w.get("quiet") == "full" else HOLD_LEAD_MIN)
+            if start - lead <= t < end and w.get("owner") not in me:
+                return w
+    return None
+
+
+def hold_text(w):
+    level = "full quiet" if w.get("quiet") == "full" else "heavy"
+    return f"quiet-window hold {w.get('owner')} {w['start'][11:16]}-{w['end'][11:16]}Z ({level}): {w.get('label', '')}"
+
+
+def take_slot(n):
+    """An fd holding a free slot's flock, or None. The fd stays with this process: its death frees the slot."""
+    for i in range(1, n + 1):
+        fd = os.open(os.path.join(QUEUE, f"slot-{i}.lock"), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return i, fd
+        except BlockingIOError:
+            os.close(fd)
+    return None, None
+
+
+def gate(argv):
+    """(passed, sample): the gate's verdict and the sample line it printed."""
+    if argv is None:
+        return True, None
+    try:
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, "gate timed out"
+    if r.returncode > 1:
+        raise SystemExit(f"machine-ok-queue: the gate {shlex.join(argv)} failed (exit {r.returncode}): {r.stderr.strip()}")
+    return r.returncode == 0, r.stdout.strip()
+
+
+def from_terminal():
+    """True when this process group is its terminal's foreground group: a SIGINT from it reached the command too."""
+    try:
+        fd = os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
+    except OSError:
+        return False
+    try:
+        return os.tcgetpgrp(fd) == os.getpgrp()
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None):
+    """Queue, then run cmd holding a slot; returns its exit status (128+N for signal N).
+    forward(proc, sig) delivers a signal to the running command; the default sends it to the child."""
+    me_agent, pane = identity()
+    agent = agent or me_agent
+    me = {x for x in (agent, pane, os.environ.get("EASL_TILE_ID")) if x}
+    forward = forward or (lambda proc, sig: proc.send_signal(sig))
+    state = {"proc": None, "spawning": False, "pending": []}
+
+    def on_signal(sig, _frame):
+        if state["proc"] is not None:
+            if not (sig == signal.SIGINT and from_terminal()):
+                forward(state["proc"], sig)
+        elif state["spawning"]:
+            state["pending"].append(sig)
+        else:
+            raise Stopped(sig)
+
+    for sig in FORWARDED:
+        signal.signal(sig, on_signal)
+
+    os.makedirs(QUEUE, exist_ok=True)
+    row = {"pid": os.getpid(), "host": host(), "started": stamp(), "cwd": os.getcwd(), "agent": agent, "pane": pane,
+           "command": cmd, "flags": list(flags), "state": "waiting", "slot": None, "admitted": None}
+    with Lock():
+        counter = os.path.join(QUEUE, "counter")
+        try:
+            with open(counter) as f:
+                n = int(f.read().strip() or 0) + 1
+        except (OSError, ValueError):
+            n = 1
+        with open(counter + ".tmp", "w") as f:
+            f.write(f"{n}\n")
+        os.replace(counter + ".tmp", counter)
+        row["ticket"] = n
+        tfd = os.open(os.path.join(QUEUE, f"{n:010d}.json"), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
+        fcntl.flock(tfd, fcntl.LOCK_EX)
+        os.write(tfd, json.dumps(row).encode())
+
+    def save():
+        os.lseek(tfd, 0, os.SEEK_SET)
+        os.ftruncate(tfd, 0)
+        os.write(tfd, json.dumps(row).encode())
+
+    slots = slot_count()
+    slot = sfd = None
+    said = None
+    long_logged = False
+    next_gate = 0.0
+    sample = None
+    try:
+        while True:
+            with Lock():
+                live = tickets()
+                ahead = [t for t, r in live if t < n and r.get("state") != "running"]
+                running = held_slots(live)
+            hold = None if ahead else hold_ahead(me)
+            if ahead:
+                why = f"queued as ticket {n}: {len(ahead)} ahead, {len(running)}/{slots} slots busy"
+            elif hold:
+                why = f"queue paused by {hold_text(hold)}"
+            elif time.monotonic() < next_gate:
+                why = said  # the machine was busy at the last sample; keep waiting quietly
+            else:
+                slot, sfd = take_slot(slots)
+                if slot is None:
+                    why = f"ticket {n} is next: all {slots} slots busy"
+                else:
+                    passed, sample = gate(gate_argv)
+                    if passed:
+                        state["spawning"] = True  # from here a signal waits for the command, which gets it
+                        break
+                    os.close(sfd)
+                    slot = sfd = None
+                    next_gate = time.monotonic() + GATE_RETRY_S
+                    why = f"ticket {n} is next; machine busy ({sample}); re-checking every {int(GATE_RETRY_S)}s"
+            if why != said:
+                say(why)
+                said = why
+            waited = since(row["started"])
+            if waited > LONG_WAIT_S and not long_logged:
+                holders = [{"slot": s, "ticket": r.get("ticket"), "agent": r.get("agent"),
+                            "command": r.get("command"), "admitted": r.get("admitted")} for s, r in sorted(running.items())]
+                log("long-wait", ticket=n, agent=agent, cwd=row["cwd"], command=cmd, wait_s=round(waited), reason=why,
+                    holders=holders)
+                say(f"ticket {n} has waited {span(waited)}; slot holders: "
+                    + ("; ".join(f"slot {h['slot']} {h['agent']} {shlex.join(h['command'] or [])}" for h in holders) or "none"))
+                long_logged = True
+            time.sleep(POLL_S)
+    except Stopped as e:
+        if sfd is not None:
+            os.close(sfd)
+        log("cancel", ticket=n, agent=agent, cwd=row["cwd"], command=cmd, wait_s=round(since(row["started"])),
+            signal=e.sig)
+        os.unlink(os.path.join(QUEUE, f"{n:010d}.json"))
+        os.close(tfd)
+        return 128 + e.sig
+
+    waited = since(row["started"])
+    row.update(state="running", slot=slot, admitted=stamp())
+    with Lock():
+        save()
+    log("admit", ticket=n, slot=slot, slots=slots, agent=agent, pane=pane, cwd=row["cwd"], command=cmd,
+        flags=list(flags), wait_s=round(waited, 1), gate=sample)
+    say(f"ticket {n} admitted to slot {slot}/{slots} after {span(waited)}" + (f" ({sample})" if sample else ""))
+    started = time.monotonic()
+    code = None
+    try:
+        if state["pending"]:  # stopped between admission and start: the command never runs
+            code = 128 + state["pending"][0]
+        else:
+            try:
+                state["proc"] = subprocess.Popen(cmd, stdin=stdin)
+            except OSError as e:
+                say(f"cannot run {shlex.join(cmd)}: {e.strerror}")
+                code = 127 if isinstance(e, FileNotFoundError) else 126
+            else:
+                for sig in state["pending"]:  # arrived while the child was being started
+                    forward(state["proc"], sig)
+                rc = state["proc"].wait()
+                code = 128 - rc if rc < 0 else rc
+    finally:
+        log("release", ticket=n, slot=slot, agent=agent, cwd=row["cwd"], command=cmd, wait_s=round(waited, 1),
+            run_s=round(time.monotonic() - started, 1), exit=code)
+        with Lock():
+            os.unlink(os.path.join(QUEUE, f"{n:010d}.json"))
+        os.close(sfd)
+        os.close(tfd)
+    return code
+
+
+def listing():
+    """Running and waiting tickets, and what pauses the queue, as printed by `machine-ok-queue status`."""
+    os.makedirs(QUEUE, exist_ok=True)
+    with Lock():
+        live = tickets()
+    slots = slot_count()
+    running = [(t, r) for t, r in live if r.get("state") == "running"]
+    waiting = [(t, r) for t, r in live if r.get("state") != "running"]
+    out = [f"machine-ok queue on {host()}: {len(running)}/{slots} slots busy, "
+           + (f"{len(waiting)} waiting" if waiting else "none waiting")]
+    hold = hold_ahead(set())
+    if hold:
+        out.append(f"paused (no new admissions) by {hold_text(hold)}")
+    if running:
+        out.append("running:")
+        for t, r in sorted(running, key=lambda x: x[1].get("slot") or 0):
+            out.append(f"  slot {r.get('slot')}  ticket {t}  since {r.get('admitted')} ({span(since(r['admitted']))})"
+                       f"  {r.get('agent') or '?'}  pid {r.get('pid')}  {r.get('cwd')}  $ {shlex.join(r.get('command') or [])}")
+    if waiting:
+        out.append("waiting:")
+        for i, (t, r) in enumerate(waiting, 1):
+            out.append(f"  {i}. ticket {t}  since {r.get('started')} ({span(since(r['started']))})  {r.get('agent') or '?'}"
+                       f"  pid {r.get('pid')}  {r.get('cwd')}  $ {shlex.join(r.get('command') or [])}"
+                       f"  [{' '.join(r.get('flags') or []) or 'full gate'}]")
+    return "\n".join(out)
+
+
+def default_gate():
+    """machine-ok next to this file as invoked (for the installed link, the pinned ~/.local/bin/machine-ok), else on PATH."""
+    here = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "machine-ok")
+    return here if os.access(here, os.X_OK) else shutil.which("machine-ok")
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    if argv == ["status"]:
+        print(listing())
+        return 0
+    if argv[:1] != ["run"] or "--" not in argv:
+        print(USAGE, file=sys.stderr)
+        return 2
+    cut = argv.index("--")
+    opts, cmd = argv[1:cut], argv[cut + 1:]
+    flags, gate_path, no_gate, agent = [], None, False, None
+    i = 0
+    while i < len(opts):
+        a = opts[i]
+        if a in ("--memory", "--gpu"):
+            flags.append(a)
+        elif a == "--no-gate":
+            no_gate = True
+        elif a in ("--gate", "--agent") and i + 1 < len(opts):
+            i += 1
+            if a == "--gate":
+                gate_path = opts[i]
+            else:
+                agent = opts[i]
+        else:
+            print(USAGE, file=sys.stderr)
+            return 2
+        i += 1
+    if not cmd or (gate_path and no_gate):
+        print(USAGE, file=sys.stderr)
+        return 2
+    if not no_gate:
+        gate_path = gate_path or default_gate()
+        if not gate_path:
+            print("machine-ok-queue: no machine-ok next to this file or on PATH to gate with "
+                  "(--no-gate admits on a free slot alone)", file=sys.stderr)
+            return 2
+    return run(cmd, None if no_gate else [gate_path, *flags], flags, agent=agent)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

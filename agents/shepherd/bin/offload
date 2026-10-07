@@ -1,0 +1,295 @@
+#!/usr/bin/python3
+"""Run one Linux-compatible heavy step (test suite, typecheck, headless build) from a home worktree on deckbox.
+
+  offload [--host deckbox] [--cpus 8] [--mem 16G] [--fetch PATH ...] [--setup CMD] -- <command> [args...]
+  offload [--host deckbox] --clean
+
+1. Sync: the worktree's tracked and untracked-but-not-ignored files (`git ls-files -co --exclude-standard`),
+   minus the deny-list (.env*, *.pem, *.key, *id_rsa*, *secret*, matched on every path component) and never
+   anything under .git/, go by `rsync --files-from` to <host>:~/offload/<repo>-<12 hex of sha256(worktree
+   path)>/. Deletion is limited to synced paths: a path sent before and gone from the worktree now is deleted
+   there; ignored directories (node_modules, .venv, target) persist on <host> as that worktree's Linux build
+   cache. The paths sent last time are kept in ~/.local/state/offload/manifests/.
+2. Run: `ssh -T <host> python3 ~/dotfiles/agents/shepherd/bin/offload-run ...`: <host>'s heavy-work queue, then
+   a systemd unit capped at --cpus and --mem, in the same subdirectory you run offload from, --setup first.
+   stdout and stderr stream back; the exit status is the command's. stdin is not forwarded. Ctrl-C, SIGTERM or
+   a dropped ssh stops the remote unit.
+3. Fetch: each --fetch PATH (relative to the current directory) is copied back to the same place afterwards,
+   whatever the exit status. A failed fetch after a passing command exits with rsync's status.
+4. Log: one JSON line per run in ~/.local/state/offload/runs.jsonl.
+
+offload never syncs .git/, and there is no git sync mode. A step whose text mentions `git ` is refused before
+anything is sent, and a run whose output says "not a git repository" ends with a loud note: such steps run on
+home behind the queue (`machine-ok-queue run --memory -- <command>`).
+--clean deletes this worktree's remote directory by its exact path (do it when the worktree goes).
+Exit status: the command's; 2 for usage errors and refusals; 255 when the sync or ssh fails.
+"""
+import argparse
+import datetime as dt
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+REMOTE_HELPER = "~/dotfiles/agents/shepherd/bin/offload-run"
+STATE = os.path.expanduser("~/.local/state/offload")
+LOG = os.path.join(STATE, "runs.jsonl")
+MANIFESTS = os.path.join(STATE, "manifests")
+DENY = (".env*", "*.pem", "*.key", "*id_rsa*", "*secret*")
+SSH_OPTS = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=4"]
+GIT_TEXT = re.compile(r"(?<![\w.-])git(\s|$)")
+GIT_FAILURE = b"not a git repository"
+GIT_NOTE = """offload: ======================================================================
+offload: THIS STEP NEEDS GIT METADATA, AND OFFLOAD NEVER SYNCS .git/ (there is no git sync mode).
+offload: {why}
+offload: Run it on home behind the queue instead:
+offload:     machine-ok-queue run --memory -- {command}
+offload: ======================================================================"""
+
+
+def say(text):
+    print(f"offload: {text}", file=sys.stderr, flush=True)
+
+
+def git(*args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, check=True).stdout
+
+
+def worktree_root(cwd):
+    try:
+        return os.path.realpath(git("rev-parse", "--show-toplevel", cwd=cwd).decode().strip())
+    except (subprocess.CalledProcessError, OSError):
+        return None
+
+
+def remote_name(root):
+    repo = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(root)) or "worktree"
+    return f"{repo}-{hashlib.sha256(root.encode()).hexdigest()[:12]}"
+
+
+def denied(path):
+    return any(fnmatch.fnmatchcase(part.lower(), pat) for part in path.split("/") for pat in DENY)
+
+
+def select(root):
+    """(paths to send, deny-listed paths): tracked and untracked-but-not-ignored, never under .git/."""
+    out = git("ls-files", "-co", "--exclude-standard", "-z", cwd=root).decode("utf-8", "surrogateescape")
+    send, deny = [], []
+    for path in dict.fromkeys(p for p in out.split("\0") if p):  # -c and -o can both list a path
+        if ".git" in path.split("/"):
+            continue
+        (deny if denied(path) else send).append(path)
+    return send, deny
+
+
+def manifest_path(host, name):
+    return os.path.join(MANIFESTS, f"{re.sub(r'[^A-Za-z0-9._-]', '_', host)}-{name}")
+
+
+def read_manifest(path):
+    try:
+        with open(path, "rb") as f:
+            return [p for p in f.read().decode("utf-8", "surrogateescape").split("\0") if p]
+    except OSError:
+        return []
+
+
+def write_manifest(path, paths):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "wb") as f:
+        f.write("\0".join(paths).encode("utf-8", "surrogateescape"))
+    os.replace(path + ".tmp", path)
+
+
+def ssh_command():
+    return "ssh " + " ".join(SSH_OPTS)
+
+
+def sync_argv(host, remote):
+    return ["rsync", "-a", "--from0", "--files-from=-", "--delete-missing-args", "--mkpath", "--stats",
+            "-e", ssh_command(), "./", f"{host}:{remote}/"]
+
+
+def fetch_argv(host, remote, rel):
+    return ["rsync", "-a", "-R", "-e", ssh_command(), f"{host}:{remote}/./{rel}", "./"]
+
+
+def run_argv(host, remote, rel_cwd, cpus, mem, setup, agent, cmd):
+    args = ["--dir", remote, "--cwd", rel_cwd, "--cpus", cpus, "--mem", mem]
+    if setup:
+        args += ["--setup", setup]
+    if agent:
+        args += ["--agent", agent]
+    return ["ssh", *SSH_OPTS, host, f"python3 {REMOTE_HELPER} " + shlex.join([*args, "--", *cmd])]
+
+
+def stats(out):
+    def num(label):
+        m = re.search(rf"^{label}: ([\d,]+)", out, re.M)
+        return int(m.group(1).replace(",", "")) if m else None
+    return num("Number of regular files transferred"), num("Total bytes sent")
+
+
+def log(row):
+    os.makedirs(STATE, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(json.dumps(row) + "\n")
+
+
+def pump(src, dst, seen):
+    """Copy a stream through as it arrives, noting whether git's "not a git repository" went by."""
+    tail = b""
+    while True:
+        chunk = os.read(src.fileno(), 65536)
+        if not chunk:
+            return
+        dst.write(chunk)
+        dst.flush()
+        if GIT_FAILURE in (tail + chunk).lower():
+            seen.set()
+        tail = chunk[-len(GIT_FAILURE):]
+
+
+def parse(argv):
+    cut = argv.index("--") if "--" in argv else len(argv)
+    ap = argparse.ArgumentParser(prog="offload", allow_abbrev=False, description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__.split("\n\n", 1)[1],
+                                 usage="offload [--host deckbox] [--cpus 8] [--mem 16G] [--fetch PATH ...] "
+                                       "[--setup CMD] -- <command> [args...]\n       offload [--host deckbox] --clean")
+    ap.add_argument("--host", default="deckbox")
+    ap.add_argument("--cpus", default="8")
+    ap.add_argument("--mem", default="16G")
+    ap.add_argument("--fetch", action="append", default=[], metavar="PATH")
+    ap.add_argument("--setup", metavar="CMD")
+    ap.add_argument("--clean", action="store_true")
+    a = ap.parse_args(argv[:cut])
+    a.command = argv[cut + 1:]
+    if a.clean and (a.command or a.fetch or a.setup):
+        ap.error("--clean takes no command, --fetch or --setup")
+    if not a.clean and not a.command:
+        ap.error("give the command after --")
+    try:
+        if float(a.cpus) <= 0:
+            raise ValueError
+    except ValueError:
+        ap.error(f"--cpus {a.cpus}: a positive number")
+    if not re.fullmatch(r"\d+(\.\d+)?[KMGT]?", a.mem):
+        ap.error(f"--mem {a.mem}: a size like 16G or 512M")
+    return a
+
+
+def main(argv):
+    a = parse(argv)
+    cwd = os.path.realpath(os.getcwd())
+    root = worktree_root(cwd)
+    if not root:
+        say("run it inside a git worktree: the worktree is what gets synced")
+        return 2
+    name = remote_name(root)
+    remote = f"offload/{name}"
+    manifest = manifest_path(a.host, name)
+    if a.clean:
+        r = subprocess.run(["ssh", *SSH_OPTS, a.host, f'rm -rf -- "$HOME"/offload/{shlex.quote(name)}'])
+        if r.returncode:
+            say(f"removing {a.host}:~/{remote} failed (ssh exit {r.returncode})")
+            return 255
+        if os.path.exists(manifest):
+            os.unlink(manifest)
+        say(f"removed {a.host}:~/{remote}")
+        return 0
+
+    text = " ".join([a.setup or "", *a.command])
+    if GIT_TEXT.search(text):
+        print(GIT_NOTE.format(why="This step's text runs `git `, and nothing under .git/ exists on the remote side.",
+                              command=shlex.join(a.command)), file=sys.stderr)
+        say("refused before syncing anything")
+        return 2
+    fetch = []
+    for p in a.fetch:
+        rel = os.path.relpath(os.path.join(cwd, p), root)
+        if rel == "." or rel.startswith(".." + os.sep) or rel == ".." or ".git" in rel.split(os.sep):
+            say(f"--fetch {p}: must name a path inside the worktree, other than the worktree itself and .git")
+            return 2
+        fetch.append(rel)
+
+    send, deny = select(root)
+    if deny:
+        say(f"not sent (deny-list): {', '.join(deny)}")
+    sending = set(send)
+    gone = [p for p in read_manifest(manifest) if p not in sending and not os.path.lexists(os.path.join(root, p))]
+    t0 = time.monotonic()
+    r = subprocess.run(sync_argv(a.host, remote), cwd=root, capture_output=True,
+                       input="\0".join(send + gone).encode("utf-8", "surrogateescape"))
+    sync_s = round(time.monotonic() - t0, 2)
+    out = r.stdout.decode("utf-8", "replace")
+    if r.returncode not in (0, 24):  # 24: a file vanished mid-transfer
+        sys.stderr.write(r.stderr.decode("utf-8", "replace"))
+        say(f"sync to {a.host}:~/{remote} failed (rsync exit {r.returncode})")
+        return 255
+    write_manifest(manifest, [p for p in send if os.path.lexists(os.path.join(root, p))])
+    files, sent = stats(out)
+    say(f"synced {len(send)} paths ({files} changed, {sent} bytes sent, {len(gone)} deleted) to "
+        f"{a.host}:~/{remote} in {sync_s}s")
+
+    rel_cwd = os.path.relpath(cwd, root)
+    agent = os.environ.get("EASL_TILE_ID") or os.environ.get("HERDR_PANE_ID")
+    t1 = time.monotonic()
+    proc = subprocess.Popen(run_argv(a.host, remote, rel_cwd, a.cpus, a.mem, a.setup, agent, a.command),
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    seen = threading.Event()
+    pumps = [threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, seen)),
+             threading.Thread(target=pump, args=(proc.stderr, sys.stderr.buffer, seen))]
+    for t in pumps:
+        t.start()
+    stopped = []
+
+    def on_signal(sig, _frame):
+        # Ending ssh closes the remote stdin; offload-run then stops the unit.
+        stopped.append(sig)
+        if proc.poll() is None:
+            proc.terminate()
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, on_signal)
+    code = proc.wait()
+    for t in pumps:
+        t.join()
+    proc.stdin.close()
+    run_s = round(time.monotonic() - t1, 2)
+    if stopped:
+        code = 128 + stopped[0]
+    elif code == 255:
+        say(f"ssh to {a.host} failed or the remote side exited 255")
+
+    fetched = []
+    for rel in fetch if not stopped else []:
+        f = subprocess.run(fetch_argv(a.host, remote, rel), cwd=root)
+        fetched.append({"path": rel, "exit": f.returncode})
+        if f.returncode:
+            say(f"fetch {rel} failed (rsync exit {f.returncode})")
+            if code == 0:
+                code = f.returncode
+    if seen.is_set():
+        print(GIT_NOTE.format(why="The run failed with \"not a git repository\": nothing under .git/ exists there.",
+                              command=shlex.join(a.command)), file=sys.stderr)
+    log({"ts": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "host": a.host, "worktree": root,
+         "remote": f"~/{remote}", "cwd": rel_cwd, "command": a.command, "setup": a.setup, "cpus": a.cpus,
+         "mem": a.mem, "paths": len(send), "denied": len(deny), "deleted": len(gone), "sync_files": files,
+         "sync_bytes": sent, "sync_s": sync_s, "run_s": run_s, "exit": code, "fetch": fetched,
+         "git_needed": seen.is_set(), "signal": stopped[0] if stopped else None})
+    return code
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:  # Ctrl-C before the run started (during the sync)
+        sys.exit(130)

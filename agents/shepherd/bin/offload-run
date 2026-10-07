@@ -1,0 +1,142 @@
+#!/usr/bin/python3
+"""deckbox side of `offload`: run one synced step in a capped systemd unit, behind deckbox's heavy-work queue.
+
+  python3 ~/dotfiles/agents/shepherd/bin/offload-run --dir offload/<name> [--cwd SUB] --cpus N --mem SIZE
+          [--setup CMD] [--agent NAME] -- <command> [args...]
+
+Only `offload` calls it, over `ssh -T`. Steps:
+- Queue: one ticket in deckbox's heavy-work queue (machine-ok-queue beside this file, --no-gate: Linux has no
+  machine-ok; deckbox has 3 slots), so offloaded steps take turns like home's.
+- Unit: `systemd-run --user --wait --pipe --collect --quiet --expand-environment=no` in ~/<dir>/<SUB> with
+  Slice=offload.slice, CPUQuota=N*100%, MemoryMax=SIZE and CPUAffinity = the system agents.slice's AllowedCPUs.
+  A --user unit cannot join the system agents.slice: `-p Slice=agents.slice` under --user names a user slice
+  of that name inside user@1000.service (measured 2026-10-07), and that manager has the cpu, memory and pids
+  controllers but not cpuset. So the unit gets its own user slice with its own CPU and memory caps, and the
+  affinity keeps it off the CPUs a measured run holds (Hutter's 1-4 13-16), read again at every start.
+  The command runs under `sh -c`, after --setup when given (a failing setup ends the run with its status), so
+  a command killed by signal N exits 128+N: systemd-run itself reports SIGTERM as success and SIGKILL as 255.
+  stdin is /dev/null; stdout and stderr stream back over ssh; the exit status is the command's.
+- Drop: this process's stdin is the ssh channel, which `offload` never writes. EOF there (ssh gone, or the
+  local offload ended), or SIGHUP, SIGTERM or SIGINT, stops the unit (`systemctl --user stop`, SIGKILL after
+  15 s), or cancels the ticket if the step is still queued. Nothing is left running.
+"""
+import importlib.machinery
+import importlib.util
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+SLICE = "offload.slice"
+STOP_TIMEOUT_S = 15
+USAGE = ("usage: offload-run --dir offload/<name> [--cwd SUB] --cpus N --mem SIZE [--setup CMD] [--agent NAME] "
+         "-- <command> [args...]")
+# $1 is the setup ("" for none); the command runs as a child, never exec'd, so its signal death becomes 128+N.
+WRAPPER = 'if [ -n "$1" ]; then eval "$1" || exit; fi; shift; "$@"; exit $?'
+
+
+def load_queue():
+    path = os.path.join(HERE, "machine-ok-queue")
+    loader = importlib.machinery.SourceFileLoader("machine_ok_queue", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def agents_cpus():
+    """The system agents.slice's AllowedCPUs ("0 5-12 17-23"), or "" when it has none or cannot be read."""
+    try:
+        r = subprocess.run(["systemctl", "show", "agents.slice", "-p", "AllowedCPUs", "--value"],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def unit_argv(unit, cwd, cpus, mem, setup, cmd, affinity, path):
+    argv = ["systemd-run", "--user", f"--unit={unit}", "--wait", "--pipe", "--collect", "--quiet",
+            "--expand-environment=no", f"--working-directory={cwd}", f"--setenv=PATH={path}",
+            "-p", f"Slice={SLICE}", "-p", f"CPUQuota={round(cpus * 100)}%", "-p", f"MemoryMax={mem}",
+            "-p", f"TimeoutStopSec={STOP_TIMEOUT_S}"]
+    if affinity:
+        argv += ["-p", f"CPUAffinity={affinity}"]
+    return argv + ["--", "/bin/sh", "-c", WRAPPER, "offload-run", setup or "", *cmd]
+
+
+def parse(argv):
+    if "--" not in argv:
+        return None
+    cut = argv.index("--")
+    opts, cmd = argv[:cut], argv[cut + 1:]
+    a = {"--cwd": ".", "--setup": None, "--agent": None}
+    if len(opts) % 2 or not cmd:
+        return None
+    for k, v in zip(opts[::2], opts[1::2]):
+        if k not in ("--dir", "--cwd", "--cpus", "--mem", "--setup", "--agent"):
+            return None
+        a[k] = v
+    if not {"--dir", "--cpus", "--mem"} <= set(a) or not re.fullmatch(r"\d+(\.\d+)?[KMGT]?", a["--mem"]):
+        return None
+    try:
+        a["--cpus"] = float(a["--cpus"])
+    except ValueError:
+        return None
+    return a if a["--cpus"] > 0 else None, cmd
+
+
+def main(argv):
+    parsed = parse(argv)
+    if not parsed or not parsed[0]:
+        print(USAGE, file=sys.stderr)
+        return 2
+    a, cmd = parsed
+    home = os.path.realpath(os.path.expanduser("~"))
+    root = os.path.realpath(os.path.join(home, a["--dir"]))
+    cwd = os.path.realpath(os.path.join(root, a["--cwd"]))
+    if os.path.dirname(root) != os.path.join(home, "offload") or not (cwd == root or cwd.startswith(root + os.sep)):
+        print(f"offload-run: {a['--dir']} / {a['--cwd']} is not a directory under ~/offload/", file=sys.stderr)
+        return 2
+    if not os.path.isdir(cwd):
+        print(f"offload-run: {cwd} does not exist on this host (nothing synced there)", file=sys.stderr)
+        return 2
+    unit = f"offload-{os.getpid()}-{int(time.time())}"
+    affinity = agents_cpus()
+    if not affinity:
+        print("offload-run: agents.slice has no AllowedCPUs to mirror; the unit may use any CPU", file=sys.stderr)
+    run_argv = unit_argv(unit, cwd, a["--cpus"], a["--mem"], a["--setup"], cmd, affinity,
+                         os.environ.get("PATH", "/usr/bin:/bin"))
+    stopping = threading.Event()
+
+    def stop_unit(proc, _sig):
+        """Stop the unit, retrying until systemd-run returns: a stop that lands before the unit loads finds nothing."""
+        if stopping.is_set():
+            return
+        stopping.set()
+
+        def loop():
+            while proc.poll() is None:
+                subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True, timeout=STOP_TIMEOUT_S + 15)
+                time.sleep(0.5)
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def watch_stdin():
+        try:
+            while os.read(0, 65536):
+                pass
+        except OSError:
+            pass
+        os.kill(os.getpid(), signal.SIGHUP)  # the caller is gone
+
+    threading.Thread(target=watch_stdin, daemon=True).start()
+    queue = load_queue()
+    return queue.run(run_argv, None, agent=a["--agent"], stdin=subprocess.DEVNULL, forward=stop_unit)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

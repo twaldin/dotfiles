@@ -24,11 +24,11 @@ swiftc=${SWIFTC:-swiftc}
 
 case "$host" in
   twaldin-home)
-    bins="machine-ok machine-watch machine-census omp-update omp-browser-cycle quiet-window quiet-check gpu-top colorsync-k cs-measure logout-colorsync-test gui-launch"
+    bins="machine-ok machine-ok-queue offload offload-run machine-watch machine-census omp-update omp-browser-cycle quiet-window quiet-check gpu-top colorsync-k cs-measure logout-colorsync-test gui-launch"
     tools="fsevents-top gui-launch-guard"
     jobs="net.waldin.machine-watch net.waldin.omp-browser-cycle net.waldin.omp-update net.waldin.quiet-window" ;;
   twaldin-work)
-    bins="machine-ok machine-watch machine-census omp-browser-cycle"
+    bins="machine-ok machine-ok-queue machine-watch machine-census omp-browser-cycle"
     tools="fsevents-top"
     jobs="net.waldin.machine-watch net.waldin.omp-browser-cycle" ;;
   *) echo "install.sh: no shepherd profile for host '$host'" >&2; exit 2 ;;
