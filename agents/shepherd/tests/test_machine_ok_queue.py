@@ -7,6 +7,7 @@ the real, unchanged machine-ok gate with the stand-in system tools of test_machi
 import datetime as dt
 import json
 import os
+import platform
 import shutil
 import signal
 import subprocess
@@ -28,6 +29,14 @@ GATE = '''#!/bin/sh
 echo "$*" >> "$GATE_DIR/calls"
 echo "free=60% pageins=0/s swap=0/s compressed=25%"
 exit "$(cat "$GATE_DIR/exit" 2>/dev/null || echo 0)"
+'''
+
+# The easl CLI as ~/.config/machine-shepherd/easl.json names it: agent.list prints $GATE_DIR/agents.json (nothing
+# there: easl is down). FAKE_EASL_SLEEP makes it hang first, in a child process as a real CLI's would.
+EASL = '''#!/bin/sh
+[ "$1" = agent.list ] || exit 2
+[ -n "${FAKE_EASL_SLEEP:-}" ] && sleep "$FAKE_EASL_SLEEP"
+cat "$GATE_DIR/agents.json" 2>/dev/null || exit 1
 '''
 
 
@@ -55,6 +64,10 @@ class QueueCase(unittest.TestCase):
                     'MACHINE_OK_QUEUE_POLL': '0.05', 'MACHINE_OK_QUEUE_GATE_RETRY': '0.2'}
         self.procs = []
         self.slots(1)
+        easl = self.root / 'easl'
+        easl.write_text(EASL)
+        easl.chmod(0o755)
+        (self.conf / 'easl.json').write_text(json.dumps({'enabled': True, 'cli': str(easl)}))
 
     def tearDown(self):
         for p in self.procs:
@@ -279,6 +292,33 @@ class Holds(QueueCase):
         self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': 'obj_OWNER', 'label': 'mine'}],
                                  env={'EASL_TILE_ID': 'obj_OWNER'})
 
+    def easl_tiles(self, *tiles):
+        """easl agent.list answers with these {tile, name, address} rows."""
+        (self.root / 'agents.json').write_text(json.dumps({'agents': [dict(t, kind='omp') for t in tiles]}))
+
+    PERF = {'tile': 'obj_PERF', 'name': 'perf', 'address': 'perf@bench'}
+
+    def test_a_tile_inside_its_own_hold_is_admitted_by_its_easl_name_or_address(self):
+        self.easl_tiles({'tile': 'obj_OTHER', 'name': 'other', 'address': 'other@b'}, self.PERF)
+        for owner in ('perf', 'perf@bench'):
+            with self.subTest(owner=owner):
+                self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': owner, 'label': 'mine'}],
+                                         env={'EASL_TILE_ID': 'obj_PERF'})
+        admit = [e for e in self.events() if e['event'] == 'admit'][-1]
+        self.assertEqual(admit['agent'], 'perf')
+
+    def test_another_tiles_hold_still_pauses_a_tile(self):
+        self.easl_tiles(self.PERF, {'tile': 'obj_SKY', 'name': 'sky-beta', 'address': 'sky-beta@sky'})
+        self.assert_paused_then_runs([{'start': minute(-5), 'end': minute(20), 'owner': 'sky-beta', 'label': 'r6'}],
+                                     env={'EASL_TILE_ID': 'obj_PERF'})
+
+    def test_an_unreachable_easl_neither_hangs_nor_loses_the_tile_id(self):
+        self.easl_tiles(self.PERF)
+        started = time.monotonic()
+        self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': 'obj_PERF', 'label': 'mine'}],
+                                 env={'EASL_TILE_ID': 'obj_PERF', 'FAKE_EASL_SLEEP': '30'})
+        self.assertLess(time.monotonic() - started, 15)
+
     def test_a_running_job_keeps_running_when_a_hold_begins(self):
         p = self.start(*self.blocker('H'))
         self.until(lambda: (self.work / 'H.pid').exists(), what='running')
@@ -409,10 +449,24 @@ class DefaultGate(QueueCase):
                                env={'PATH': f'{gate_dir}:{self.env["PATH"]}'})
         self.assertEqual((r.returncode, r.stdout), (0, 'ok\n'), r.stderr)
         self.assertEqual((self.root / 'calls').read_text().splitlines(), ['--memory'])
+
+    @unittest.skipIf(platform.system() == 'Linux', 'a Mac without machine-ok')
+    def test_a_mac_without_machine_ok_is_an_error(self):
+        bin_dir, _ = self.install(gate_beside_it=False)
         missing = self.run_installed(bin_dir, 'run', '--', 'echo', 'ok', env={'PATH': '/usr/bin:/bin'})
         self.assertEqual(missing.returncode, 2)
         self.assertIn('no machine-ok next to this file or on PATH', missing.stderr)
         self.assertEqual(missing.stdout, '')
+
+    @unittest.skipUnless(platform.system() == 'Linux', 'Linux (deckbox) has no machine-ok')
+    def test_linux_without_machine_ok_admits_on_slots_alone_and_ignores_the_flags(self):
+        bin_dir, _ = self.install(gate_beside_it=False)
+        r = self.run_installed(bin_dir, 'run', '--memory', '--gpu', '--', 'echo', 'ok', env={'PATH': '/usr/bin:/bin'})
+        self.assertEqual((r.returncode, r.stdout), (0, 'ok\n'), r.stderr)
+        self.assertEqual(r.stderr.count('no machine-ok on this Linux host: admission is by slots alone'), 1)
+        self.assertFalse((self.root / 'calls').exists())
+        admit = [e for e in self.events() if e['event'] == 'admit'][-1]
+        self.assertIsNone(admit['gate'])
 
     def test_help_documents_run_and_status(self):
         r = subprocess.run([sys.executable, str(QUEUE), '--help'], env=self.env, capture_output=True, text=True)

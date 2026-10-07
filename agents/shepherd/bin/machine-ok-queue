@@ -10,10 +10,14 @@
      built in: twaldin-home 2, twaldin-work 1, deckbox 3, any other host 1;
   3. the gate passes: `machine-ok [--memory] [--gpu]` exits 0. That is the machine-ok next to this file as
      invoked (~/.local/bin/machine-ok for the installed link), else the one on PATH; machine-ok itself is
-     unchanged and knows nothing of the queue. --gate PATH names another gate; --no-gate (Linux, where
-     there is no machine-ok: offload-run on deckbox) admits on a free slot alone;
+     unchanged and knows nothing of the queue. --gate PATH names another gate. On Linux (deckbox), where there
+     is no machine-ok, admission is by slots alone and --memory/--gpu are accepted and ignored (one note says
+     so); --no-gate asks for that anywhere. On a Mac a missing machine-ok is an error (exit 2);
   4. no quiet-window booking or hold (quiet-windows.json, quiet-holds.json) runs or starts within 10 min,
-     30 min for a full-quiet one, unless the caller owns it.
+     30 min for a full-quiet one, unless the caller owns it: a hold's owner is matched against each of the
+     caller's names, the easl tile id, the tile's name and address (from `easl agent.list`, the CLI in
+     ~/.config/machine-shepherd/easl.json or on PATH), the herdr agent name, HERDR_PANE_ID, and --agent.
+     The lookups take 5 s at most; when easl or herdr is unreachable the ids still match.
 Then it runs the command holding the slot and exits with its status (128+N when signal N killed it).
 SIGTERM, SIGINT and SIGHUP are forwarded to the command; SIGINT is not when it came from this terminal,
 which delivered it to the command already. Only the oldest waiter samples the gate: every 30 s while the
@@ -31,6 +35,7 @@ import datetime as dt
 import fcntl
 import json
 import os
+import platform
 import shlex
 import shutil
 import signal
@@ -45,6 +50,8 @@ LOG = os.path.join(STATE, "queue.jsonl")
 CONF = os.path.expanduser("~/.config/machine-shepherd")
 SLOTS = os.path.join(CONF, "slots.json")
 WINDOWS = (os.path.join(CONF, "quiet-windows.json"), os.path.join(CONF, "quiet-holds.json"))
+EASL_CONF = os.path.join(CONF, "easl.json")
+IDENTITY_TIMEOUT_S = 5  # easl agent.list and herdr agent list answer in well under a second when they are up
 DEFAULT_SLOTS = {"twaldin-home": 2, "twaldin-work": 1, "deckbox": 3}
 HOLD_LEAD_MIN, FULL_HOLD_LEAD_MIN = 10, 30
 # Seconds: a ticket waiting longer is logged once; a waiter's look at the queue; the head's gate re-sample
@@ -107,19 +114,61 @@ def say(text):
     print(f"machine-ok-queue: {text}", file=sys.stderr, flush=True)
 
 
-def identity():
-    """(agent, pane): the easl tile, else the herdr agent named for this pane (its pane id when unnamed)."""
-    pane = os.environ.get("HERDR_PANE_ID")
-    if os.environ.get("EASL_TILE_ID"):
-        return os.environ["EASL_TILE_ID"], pane
-    if not pane:
-        return None, None
+def ask(argv, env=None):
+    """stdout of a lookup command, or None when it fails or outlasts IDENTITY_TIMEOUT_S (its whole process group is
+    killed then, so a hung CLI's children cannot hold the pipe open)."""
     try:
-        out = subprocess.run(["herdr", "agent", "list"], capture_output=True, text=True, timeout=5).stdout
-        names = {a["pane_id"]: a.get("name") for a in json.loads(out)["result"]["agents"]}
-        return names.get(pane) or pane, pane
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        return pane, pane
+        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             text=True, env=env, start_new_session=True)
+    except OSError:
+        return None
+    try:
+        out, _ = p.communicate(timeout=IDENTITY_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.wait()
+        p.stdout.close()
+        return None
+    return out if p.returncode == 0 else None
+
+
+def easl_cli():
+    """The easl CLI named in ~/.config/machine-shepherd/easl.json, else `easl` on PATH."""
+    try:
+        with open(EASL_CONF) as f:
+            cli = json.load(f).get("cli")
+    except (OSError, ValueError, AttributeError):
+        cli = None
+    return cli if cli and os.access(cli, os.X_OK) else shutil.which("easl")
+
+
+def identity():
+    """(agent, pane, names): the caller's display name, its herdr pane, and every name a quiet-window hold may give
+    as its owner: the easl tile id, the tile's name and address (`name@board`) from `easl agent.list`, the herdr
+    agent name and the pane id. Looked up once per run; an unreachable easl or herdr leaves the ids alone."""
+    tile, pane = os.environ.get("EASL_TILE_ID"), os.environ.get("HERDR_PANE_ID")
+    names, agent = {x for x in (tile, pane) if x}, tile or pane
+    cli = easl_cli() if tile else None
+    if cli:
+        out = ask([cli, "agent.list"], env={**os.environ, "PATH": os.path.expanduser("~/.bun/bin") + ":"
+                                            + os.environ.get("PATH", "")})
+        try:
+            for a in json.loads(out)["agents"] if out else []:
+                if isinstance(a, dict) and a.get("tile") == tile:
+                    names.update(x for x in (a.get("name"), a.get("address")) if x)
+                    agent = a.get("name") or agent
+        except (ValueError, KeyError, TypeError):
+            pass
+    if pane:
+        out = ask(["herdr", "agent", "list"])
+        try:
+            name = {a["pane_id"]: a.get("name") for a in json.loads(out)["result"]["agents"]}.get(pane) if out else None
+        except (ValueError, KeyError, TypeError):
+            name = None
+        if name:
+            names.add(name)
+            agent = agent if tile else name
+    return agent, pane, names
 
 
 class Lock:
@@ -235,9 +284,9 @@ def from_terminal():
 def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None):
     """Queue, then run cmd holding a slot; returns its exit status (128+N for signal N).
     forward(proc, sig) delivers a signal to the running command; the default sends it to the child."""
-    me_agent, pane = identity()
+    me_agent, pane, me = identity()
     agent = agent or me_agent
-    me = {x for x in (agent, pane, os.environ.get("EASL_TILE_ID")) if x}
+    me = me | ({agent} if agent else set())
     forward = forward or (lambda proc, sig: proc.send_signal(sig))
     state = {"proc": None, "spawning": False, "pending": []}
 
@@ -431,7 +480,10 @@ def main(argv):
         return 2
     if not no_gate:
         gate_path = gate_path or default_gate()
-        if not gate_path:
+        if not gate_path and platform.system() == "Linux":
+            say("no machine-ok on this Linux host: admission is by slots alone (--memory/--gpu ignored)")
+            no_gate = True
+        elif not gate_path:
             print("machine-ok-queue: no machine-ok next to this file or on PATH to gate with "
                   "(--no-gate admits on a free slot alone)", file=sys.stderr)
             return 2
