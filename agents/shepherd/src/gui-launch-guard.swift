@@ -2364,7 +2364,7 @@ struct ServerWindow {
 }
 
 /// One row of CGWindowListCopyWindowInfo; nil: one without its number.
-func serverWindow(_ row: [String: Any]) -> ServerWindow? {
+@Sendable func serverWindow(_ row: [String: Any]) -> ServerWindow? {
     guard let id = (row[kCGWindowNumber as String] as? NSNumber)?.intValue else { return nil }
     let bounds = (row[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
     return ServerWindow(id: id, pid: (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
@@ -2374,7 +2374,7 @@ func serverWindow(_ row: [String: Any]) -> ServerWindow? {
 /// The rig's stand-in for WindowServer (--onscreen): rows `[id, pid]`, `[id, pid, width, height]` or `[id, pid, width,
 /// height, onScreen]` (a width or height null: bounds unreadable; no onScreen: true). A window listed exists; one not
 /// listed is gone. nil: the file is unreadable.
-func rigServerWindows() -> [ServerWindow]? {
+@Sendable func rigServerWindows() -> [ServerWindow]? {
     guard let onscreenPath, let data = try? Data(contentsOf: URL(fileURLWithPath: onscreenPath)),
           let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[Any]] else { return nil }
     return rows.compactMap { row -> ServerWindow? in
@@ -2990,7 +2990,7 @@ let shownWatch = ShownWindows()
 }
 
 /// The frontmost app: its pid and its record (the rig: the app its stand-ins last made frontmost). main.
-func frontmost() -> (pid: pid_t?, app: Any) {
+@Sendable func frontmost() -> (pid: pid_t?, app: Any) {
     if rigTest { return (rigFront, rigFront.map { rigApp($0) } ?? NSNull()) }
     let app = workspace.frontmostApplication
     return (app?.processIdentifier, describe(app))
@@ -3606,7 +3606,7 @@ var previousFront: (pid: pid_t, app: Any, running: NSRunningApplication?, at: Do
 /// (seconds since launch): its record, whether it is in the tree (membership only), how long it had been frontmost,
 /// and whether it has quit or is hidden (macOS activates another app when the frontmost one quits, hides or closes
 /// its last window; the guard observes no window closes, so that last case is not known). null: none known. main.
-func previousFrontRecord(at t: Double) -> Any {
+@Sendable func previousFrontRecord(at t: Double) -> Any {
     guard let p = previousFront else { return NSNull() }
     return ["app": p.app, "tree": tree.contains(p.pid), "frontMs": ms(t - p.at),
             "terminated": p.running.map { $0.isTerminated as Any } ?? NSNull(),
@@ -4133,7 +4133,7 @@ var rigRoot: pid_t?  // main
 var rigFront: pid_t?
 
 /// The record of an app in the rig, which has no NSRunningApplication for its stand-in processes.
-func rigApp(_ pid: pid_t) -> [String: Any] { ["pid": Int(pid), "name": "rig-\(pid)", "bundle": ""] }
+@Sendable func rigApp(_ pid: pid_t) -> [String: Any] { ["pid": Int(pid), "name": "rig-\(pid)", "bundle": ""] }
 
 /// --rig: each stdin line stands for something macOS would report, served on the main queue as its notifications
 /// are: `root <pid>` (a process joins the tree, as --exec's does), `theft` and `back` (an activation of the root, or
