@@ -1,4 +1,5 @@
-"""Smoke test for bin/quiet-window: the book and holds (add/hold/list/remove/mute) and the minute `tick`.
+"""Smoke test for bin/quiet-window: the book and holds (add/hold/list/remove/mute), the quiet levels (heavy,
+full: wording, notice and reminder timing) and the minute `tick`.
 
 HOME is a temp dir, so the book, holds, state and logs live there. `tick` finds herdr, agent-msg and
 quiet-check under $HOME/.local/bin: those are stand-ins that record what they were asked, and
@@ -267,12 +268,12 @@ class QuietWindow(unittest.TestCase):
         return [c['argv'] for c in self.log_of('easl-calls.jsonl')]
 
     def tile_prompts(self):
-        """[(tile id, text)] of every easl agent.prompt; each comes from the shepherd at the tile's next turn."""
+        """[(tile id, text)] of every easl agent.prompt; each comes from the shepherd and steers a working tile mid-turn."""
         out = []
         for argv in self.easl_calls():
             if argv[0] == 'agent.prompt':
                 self.assertEqual([argv[1], argv[3]], ['--target', '--text'])
-                self.assertEqual(argv[5:], ['--from', 'shepherd', '--when', 'next-turn'])
+                self.assertEqual(argv[5:], ['--from', 'shepherd', '--when', 'now'])
                 out.append((argv[2], argv[4]))
         return out
 
@@ -493,6 +494,183 @@ class QuietWindow(unittest.TestCase):
         self.assertEqual(sorted(p for p, _ in typed), ['w1:p2', 'w1:p4'])
         self.assertIn('QUIET WINDOW', typed[0][1])
 
+    # -- quiet levels (Tim and bench-judge, 2026-10-07): heavy pauses only heavy processes; full is FULL QUIET across boards
+
+    REASON = "no builds, test runs or dev servers: the suite's sub-second latency bounds"
+    FULL_RULE = ('FULL QUIET across boards: no heavy processes and no new processes, subagents, lanes or '
+                 'tool-executing agents on this Mac; reading and writing text only')
+
+    def book_full(self, start_min, end_min, owner='bench-judge', label='latency suite'):
+        r = self.qw('add', stamp(start_min), stamp(end_min), owner, label, '--quiet', 'full', '--reason', self.REASON)
+        return r.stdout.split()[-1]
+
+    def move(self, start_min, end_min):
+        """Slide the only window to start/end `minutes` from now, as the clock would (its id and state stay)."""
+        book = self.book()
+        book[0]['start'], book[0]['end'] = stamp(start_min), stamp(end_min)
+        self.book_path.write_text(json.dumps(book))
+
+    def test_a_full_quiet_booking_or_hold_needs_a_reason_and_keeps_it_in_the_row(self):
+        for verb, path in (('add', self.book_path), ('hold', self.holds_path)):
+            with self.subTest(verb=verb):
+                for extra in ([], ['--reason', '  ']):
+                    r = self.qw(verb, stamp(60), stamp(90), 'bench-judge', 'latency suite', '--quiet', 'full',
+                                *extra, ok=False)
+                    self.assertNotEqual(r.returncode, 0)
+                    self.assertIn('--quiet full needs --reason', r.stderr)
+                    self.assertEqual(json.loads(path.read_text()) if path.exists() else [], [])
+                r = self.qw(verb, stamp(60), stamp(90), 'bench-judge', 'latency suite', '--quiet', 'full',
+                            '--reason', self.REASON)
+                (row,) = json.loads(path.read_text())
+                self.assertEqual((row['quiet'], row['reason']), ('full', self.REASON))
+                self.assertEqual(row['id'], r.stdout.split()[-1])
+                (listed,) = self.qw('list').stdout.splitlines()
+                self.assertIn(f'latency suite  [FULL QUIET: {self.REASON}]', listed)
+                path.unlink()
+
+    def test_a_booking_is_heavy_by_default_and_an_unknown_level_or_option_is_refused(self):
+        self.book_window(60, 90)  # the four-argument form sky's kit calls
+        (row,) = self.book()
+        self.assertEqual(row['quiet'], 'heavy')
+        self.assertNotIn('reason', row)
+        self.assertNotIn('FULL QUIET', self.qw('list').stdout)
+        self.qw('add', stamp(60), stamp(90), 'canvas', 'note', '--quiet', 'heavy', '--reason', 'just a note')
+        self.assertEqual([(w['quiet'], w.get('reason')) for w in self.book() if w['owner'] == 'canvas'],
+                         [('heavy', 'just a note')])
+        self.assertNotIn('FULL QUIET', self.qw('list').stdout)  # only full rows carry the tag
+        before = self.book_path.read_text()
+        for extra in (['--quiet', 'loud'], ['--quiet'], ['--reason'], ['--bogus', 'x']):
+            with self.subTest(extra=extra):
+                r = self.qw('add', stamp(120), stamp(150), 'bench-judge', 'x', *extra, ok=False)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(self.book_path.read_text(), before)
+
+    def test_a_heavy_window_pauses_only_heavy_processes_and_never_bans_subagents(self):
+        self.book_window(5, 35)
+        self.qw('tick')
+        notices = self.msgs()
+        self.assertEqual(sorted(p for p, _ in notices), ['w1:p2', 'w1:p4'])
+        for _, text in notices:
+            self.assertIn('pause or queue only heavy processes (builds, dev servers, test runs, renders, encodes, '
+                          'benchmarks, game clients, screen captures)', text)
+            self.assertIn('reading, coding, reviewing and subagents continue', text)
+            for old in ('no new lanes or subagents', 'read-only reviewers', 'FULL QUIET'):
+                self.assertNotIn(old, text)
+
+    def test_rows_written_before_the_levels_are_heavy(self):
+        row = {'id': f'{stamp(5)}-bench-judge', 'start': stamp(5), 'end': stamp(35), 'owner': 'bench-judge',
+               'label': 'latency run'}
+        later = {'id': f'{stamp(15)}-canvas', 'start': stamp(15), 'end': stamp(45), 'owner': 'canvas', 'label': 'render'}
+        self.book_path.write_text(json.dumps([row, later]))
+        self.assertNotIn('FULL QUIET', self.qw('list').stdout)
+        self.qw('tick')
+        notices = self.msgs()
+        self.assertEqual(len(notices), 2, 'only the window within 10 minutes is announced')
+        for _, text in notices:
+            self.assertIn('latency run', text)
+            self.assertIn('reading, coding, reviewing and subagents continue', text)
+            self.assertNotIn('no new lanes or subagents', text)
+        state = json.loads(self.state_path.read_text())[row['id']]
+        self.assertNotIn('reminded', state)  # heavy: no reminder
+
+    def test_stop_now_speaks_the_wording_of_the_windows_level(self):
+        (self.root / 'qc-out.txt').write_text('  95.0%   12345  ffmpeg                       w1:p2 canvas  <-- not quiet\n')
+        self.book_window(-2, 30)
+        self.qw('tick')
+        ((pane, heavy),) = self.stops()
+        self.assertEqual(pane, 'w1:p2')
+        self.assertIn('ffmpeg pid 12345 95.0%', heavy)
+        self.assertIn('pause or queue only heavy processes', heavy)
+        self.assertIn('reading, coding, reviewing and subagents continue', heavy)
+        for old in ('no new lanes or subagents', 'read-only reviewers', 'FULL QUIET'):
+            self.assertNotIn(old, heavy)
+        self.fresh()
+        self.book_full(-2, 30)
+        self.qw('tick')
+        ((pane, full),) = self.stops()
+        self.assertEqual(pane, 'w1:p2')
+        self.assertIn('ffmpeg pid 12345 95.0%', full)
+        self.assertIn('FULL QUIET window', full)
+        self.assertIn(self.FULL_RULE, full)
+        self.assertIn(self.REASON, full)
+        self.assertNotIn('reviewing and subagents continue', full)
+
+    def test_a_full_window_is_announced_30_minutes_ahead_and_reminded_5_minutes_ahead(self):
+        wid = self.book_full(35, 65)
+        self.qw('tick')
+        self.assertEqual(self.msgs(), [], 'more than 30 minutes ahead: silent')
+        self.move(25, 55)  # booked less than 30 minutes ahead: told at the next tick
+        self.qw('tick')
+        notices = self.msgs()
+        self.assertEqual(sorted(p for p, _ in notices), ['w1:p2', 'w1:p4'])
+        for _, text in notices:
+            for part in ('QUIET WINDOW', 'latency suite', '(bench-judge)', self.FULL_RULE, self.REASON):
+                self.assertIn(part, text)
+            self.assertNotIn('REMINDER', text)
+            self.assertNotIn('reviewing and subagents continue', text)
+        self.qw('tick')
+        self.assertEqual(len(self.msgs()), 2, 'the notice is sent once')
+        self.move(4, 34)  # five minutes ahead: the reminder, once
+        self.qw('tick')
+        reminders = self.msgs()[2:]
+        self.assertEqual(sorted(p for p, _ in reminders), ['w1:p2', 'w1:p4'])
+        for _, text in reminders:
+            for part in ('REMINDER', 'QUIET WINDOW', 'latency suite', self.FULL_RULE, self.REASON):
+                self.assertIn(part, text)
+        self.qw('tick')
+        self.assertEqual(len(self.msgs()), 4, 'the reminder is sent once')
+        state = json.loads(self.state_path.read_text())[wid]
+        self.assertTrue(state['noticed'] and state['reminded'])
+        self.assertEqual((state['notice_pending'], state['remind_pending']), ([], []))
+        self.fresh()  # booked 20 minutes ahead: the notice at the next tick, not the reminder yet
+        self.book_full(20, 50)
+        self.qw('tick')
+        self.assertEqual(len(self.msgs()), 2)
+        self.assertFalse(any('REMINDER' in t for _, t in self.msgs()))
+
+    def test_a_heavy_window_gets_one_notice_and_no_reminder(self):
+        self.book_window(15, 45)
+        self.qw('tick')
+        self.assertEqual(self.msgs(), [], 'heavy: nothing 15 minutes ahead')
+        self.move(8, 38)
+        self.qw('tick')
+        self.assertEqual(len(self.msgs()), 2)
+        self.move(4, 34)
+        self.qw('tick')
+        self.assertEqual(len(self.msgs()), 2)
+
+    def test_a_refused_full_notice_and_a_refused_reminder_are_each_retried_on_their_own(self):
+        self.book_full(25, 55)
+        (self.root / 'refuse').write_text('w1:p2\n')
+        self.qw('tick')
+        self.assertEqual(sorted(p for p, _ in self.msgs()), ['w1:p2', 'w1:p4'])
+        (self.root / 'refuse').unlink()
+        self.qw('tick')
+        self.assertEqual(sorted(p for p, _ in self.msgs()), ['w1:p2', 'w1:p2', 'w1:p4'])
+        self.move(4, 34)
+        (self.root / 'refuse').write_text('w1:p4\n')
+        self.qw('tick')
+        self.assertEqual([p for p, t in self.msgs() if 'REMINDER' in t], ['w1:p2', 'w1:p4'])
+        (self.root / 'refuse').unlink()
+        self.qw('tick')
+        self.assertEqual([p for p, t in self.msgs() if 'REMINDER' in t], ['w1:p2', 'w1:p4', 'w1:p4'])
+        self.qw('tick')
+        self.assertEqual(len(self.msgs()), 6, 'delivered, so no more retries')
+
+    def test_an_agents_omp_runtime_is_never_an_offender_only_its_heavy_children_are(self):
+        self.book_window(-2, 30)
+        (self.root / 'qc-out.txt').write_text(
+            '  20.0%     300  omp                          w1:p2 canvas (agent runtime)\n'  # under 50%: not flagged
+            '  75.0%     301  omp                          w1:p4 sky  <-- not quiet\n'  # quiet-check flags a runtime at 50%+
+            '  70.0%    4242  omp                          omp shared service (owner unknown)  <-- not quiet\n'
+            '  95.0%   12345  ffmpeg                       w1:p2 canvas  <-- not quiet\n'
+            'quiet-check: 3 process(es) outside w1:p1 at >= 10% CPU\n')
+        self.qw('tick')
+        ((pane, text),) = self.stops()
+        self.assertEqual(pane, 'w1:p2')
+        self.assertIn('ffmpeg pid 12345 95.0%', text)
+        self.assertNotIn('omp pid', text)
+
     # -- easl tiles
 
     def test_with_the_switch_off_easl_is_never_called(self):
@@ -576,6 +754,22 @@ class QuietWindow(unittest.TestCase):
         self.assertEqual(stops, ['obj_retro'])
         self.assertNotIn('w1:p5', [p for p, _ in self.stops()])
         self.assertIn('not prompting adhoc: no effort brief', self.qw_log())
+
+    def test_tile_messages_steer_a_working_agent_mid_turn_instead_of_waiting_for_its_turn_to_end(self):
+        # `--when next-turn` held every notice and STOP NOW until the target's turn ended: hours late (2026-10-07).
+        self.set_easl()
+        wid = self.book_window(-2, 30, 'render')
+        (self.root / 'qc-out.txt').write_text(
+            '  70.0%    5555  node                         sim (easl tile obj_sim)  <-- not quiet\n')
+        self.qw('tick')
+        self.qw('remove', wid)
+        self.qw('tick')
+        prompts = [argv for argv in self.easl_calls() if argv[0] == 'agent.prompt']
+        kinds = {k for _, text in self.tile_prompts() for k in ('QUIET WINDOW', 'STOP NOW', 'ended') if k in text}
+        self.assertEqual(kinds, {'QUIET WINDOW', 'STOP NOW', 'ended'})  # notice, stop and summary all went by easl
+        for argv in prompts:
+            self.assertEqual(argv[argv.index('--when') + 1], 'now')
+            self.assertNotIn('next-turn', argv)
 
     def test_a_typed_delivery_is_a_loud_failure_and_that_tile_is_not_prompted_again(self):
         self.set_easl(mode='typed', tiles=TILES[:1])

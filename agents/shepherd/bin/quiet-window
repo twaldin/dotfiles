@@ -1,9 +1,11 @@
 #!/usr/bin/python3
 """quiet-window: book and enforce quiet windows for measured runs on twaldin-home.
 
-  quiet-window add START END OWNER LABEL   START/END in UTC, e.g. 2026-10-01T08:30Z; OWNER = herdr agent
+  quiet-window add START END OWNER LABEL [--quiet heavy|full] [--reason TEXT]
+                                           START/END in UTC, e.g. 2026-10-01T08:30Z; OWNER = herdr agent
                                            name (preferred: survives pane moves) or pane id, or easl tile name
-  quiet-window hold START END OWNER LABEL  the same, for a run whose driver refuses any registry row
+  quiet-window hold START END OWNER LABEL [--quiet heavy|full] [--reason TEXT]
+                                           the same, for a run whose driver refuses any registry row
                                            (its own included): kept in quiet-holds.json, which such
                                            drivers never read, and enforced exactly like a booking
   quiet-window list | remove ID            list shows bookings and holds; remove ends a running one now
@@ -11,21 +13,41 @@
   quiet-window mute ID                     end summary to the shepherd only (owner busy with Tim)
   quiet-window tick                        run every minute by launchd (net.waldin.quiet-window)
 
-tick: 10 minutes before a window, every other agent that runs work gets the hold notice: a herdr agent with
-an effort brief (~/cos/efforts/<name>/brief.md), and every omp easl tile with an easl protocol (>= 1), briefed
-or not (board CoSes spawn worker tiles whose briefs are notes on their board). During the window, quiet-check
---pane OWNER names processes of other agents at 10%+ CPU; each such agent gets a "stop now" prompt (at most
-every 4 minutes). At the end, the owner and the shepherd get a summary. A herdr agent without a brief (Tim's
-own ad-hoc sessions) is never messaged; its load still shows in the summary.
+Quiet levels (Tim and bench-judge, 2026-10-07). A window is `heavy` unless booked `--quiet full`; the row keeps
+`quiet` and `reason`, and a row without `quiet` (written before the levels) is heavy.
+  heavy  Tim's rule: pause or queue only heavy processes (builds, dev servers, test runs, renders, encodes,
+         benchmarks, game clients, screen captures); reading, coding, reviewing and subagents continue.
+  full   FULL QUIET across boards: no heavy processes and no new processes, subagents, lanes or tool-executing
+         agents on this Mac; reading and writing text only. For a run the heavy rule cannot protect (a suite's
+         sub-second latency bounds). --reason is required and names the process classes the run needs paused
+         and the measured reason; it goes into the notices, the STOP NOW prompts and `list` ([FULL QUIET: ...]).
+
+tick: before a window, every other agent that runs work gets the notice in the window's wording: a herdr agent
+with an effort brief (~/cos/efforts/<name>/brief.md), and every omp easl tile with an easl protocol (>= 1),
+briefed or not (board CoSes spawn worker tiles whose briefs are notes on their board). A heavy window gets one
+notice 10 minutes ahead. A full window gets a notice 30 minutes ahead and a reminder 5 minutes ahead (kept
+separately, so one booked later than 30 minutes ahead gets its notice at the next tick and still the reminder).
+A recipient that refuses (blocked, focused, no inbox yet) is asked again at every tick. During the window,
+quiet-check --pane OWNER names processes of other agents at 10%+ CPU; each such agent gets a "stop now" prompt
+in the window's wording (at most every 4 minutes). At the end, the owner and the shepherd get a summary. A
+herdr agent without a brief (Tim's own ad-hoc sessions) is never messaged; its load still shows in the summary.
 With ~/.config/machine-shepherd/easl.json enabled, easl agent tiles take part too: a tile may own a window,
-and omp tiles with an easl protocol get the notice, "stop now" and summary through `easl agent.prompt`
-(any other tile is skipped, never typed into).
+and omp tiles with an easl protocol get the notice, reminder, "stop now" and summary through `easl agent.prompt
+--when now`: a working agent is steered mid-turn, at its next step (`--when next-turn` held them until its turn
+ended, hours late for a long one; changed 2026-10-07). Any other tile is skipped, never typed into, and a
+delivery easl reports as "typed" is a loud failure with no more prompts to that tile in the window. herdr
+panes get the same texts through agent-msg (an omp inbox aside at the agent's next step).
+An agent's own omp runtime is never an offender: quiet-check tags it "(agent runtime)" below 50% CPU and flags it
+above, and quiet-window ignores both, since reading, coding and subagents run inside it. Its heavy children are named.
 From 3 minutes before a booking or hold until it ends (bench samples for its ARM check just before the
 start), mediaanalysisd above 50% CPU is stopped (SIGSTOP), and it is resumed (SIGCONT) once nothing runs
 or starts within 15 minutes; every stop and resume is logged (Tim approved this 2026-10-06:
 spotlightknowledged had driven it to ~160% just before a measured run).
 Why (2026-10-01): sky-lead's quiet notices reached only its own panes, so canvas's encode and
-build cancelled bench-judge's measured sitting 24 of 48 legs in."""
+build cancelled bench-judge's measured sitting 24 of 48 legs in.
+Why (2026-10-07): the old hold banned every new lane and subagent, read-only reviewers included, for runs that
+only needed builds and test runs paused; and notices to easl tiles waited for the target's turn to end."""
+import argparse
 import datetime as dt
 import json
 import os
@@ -45,9 +67,12 @@ SHEPHERD = open(os.path.expanduser("~/.config/machine-shepherd/pane")).read().st
     if os.path.exists(os.path.expanduser("~/.config/machine-shepherd/pane")) else "shepherd"
 HERDR = os.path.expanduser("~/.local/bin/herdr")
 NOTICE_MIN, REPEAT_MIN = 10, 4
-HOLD = ("no builds, renders, encodes, benchmarks, game clients or screen captures, and no new lanes or "
-        "subagents of any kind, read-only reviewers included (they run inside your omp process and count); "
-        "editing, reading, git and idle agents are fine")
+FULL_NOTICE_MIN, FULL_REMIND_MIN = 30, 5  # a full window: notice 30 min ahead, reminder 5 min ahead
+# What a window asks of the agents it notifies, by level (Tim, 2026-10-07 07:05Z; bench-judge's notice ruling).
+HEAVY = ("pause or queue only heavy processes (builds, dev servers, test runs, renders, encodes, benchmarks, "
+         "game clients, screen captures); reading, coding, reviewing and subagents continue")
+FULL = ("no heavy processes and no new processes, subagents, lanes or tool-executing agents on this Mac; "
+        "reading and writing text only")
 # The easl switch: {"enabled": true, "cli": "<easl path>"}. A missing or unreadable file,
 # or "enabled" not true, keeps quiet-window herdr-only.
 EASL_CONF = os.path.expanduser("~/.config/machine-shepherd/easl.json")
@@ -168,9 +193,10 @@ def told(t):
 
 
 def easl_prompt(t, text):
-    """`agent.prompt` to tile t at its next turn, addressed by tile id (a bare name can match several
-    tiles). Returns its delivery ("unknown" when the result does not say), or None when the call failed."""
-    out = easl("agent.prompt", "--target", t["tile"], "--text", text, "--from", "shepherd", "--when", "next-turn")
+    """`agent.prompt` to tile t, addressed by tile id (a bare name can match several tiles). `--when now` steers a
+    working agent mid-turn at its next step (`next-turn` waited for its turn to end: hours late). Returns its
+    delivery ("unknown" when the result does not say), or None when the call failed."""
+    out = easl("agent.prompt", "--target", t["tile"], "--text", text, "--from", "shepherd", "--when", "now")
     if out is None:
         return None
     try:
@@ -234,6 +260,35 @@ def mediaanalysisd(state, windows, now):
         del stopped[pid]
 
 
+def is_full(w):
+    """True for a FULL QUIET window; a row without `quiet` (written before the levels) is heavy."""
+    return w.get("quiet") == "full"
+
+
+def why(w):
+    """The reason a full window was booked with (the CLI requires one; a hand-edited row may lack it)."""
+    return w.get("reason") or "none recorded"
+
+
+def notice_text(w, span, unbooked, remind):
+    """The notice for window w in its level's wording, or (full windows) its reminder."""
+    who = f"for {w['label']} ({w['owner']})" + (" (unbooked hold: its driver refuses registry rows)" if unbooked else "")
+    begin = local(w["start"])
+    if is_full(w):
+        head = f"REMINDER (starts at {begin} local): QUIET WINDOW" if remind else "QUIET WINDOW"
+        return (f"shepherd: {head} {span} {who}. FULL QUIET across boards: {FULL}. Why: {why(w)}. "
+                f"Finish or park everything that runs a process before {begin}.")
+    return f"shepherd: QUIET WINDOW {span} {who}. Hold during it: {HEAVY}. Finish or park heavy work before {begin}."
+
+
+def stop_text(w, span, procs):
+    """The STOP NOW prompt to an agent whose processes load the machine during window w, in its level's wording."""
+    kind = "FULL QUIET window" if is_full(w) else "Quiet window"
+    rule = f"FULL QUIET across boards: {FULL}. Why: {why(w)}" if is_full(w) else HEAVY
+    return (f"shepherd: STOP NOW. {kind} {span} for {w['label']} is running, and your processes are loading the "
+            f"machine: {procs}. Stop or pause them until {local(w['end'])} local; {rule}.")
+
+
 def tick():
     # Both registries always exist as JSON lists (written atomically, never deleted), so a reader such as
     # astra's quiet check can refuse a missing or malformed file instead of reading it as "no rows". A
@@ -284,7 +339,8 @@ def tick():
         s = state.setdefault(w["id"], {"noticed": False, "started": False, "ended": False, "last": {}, "hits": {}})
         start, end = utc(w["start"]), utc(w["end"])
         span = f"{w['start'][11:16]}-{w['end'][11:16]}Z ({local(w['start'])}-{local(w['end'])} local)"
-        if s["ended"] or not (start - dt.timedelta(minutes=NOTICE_MIN) <= now < end or (now >= end and s["started"])):
+        lead = dt.timedelta(minutes=FULL_NOTICE_MIN if is_full(w) else NOTICE_MIN)
+        if s["ended"] or not (start - lead <= now < end or (now >= end and s["started"])):
             continue
         owner, me = pane_of(w["owner"]), pane_of(SHEPHERD)
         if owner is None and not s.get("owner_missing"):
@@ -292,17 +348,20 @@ def tick():
             send(s, SHEPHERD, f"shepherd: quiet window {w['id']} names owner {w['owner']}, which no herdr agent "
                               f"matches (moved pane? use agent names); its own processes will count as offenders.")
             s["owner_missing"] = True
-        if start - dt.timedelta(minutes=NOTICE_MIN) <= now < end and (not s["noticed"] or s.get("notice_pending")):
-            targets = s["notice_pending"] if s["noticed"] else [
-                p for p, n in ags.items() if p not in (owner, me) and briefed(n)] + [
-                i for i, t in tls.items() if i not in (owner, me) and t.get("name") not in (w["owner"], SHEPHERD)
-                and told(t)]
-            s["notice_pending"] = [
-                p for p in targets if (p in ags or p in tls) and not send(
-                    s, p, f"shepherd: QUIET WINDOW {span} for {w['label']} ({w['owner']})"
-                          f"{' (unbooked hold: its driver refuses registry rows)' if w in holds else ''}. "
-                          f"Hold during it: {HOLD}. Finish or park heavy work before {local(w['start'])}.")]
-            s["noticed"] = True
+        # The notice (heavy: 10 min ahead; full: 30 min ahead) and, for a full window, the reminder 5 min ahead keep
+        # separate state, so each is delivered once and retried at every tick for the recipients that refused it.
+        due = [("noticed", "notice_pending", start - lead, False)]
+        if is_full(w):
+            due.append(("reminded", "remind_pending", start - dt.timedelta(minutes=FULL_REMIND_MIN), True))
+        for done, pending, when, remind in due:
+            if when <= now < end and (not s.get(done) or s.get(pending)):
+                targets = s[pending] if s.get(done) else [
+                    p for p, n in ags.items() if p not in (owner, me) and briefed(n)] + [
+                    i for i, t in tls.items() if i not in (owner, me) and t.get("name") not in (w["owner"], SHEPHERD)
+                    and told(t)]
+                text = notice_text(w, span, w in holds, remind)
+                s[pending] = [p for p in targets if (p in ags or p in tls) and not send(s, p, text)]
+                s[done] = True
         if start <= now < end:
             s["started"] = True
             out = subprocess.run([os.path.expanduser("~/.local/bin/quiet-check"), "--pane", owner or w["owner"]],
@@ -310,6 +369,10 @@ def tick():
             offenders = {}
             for line in out.splitlines():
                 if "<-- not quiet" not in line:
+                    continue
+                # An agent's own omp runtime is never an offender, at any CPU: quiet-check tags it "(agent runtime)"
+                # below 50% and flags it above, but reading, coding and subagents run inside it. Its children are named.
+                if re.match(r"\s*[\d.]+%\s+\d+\s+omp\s", line):
                     continue
                 # Panes that share a project folder are listed as w2:pA|w2:pB; each of them is asked.
                 m = re.match(r"\s*([\d.]+)%\s+(\d+)\s+(\S+)\s+(w\d+:p\w+(?:\|w\d+:p\w+)*)", line)
@@ -340,9 +403,7 @@ def tick():
                         s["last"][pane] = now.isoformat()
                     continue
                 if last is None or now - dt.datetime.fromisoformat(last) >= dt.timedelta(minutes=REPEAT_MIN):
-                    if send(s, pane, f"shepherd: STOP NOW. Quiet window {span} for {w['label']} is running, and "
-                                     f"your processes are loading the machine: {', '.join(procs)}. Stop or pause "
-                                     f"them until {local(w['end'])} local; {HOLD}."):
+                    if send(s, pane, stop_text(w, span, ", ".join(procs))):
                         s["last"][pane] = now.isoformat()
         if now >= end and s["started"] and not s["ended"]:
             hits = ", ".join(f"{tile_name(tls[p]) if p in tls else p} x{n}" for p, n in s["hits"].items()) or "none"
@@ -364,19 +425,42 @@ def tick():
         save(HOLDS, keep_holds)
 
 
+class Usage(argparse.ArgumentParser):
+    def error(self, message):
+        sys.exit(f"quiet-window: {message}\n\n{__doc__}")
+
+
+def booking(cmd):
+    """The registry row for `add|hold START END OWNER LABEL [--quiet heavy|full] [--reason TEXT]`. A full window
+    without a reason is refused: the reason names the process classes it needs paused and the measured why."""
+    ap = Usage(prog=f"quiet-window {cmd[0]}", add_help=False, allow_abbrev=False)
+    for field in ("start", "end", "owner", "label"):
+        ap.add_argument(field)
+    ap.add_argument("--quiet", choices=("heavy", "full"), default="heavy")
+    ap.add_argument("--reason")
+    a = ap.parse_args(cmd[1:])
+    reason = (a.reason or "").strip()
+    if a.quiet == "full" and not reason:
+        ap.error("--quiet full needs --reason: the process classes the run needs paused and the measured reason "
+                 "(e.g. \"suite's sub-second latency bounds\")")
+    row = {"id": f"{a.start}-{a.owner}" + ("" if cmd[0] == "add" else "-hold"), "start": a.start, "end": a.end,
+           "owner": a.owner, "label": a.label, "quiet": a.quiet}
+    if reason:
+        row["reason"] = reason
+    return row
+
+
 def main():
     cmd = sys.argv[1:] or ["list"]
     book, holds = load(BOOK, []), load(HOLDS, [])
-    if cmd[0] in ("add", "hold") and len(cmd) == 5:
-        start, end = utc(cmd[1]), utc(cmd[2])
-        if end <= start:
+    if cmd[0] in ("add", "hold"):
+        row = booking(cmd)
+        if utc(row["end"]) <= utc(row["start"]):
             sys.exit("end must be after start")
         path, rows = (BOOK, book) if cmd[0] == "add" else (HOLDS, holds)
-        wid = f"{cmd[1]}-{cmd[3]}" + ("" if cmd[0] == "add" else "-hold")
-        rows = [w for w in rows if w["id"] != wid] + [
-            {"id": wid, "start": cmd[1], "end": cmd[2], "owner": cmd[3], "label": cmd[4]}]
+        rows = [w for w in rows if w["id"] != row["id"]] + [row]
         save(path, sorted(rows, key=lambda w: w["start"]))
-        print(f"{'booked' if cmd[0] == 'add' else 'held (not in the registry)'} {wid}")
+        print(f"{'booked' if cmd[0] == 'add' else 'held (not in the registry)'} {row['id']}")
     elif cmd[0] in ("remove", "mute") and len(cmd) == 2:
         path, rows = (BOOK, book) if find(book, cmd[1]) else (HOLDS, holds)
         w = find(rows, cmd[1])
@@ -398,7 +482,8 @@ def main():
     elif cmd[0] == "list":
         for w in sorted(book + holds, key=lambda x: x["start"]):
             print(f"{w['id']}  {w['start']} -> {w['end']}  ({local(w['start'])}-{local(w['end'])} local)  "
-                  f"{w['owner']}  {w['label']}{'  [HOLD: unbooked, not in the registry]' if w in holds else ''}")
+                  f"{w['owner']}  {w['label']}{f'  [FULL QUIET: {why(w)}]' if is_full(w) else ''}"
+                  f"{'  [HOLD: unbooked, not in the registry]' if w in holds else ''}")
     elif cmd[0] == "tick":
         tick()
     else:
