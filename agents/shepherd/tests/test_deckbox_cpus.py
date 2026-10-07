@@ -161,10 +161,10 @@ class Take(CpusCase):
         self.assertEqual(timer[0][2], f"--on-calendar={expires.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         self.assertEqual(timer[0][-4:], [str(TOOL), 'give', 'sky', '--expired'])
         self.assertEqual(row['timer'], timer[0][1][len('--unit='):] + '.timer')
-        self.assertEqual([m['to'] for m in row['messages']], ['hone@hone', 'hutter-v2@deckbox'])
+        self.assertEqual([m['to'] for m in row['messages']], ['hone@twaldin-home', 'hutter-v2@deckbox'])
         self.assertEqual([m['exit'] for m in row['messages']], [0, 0])
         sent = self.records('agent-msg.jsonl')
-        self.assertEqual([s[0] for s in sent], ['hone@hone', 'hutter-v2@deckbox'])
+        self.assertEqual([s[0] for s in sent], ['hone@twaldin-home', 'hutter-v2@deckbox'])
         self.assertIn('sky took deckbox CPUs 6-11,18-23 until', sent[0][1])
         self.assertEqual(sent[0][2:], ['--from', 'deckbox-cpus'])
         self.assertEqual(self.holds()['sky']['cpus'], [6, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23])
@@ -250,14 +250,14 @@ class Take(CpusCase):
         self.assertEqual(self.holds(), {})
 
     def test_a_failed_message_goes_to_hutters_arm_windows_file(self):
-        code, row = self.cpus('take', 'sky', '6', '--for', '5', env={'FAKE_MSG_FAIL': 'hone@hone'})
+        code, row = self.cpus('take', 'sky', '6', '--for', '5', env={'FAKE_MSG_FAIL': 'hone@twaldin-home'})
         self.assertEqual(code, 0, row)
-        self.assertEqual(row['messages'][0], {'to': 'hone@hone', 'exit': 75,
+        self.assertEqual(row['messages'][0], {'to': 'hone@twaldin-home', 'exit': 75,
                                               'fallback': str(self.home / 'hutter/run/arm-windows.ndjson')})
         self.assertEqual(row['messages'][1], {'to': 'hutter-v2@deckbox', 'exit': 0})
         (line,) = self.arm_windows()
         self.assertEqual((line['event'], line['owner'], line['cpus'], line['undelivered_to'], line['exit']),
-                         ('take', 'sky', '6', 'hone@hone', 75))
+                         ('take', 'sky', '6', 'hone@twaldin-home', 75))
 
     def test_a_second_take_by_the_same_owner_replaces_its_reservation(self):
         self.assertEqual(self.cpus('take', 'sky', '6-7', '--for', '10')[0], 0)
@@ -289,7 +289,7 @@ class Give(CpusCase):
         self.assertIn(['--user', 'stop', timer], self.records('systemctl.jsonl'))
         self.assertEqual(self.holds(), {})
         sent = self.records('agent-msg.jsonl')[-2:]
-        self.assertEqual([s[0] for s in sent], ['hone@hone', 'hutter-v2@deckbox'])
+        self.assertEqual([s[0] for s in sent], ['hone@twaldin-home', 'hutter-v2@deckbox'])
         self.assertIn('sky gave back deckbox CPUs 6-11,18-23', sent[0][1])
 
     def test_give_with_nothing_held_is_a_no_op_with_a_note(self):

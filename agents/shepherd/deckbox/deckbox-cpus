@@ -28,8 +28,9 @@ AllowedCPUs and CPUQuota before and after, the busy sample, the offload threads 
 
 give removes the owner's reservation, cancels its timer and restores agents.slice: the base set minus any
 other owner's CPUs, and no CPUQuota once nothing is held. Giving when nothing is held exits 0 with a note.
-take and give message hone@hone and hutter-v2@deckbox through ~/.local/bin/agent-msg; a send that fails is
-appended to ~/hutter/run/arm-windows.ndjson instead. State: ~/.local/state/deckbox-cpus/ (holds.json, log.jsonl).
+take and give message hone (as hone@twaldin-home; see RECIPIENTS) and hutter-v2@deckbox through
+~/.local/bin/agent-msg; a send that fails is appended to ~/hutter/run/arm-windows.ndjson instead.
+State: ~/.local/state/deckbox-cpus/ (holds.json, log.jsonl).
 """
 import datetime as dt
 import fcntl
@@ -54,7 +55,10 @@ STATE = os.path.join(HOME, ".local/state/deckbox-cpus")
 HOLDS = os.path.join(STATE, "holds.json")
 LOG = os.path.join(STATE, "log.jsonl")
 AGENT_MSG = os.path.join(HOME, ".local/bin/agent-msg")
-RECIPIENTS = ("hone@hone", "hutter-v2@deckbox")
+# hone is the easl tile hone@hone, whose process runs here, but deckbox's easl CLI has no socket outside a tile (an
+# ssh caller or the expiry timer never is one), so agent-msg reads `@hone` as a host. hone@twaldin-home goes over
+# ssh to the Mac, whose easl delivers it to the tile (measured 2026-10-07: exit 0, "queued for hone@hone", ~17 s).
+RECIPIENTS = ("hone@twaldin-home", "hutter-v2@deckbox")
 ARM_WINDOWS = os.path.join(HOME, "hutter/run/arm-windows.ndjson")
 USAGE = ("usage: deckbox-cpus take <owner> <cpulist> (--for <min> | --until <ISO-UTC>)\n"
          "       deckbox-cpus give <owner>\n"
