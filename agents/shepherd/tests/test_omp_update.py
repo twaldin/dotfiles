@@ -1,6 +1,7 @@
 """Smoke test for bin/omp-update: the quiet-window check, the extension-fingerprint pins that decide whether a
-pane is due a restart, the checkpoint summary line, and the easl tiles (the switch file, tile restarts and their
-gates, roll, `migrate`).
+pane is due a restart, the checkpoint summary line, the easl tiles (the switch file, tile restarts and their
+gates, roll, `migrate`), the hourly rotation triggers and gates, the post-restart extension check and the
+rollout it can stop, and per-host version holds.
 
 The script is loaded as a module with HOME = a temp dir, so every path it derives (state, config, the quiet
 book, HERDR, the easl switch) is sandboxed. What it reaches outside itself is replaced by one fake `World`: herdr's
@@ -17,6 +18,7 @@ import importlib.util
 import io
 import json
 import os
+import plistlib
 import shutil
 import shlex
 import subprocess
@@ -88,6 +90,7 @@ class FakeEasl:
         self.fail = {}  # command -> (returncode, stdout, stderr)
         self.lists, self.on_list = 0, {}  # on_list[n](easl) runs just before the n-th agent.list is answered
         self.restart_changes_pid, self.session_after_restart = True, None
+        self.after_restart = {}  # fields the tile reports once its omp came back (e.g. protocol None)
         self.create = 'with pid'  # what object.create leaves behind: 'with pid', 'without pid' or 'not listed'
         self.reported_session = None  # a created tile's omp reports this instead of the --resume= in its command
         self.created, self.deleted = [], []
@@ -125,6 +128,8 @@ class FakeEasl:
         tile = self.find(self.opt(opts, '--target'))
         if self.restart_changes_pid:
             tile['pid'] = self.world.pid()
+            self.world.born(tile['pid'])
+        tile.update(self.after_restart)
         if self.session_after_restart:
             self.session[tile['tile']] = self.session_after_restart
         return {'ok': True}
@@ -165,6 +170,7 @@ class World:
         self.typed, self.closed, self.agent_starts = [], [], []  # `/exit` prompts, closed panes, `agent start` argv
         self.agent_start_rc, self.agent_start_err = 0, ''
         self.omp_pid = None
+        self.new_omp_log = None  # JSON log lines every omp started from here on writes to ~/.omp/logs
         self.next_pid = self.PID
         self.sessions = root / 'sessions'
         self.sessions.mkdir(exist_ok=True)
@@ -195,10 +201,18 @@ class World:
         self.omp_pid, self.pane, self.agent, self.session = omp, pane, agent, session
         return agent
 
+    def born(self, pid):
+        """A new omp `pid` came up: it writes its own log, as omp does (omp.<date>.<pid>.log)."""
+        if self.new_omp_log is not None:
+            logs = self.root / '.omp' / 'logs'
+            logs.mkdir(parents=True, exist_ok=True)
+            (logs / f'omp.2026-10-07.{pid}.log').write_text(self.new_omp_log)
+
     def place_tile(self, name='lead', tile='obj_lead', state='idle', seen=True, restored=False, focused=False,
-                   draft=False, session_mb=150, age_s=7200, board='brd_dotfiles', with_pid=True):
+                   draft=False, session_mb=150, age_s=7200, board='brd_dotfiles', with_pid=True,
+                   model='anthropic/claude-opus-5-5'):
         """An omp agent in an easl terminal tile, as `easl agent.list` reports it."""
-        agent = {'tile': tile, 'board': board, 'name': name, 'kind': 'omp', 'protocol': 1,
+        agent = {'tile': tile, 'board': board, 'name': name, 'kind': 'omp', 'protocol': 1, 'model': model,
                  'lifecycle': {'state': state, 'seen': seen, 'restored': restored}}
         for key, value in (('focused', focused), ('draft', draft)):
             if value is not MISSING:
@@ -251,6 +265,7 @@ class World:
             new = self.pid()
             argv = [self.mod.OMP, *cmd[cmd.index('--') + 1:]]
             info.update(foreground_process_group_id=new, foreground_processes=[{'pid': new, 'argv': argv}])
+            self.born(new)
             self.procs[new] = {'ppid': info['shell_pid'], 'age_s': 5, 'cmd': ' '.join(argv)}
         return subprocess.CompletedProcess(cmd, self.agent_start_rc, '', self.agent_start_err)
 
@@ -298,12 +313,16 @@ class Sandbox(unittest.TestCase):
             self.book_path.unlink()
         return self.world
 
-    def book(self, *windows):
-        """windows: (start, end) minutes from now."""
+    def book(self, *windows, quiet='full'):
+        """windows: (start, end) minutes from now; quiet: the row's level ("full", "heavy", None = no field)."""
         self.book_path.parent.mkdir(parents=True, exist_ok=True)
-        self.book_path.write_text(json.dumps([
-            {'id': f'w{i}', 'start': stamp(s), 'end': stamp(e), 'owner': 'bench-judge', 'label': 'latency run'}
-            for i, (s, e) in enumerate(windows, 1)]))
+        rows = []
+        for i, (s, e) in enumerate(windows, 1):
+            row = {'id': f'w{i}', 'start': stamp(s), 'end': stamp(e), 'owner': 'bench-judge', 'label': 'latency run'}
+            if quiet:
+                row['quiet'] = quiet
+            rows.append(row)
+        self.book_path.write_text(json.dumps(rows))
 
     def actions(self):
         path = Path(self.mod.STATE) / 'actions.jsonl'
@@ -342,10 +361,31 @@ class QuietBlock(Sandbox):
         # quiet-window keeps holds (runs whose driver refuses booked rows) in quiet-holds.json.
         self.book((-120, -60))
         (self.book_path.parent / 'quiet-holds.json').write_text(json.dumps(
-            [{'id': 'h1-hold', 'start': stamp(10), 'end': stamp(40), 'owner': 'teleport-lab', 'label': 'r4'}]))
+            [{'id': 'h1-hold', 'start': stamp(10), 'end': stamp(40), 'owner': 'teleport-lab', 'label': 'r4',
+              'quiet': 'full'}]))
         self.addCleanup((self.book_path.parent / 'quiet-holds.json').unlink)
         self.assertEqual(self.mod.quiet_block(self.BOOK, 30),
                          f"quiet window h1-hold {stamp(10)}->{stamp(40)} (teleport-lab)")
+
+    def test_a_heavy_only_row_or_one_without_a_level_never_blocks(self):
+        # quiet-window: a row without `quiet` (written before the levels) is heavy. A resume restart of an idle
+        # agent and an install are light, so only FULL quiet stops them.
+        holds = self.book_path.parent / 'quiet-holds.json'
+        for quiet in ('heavy', None):
+            with self.subTest(quiet=quiet):
+                self.book((-5, 60), (25, 55), quiet=quiet)
+                row = {'id': 'h1-hold', 'start': stamp(-5), 'end': stamp(60), 'owner': 'perf', 'label': 'remeasure'}
+                holds.write_text(json.dumps([dict(row, quiet=quiet) if quiet else row]))
+                self.assertIsNone(self.mod.quiet_block(self.BOOK, 30))
+        holds.unlink()
+
+    def test_a_running_heavy_hold_is_named_for_the_report_and_a_later_one_is_not(self):
+        self.book((-5, 60), quiet='heavy')
+        self.assertEqual(self.mod.quiet_heavy(self.BOOK), f'heavy hold w1 {stamp(-5)}->{stamp(60)} (bench-judge)')
+        self.book((10, 60), quiet=None)
+        self.assertIsNone(self.mod.quiet_heavy(self.BOOK))
+        self.book((-5, 60), quiet='full')
+        self.assertIsNone(self.mod.quiet_heavy(self.BOOK))
 
 
 class ExtensionFingerprint(Sandbox):
@@ -394,6 +434,7 @@ class ExtensionPins(Sandbox):
         self.mod.omp_version = lambda path=None: '1.2.3'
         self.mod.exe_path = lambda pid: None
         self.mod.mem_mb = lambda pid: 300
+        self.mod.open_sessions = lambda pid: []  # lsof on a fake pid: the subagent gate finds nothing open
         omp = Path(self.mod.OMP)
         omp.parent.mkdir(parents=True)
         omp.write_text('#!/bin/sh\n')
@@ -739,6 +780,23 @@ class TileRestart(TileSandbox):
                 self.assertEqual((row['triggers'], row['action']), (triggers, action))
                 self.assertEqual(len(self.calls('agent.restart')), 1 if action == 'restarted' else 0)
 
+    def test_a_tile_is_due_after_twelve_hours_up(self):
+        for age_h, triggers, action in ((11, [], 'none'), (13, ['up 13.0 h'], 'restarted')):
+            with self.subTest(age_h=age_h):
+                world = self.new_world()
+                world.place_tile(session_mb=10, age_s=age_h * 3600)
+                row = self.row(self.host())
+                self.assertEqual((row['triggers'], row['action']), (triggers, action))
+
+    def test_a_tile_whose_omp_rss_is_over_1_5_gb_is_due(self):
+        for rss_mb, triggers, action in ((1400, [], 'none'), (1600, ['rss 1600 MB'], 'restarted')):
+            with self.subTest(rss_mb=rss_mb):
+                world = self.new_world()
+                world.place_tile(session_mb=10)
+                world.procs[world.tile_pid]['rss_mb'] = rss_mb
+                row = self.row(self.host())
+                self.assertEqual((row['triggers'], row['action'], row['rss_mb']), (triggers, action, rss_mb))
+
     def test_a_dry_run_says_would_restart_and_changes_nothing(self):
         self.world.place_tile()
         res = self.host(dry_run=True)
@@ -795,6 +853,43 @@ class TileRestart(TileSandbox):
                                      setup=lambda w: w.add_child(w.tile_pid, '/usr/bin/cargo build --release'))
         self.assertIn('cargo build', row['children'][0])
 
+    def test_a_tile_with_an_armed_timer_a_server_or_ssh_under_its_kernel_is_left_alone(self):
+        # omp's own python runner is plumbing: what runs under it is the agent's work.
+        for cmd in ('sleep 1800', 'python3 -m http.server 8765', 'ssh tim@deckbox tail -f /tmp/run.log'):
+            with self.subTest(cmd=cmd):
+                self.new_world()
+
+                def under_kernel(w, cmd=cmd):
+                    kernel = w.add_child(w.tile_pid, 'Python -u /var/folders/x/T/omp-python-runner/runner-1.py')
+                    w.add_child(kernel, cmd)
+                row = self.assert_left_alone('skip: live child work', setup=under_kernel)
+                self.assertIn(cmd[:20], row['children'][0])
+
+    def subagent(self, world, name='Worker', written_s_ago=900, held=True):
+        """A subagent transcript in the tile's session directory, as omp writes one; `held`: the omp has it open."""
+        folder = Path(str(world.tile_session)[:-len('.jsonl')])
+        folder.mkdir(exist_ok=True)
+        transcript = folder / f'{name}.jsonl'
+        transcript.write_text('{"type": "session"}\n')
+        t = self.clock.now - written_s_ago
+        os.utime(transcript, (t, t))
+        if held:
+            pid = world.tile_pid
+            self.mod.open_sessions = lambda p: [str(world.tile_session), str(transcript)] if p == pid else []
+        return transcript
+
+    def test_a_tile_running_an_in_process_subagent_is_left_alone(self):
+        row = self.assert_left_alone('skip: subagent running', setup=self.subagent)
+        self.assertEqual(row['children'], ['subagent Worker'])
+
+    def test_a_subagent_transcript_written_in_the_last_three_minutes_counts_as_running(self):
+        self.assert_left_alone('skip: subagent running',
+                               setup=lambda w: self.subagent(w, written_s_ago=60, held=False))
+        world = self.new_world()
+        world.place_tile()
+        self.subagent(world, written_s_ago=600, held=False)  # finished ten minutes ago
+        self.assertEqual(self.row(self.host())['action'], 'restarted')
+
     def test_a_tile_waits_out_a_quiet_window_and_its_guard_but_not_a_distant_one(self):
         self.book((-5, 60))
         reason = self.mod.quiet_block(self.BOOK, 30)
@@ -805,6 +900,16 @@ class TileRestart(TileSandbox):
         world.place_tile()
         res = self.host(blocked=self.mod.quiet_block(self.BOOK, 30))
         self.assertEqual(self.row(res)['action'], 'restarted')
+
+    def test_a_heavy_hold_lets_an_idle_tile_restart_and_a_full_one_does_not(self):
+        self.book((-5, 60), quiet='heavy')
+        self.world.place_tile()
+        self.assertEqual(self.row(self.host(blocked=self.mod.quiet_block(self.BOOK, 30)))['action'], 'restarted')
+        self.new_world()
+        self.book((-5, 60), quiet='full')
+        reason = self.mod.quiet_block(self.BOOK, 30)
+        self.assertTrue(reason.startswith('quiet window w1 '), reason)
+        self.assert_left_alone(f'skip: {reason}', blocked=reason)
 
     def test_a_tile_that_turned_busy_or_vanished_since_the_listing_is_not_restarted(self):
         def turns_working(world):
@@ -877,6 +982,63 @@ class TileFailures(TileSandbox):
         self.assertEqual(res['errors'], [])
 
 
+class ExtensionCheck(TileSandbox):
+    """After every restart the new omp must have loaded its extensions (no load or bind failure in its own log) and
+    a tile must report easl protocol >= 1 and the model it had, within a bounded time. A failure stops the host's
+    other restarts."""
+    MODEL = 'anthropic/claude-opus-5-5'
+
+    def test_a_tile_back_with_its_protocol_and_model_passes(self):
+        self.world.place_tile()
+        res = self.host()
+        row = self.row(res)
+        self.assertEqual((row['action'], row['ext_check']), ('restarted', 'ok'))
+        self.assertEqual((res['ext_failures'], res['errors']), ([], []))
+
+    def test_a_tile_without_protocol_or_on_another_model_fails_in_bounded_time_and_stops_the_hosts_restarts(self):
+        cases = [('no protocol', {'protocol': None}, None, self.MODEL),
+                 ('another model', {'model': 'openai/gpt-6.1-sol'}, 1, 'openai/gpt-6.1-sol')]
+        for label, after, protocol, model in cases:
+            with self.subTest(label):
+                world = self.new_world()
+                world.place_tile(name='lead', tile='obj_lead')
+                world.place_tile(name='scout', tile='obj_scout')
+                self.easl.after_restart = after
+                started = self.clock.now
+                res = self.host()
+                problem = (f'easl reports protocol {protocol!r}, model {model!r} after 60 s '
+                           f'(expected protocol >= 1, model {self.MODEL!r})')
+                lead, scout = self.row(res, 'obj_lead'), self.row(res, 'obj_scout')
+                self.assertEqual(lead['action'], f'restarted, but extension check failed: {problem}')
+                self.assertEqual(lead['ext_check'], problem)
+                self.assertEqual(scout['action'], 'skip: extension check failed after restarting lead on this host')
+                self.assertEqual(self.calls('agent.restart'), [self.RESTART])
+                self.assertEqual(res['ext_failures'], [{'pane': 'obj_lead', 'name': 'lead', 'version': '1.2.3',
+                                                        'problem': problem}])
+                self.assertEqual(res['errors'], [f'obj_lead: {lead["action"]}'])
+                self.assertLess(self.clock.now - started, 400)
+
+    def test_a_pane_whose_new_omp_failed_to_load_an_extension_fails_the_check(self):
+        self.set_switch(None)  # deckbox: herdr panes, no easl
+        self.world.place_agent('hutter', 'wT:p4', session_mb=150)
+        self.world.new_omp_log = ''.join(json.dumps(e) + '\n' for e in [
+            {'level': 'warn', 'message': 'Claude usage fetch failed', 'status': 429},
+            {'level': 'error', 'message': 'Failed to load extension',
+             'path': '/home/tim/.omp/agent/extensions/omp-inbox.ts', 'error': 'TypeError: pi.on is not a function'}])
+        res = self.host()
+        (row,) = res['panes']
+        problem = 'extension failed to load: omp-inbox.ts: TypeError: pi.on is not a function'
+        self.assertEqual((row['action'], row['ext_check']), (f'restarted, but extension check failed: {problem}', problem))
+        self.assertEqual([f['problem'] for f in res['ext_failures']], [problem])
+
+    def test_a_clean_log_passes_a_pane(self):
+        self.set_switch(None)
+        self.world.place_agent('hutter', 'wT:p4', session_mb=150)
+        self.world.new_omp_log = json.dumps({'level': 'warn', 'message': 'Claude usage fetch failed'}) + '\n'
+        (row,) = self.host()['panes']
+        self.assertEqual((row['action'], row['ext_check']), ('restarted', 'ok'))
+
+
 class TileRoll(TileSandbox):
     def test_a_tile_started_before_the_extension_change_is_restarted_through_the_same_path(self):
         self.extension_changed(minutes_ago=10)
@@ -929,6 +1091,165 @@ class TileRoll(TileSandbox):
         self.assertEqual(len(self.world.agent_starts), 1)
         self.assertTrue(any('home worker w1:p5: restarted' in ln for ln in log), log)
         self.assertFalse(any('obj_lead' in ln for ln in log), log)
+
+
+class Policy(Sandbox):
+    def test_the_defaults_rotate_agents_for_freshness(self):
+        cfg = self.mod.load_config()
+        self.assertEqual({k: cfg[k] for k in ('min_age_hours', 'max_uptime_hours', 'max_session_mb', 'max_rss_mb')},
+                         {'min_age_hours': 3, 'max_uptime_hours': 12, 'max_session_mb': 100, 'max_rss_mb': 1536})
+
+    def test_the_job_runs_hourly_under_its_old_label(self):
+        plist = plistlib.loads((OMP_UPDATE.parent.parent / 'launchd' / 'net.waldin.omp-update.plist').read_bytes())
+        self.assertEqual(plist['Label'], 'net.waldin.omp-update')
+        self.assertEqual(plist['StartInterval'], 3600)
+        self.assertNotIn('StartCalendarInterval', plist)
+        self.assertEqual(plist['ProgramArguments'][1:], ['/Users/twaldin/.local/bin/omp-update', 'run'])
+
+
+class Target(Sandbox):
+    """resolve_target against GitHub releases/tags and npm as curl_json returns them."""
+    NEED = ('omp-darwin-arm64', 'omp-linux-x64', 'SHA256SUMS.txt')
+
+    @staticmethod
+    def ago(hours):
+        return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def feed(self, published, tags=()):
+        """published: {version: hours since its GitHub release}; npm gets each 6 min later. tags: tags without one."""
+        rels = [{'tag_name': 'v' + v, 'draft': False, 'prerelease': False, 'published_at': self.ago(h),
+                 'assets': [{'name': n} for n in self.NEED]} for v, h in published.items()]
+        npm = {'versions': {v: {} for v in published}, 'time': {v: self.ago(h - 0.1) for v, h in published.items()},
+               'dist-tags': {'latest': max(published, key=self.mod.vtuple)}}
+        tag_rows = [{'name': 'v' + v} for v in published] + [{'name': t} for t in tags]
+        self.mod.curl_json = lambda url: npm if 'registry.npmjs.org' in url else rels if '/releases' in url else tag_rows
+
+    def test_a_release_three_hours_old_on_github_and_npm_is_the_target_and_a_pulled_one_never_is(self):
+        self.feed({'18.6.1': 72, '18.6.3': 4, '18.7.0': 2.5}, tags=['v18.6.2', 'v18.6.4'])
+        info = self.mod.resolve_target(self.mod.load_config()['min_age_hours'])
+        self.assertEqual((info['target'], info['eligible'], info['too_young'], info['unpublished_tags']),
+                         ('18.6.3', ['18.6.1', '18.6.3'], ['18.7.0'], ['v18.6.4']))
+
+    def test_a_blocked_version_is_never_the_target(self):
+        self.feed({'18.6.1': 72, '18.6.3': 4})
+        info = self.mod.resolve_target(3, blocked={'18.6.3': {'reason': 'easl protocol missing'}})
+        self.assertEqual((info['target'], info['eligible'], info['blocked'], info['too_young']),
+                         ('18.6.1', ['18.6.1'], ['18.6.3'], []))
+
+
+class Rollout(Sandbox):
+    """main_run across the hosts in canary order with run_host stubbed: per-host version holds, quiet levels, and
+    the stop an extension failure on the canary causes."""
+    HOLD = {'hold_below': '18.8.0', 'hold_note': 'canvas checks easl against 18.8.x'}
+    CONFIG = {'hosts': {'deckbox': {'ssh': 'tim@deckbox'},
+                        'work': {'ssh': 'twaldin-work', **HOLD},
+                        'home': {'ssh': None, 'quiet_book': '~/.config/machine-shepherd/quiet-windows.json', **HOLD}},
+              'order': ['deckbox', 'work', 'home'], 'notify': ['canvas@canvas', 'meta@dotfiles']}
+
+    def setUp(self):
+        super().setUp()
+        self.write_config(self.CONFIG)
+        self.params, self.results, self.msgs, self.asked_blocked = {}, {}, [], []
+
+        def resolve_target(min_age_h, blocked=()):
+            self.asked_blocked.append(sorted(blocked))
+            eligible = [v for v in ('18.6.1', '18.7.0', '18.8.0') if v not in blocked]
+            return {'target': eligible[-1], 'eligible': eligible, 'published': '-', 'too_young': [],
+                    'unpublished_tags': [], 'npm_latest': '18.8.3', 'blocked': sorted(blocked)}
+
+        def run_host(name, hc, params):
+            self.params[name] = params
+            res = {'host': name, 'installed_before': '18.6.1',
+                   'installed_after': '18.6.1' if params['blocked'] else params['target'],
+                   'actions': [], 'panes': [], 'unmanaged': [], 'errors': [], 'ext_failures': []}
+            res.update(self.results.get(name, {}))
+            return res
+
+        def sh(cmd, timeout=120, check=False, **kw):
+            if cmd[0] != self.mod.AGENT_MSG:
+                raise AssertionError(f'unexpected command {cmd}')
+            self.msgs.append(cmd[1:])
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+
+        self.mod.resolve_target, self.mod.run_host, self.mod.sh = resolve_target, run_host, sh
+
+    def write_config(self, cfg):
+        Path(self.mod.CONFIG).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.mod.CONFIG).write_text(json.dumps(cfg))
+
+    def config(self):
+        return json.loads(Path(self.mod.CONFIG).read_text())
+
+    def run_once(self):
+        self.params.clear()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.mod.main_run(argparse.Namespace(dry_run=False, hosts=None, only_pane=None, no_wait=False))
+        return out.getvalue()
+
+    def test_held_hosts_take_the_newest_release_below_their_hold_and_the_report_says_why(self):
+        out = self.run_once()
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertEqual({h: p['target'] for h, p in self.params.items()},
+                         {'deckbox': '18.8.0', 'work': '18.7.0', 'home': '18.7.0'})
+        self.assertIn('== deckbox: installed 18.6.1 -> 18.8.0 (target 18.8.0)\n', out)
+        self.assertIn('== home: installed 18.6.1 -> 18.7.0 (target 18.7.0; held below 18.8.0: '
+                      'canvas checks easl against 18.8.x)\n', out)
+        self.assertIn('home 18.6.1->18.7.0 (held <18.8.0)', out.splitlines()[-1])
+
+    def test_lifting_a_hold_in_config_lets_that_host_take_the_target(self):
+        cfg = self.config()
+        del cfg['hosts']['home']['hold_below']
+        self.write_config(cfg)
+        self.run_once()
+        self.assertEqual({h: p['target'] for h, p in self.params.items()},
+                         {'deckbox': '18.8.0', 'work': '18.7.0', 'home': '18.8.0'})
+
+    def test_an_extension_failure_on_the_canary_blocks_its_version_stops_the_rollout_and_tells_canvas_and_meta(self):
+        self.results['deckbox'] = {'ext_failures': [{'pane': 'wT:p4', 'name': 'hutter', 'version': '18.8.0',
+                                                     'problem': 'extension failed to load: omp-inbox.ts: TypeError'}]}
+        out = self.run_once()
+        why = ('extension check failed on deckbox omp 18.8.0 after restarting hutter: '
+               'extension failed to load: omp-inbox.ts: TypeError')
+        self.assertEqual((self.params['work']['blocked'], self.params['home']['blocked']),
+                         (f'rollout stopped: {why}',) * 2)
+        cfg = self.config()
+        self.assertEqual(sorted(cfg['blocked_versions']), ['18.8.0'])
+        block = cfg['blocked_versions']['18.8.0']
+        self.assertEqual((block['reason'], block['host']), (why, 'deckbox'))
+        self.assertEqual(cfg['hosts'], self.CONFIG['hosts'], 'the rest of the config is left as it was')
+        self.assertEqual([m[:3] for m in self.msgs], [['--from', 'shepherd', 'canvas@canvas'],
+                                                       ['--from', 'shepherd', 'meta@dotfiles']])
+        self.assertTrue(all('omp 18.8.0 is blocked' in m[3] and why in m[3] for m in self.msgs), self.msgs)
+        self.assertIn(f'ROLLOUT STOPPED: {why}', out)
+        notes = [a for a in self.actions() if a['kind'] == 'notify']
+        self.assertEqual([(n['to'], n['rc']) for n in notes], [('canvas@canvas', 0), ('meta@dotfiles', 0)])
+        # The next hourly run: the version stays out of every target, and nobody is told twice.
+        self.results.clear()
+        self.msgs.clear()
+        self.run_once()
+        self.assertEqual(self.asked_blocked[-1], ['18.8.0'])
+        self.assertEqual((self.params['work']['blocked'], self.msgs), (None, []))
+
+    def test_a_failure_on_a_version_the_later_hosts_already_run_stops_the_run_and_blocks_nothing(self):
+        (Path(self.mod.STATE) / 'last-run.json').write_text(json.dumps({'results': [
+            {'host': h, 'installed_after': '18.6.1'} for h in ('deckbox', 'work', 'home')]}))
+        self.results['deckbox'] = {'installed_after': '18.6.1', 'ext_failures': [
+            {'pane': 'wT:p4', 'name': 'hutter', 'version': '18.6.1', 'problem': 'extension failed to load: x.ts: y'}]}
+        self.run_once()
+        self.assertTrue(self.params['home']['blocked'].startswith('rollout stopped: extension check failed on deckbox'))
+        self.assertNotIn('blocked_versions', self.config())
+        self.assertEqual(self.msgs, [])
+
+    def test_a_full_hold_on_home_blocks_it_and_a_heavy_one_does_not(self):
+        self.book((-5, 60), quiet='heavy')
+        out = self.run_once()
+        self.assertIsNone(self.params['home']['blocked'])
+        self.assertIn(f'heavy hold w1 {stamp(-5)}->{stamp(60)} (bench-judge): light restarts allowed', out)
+        self.book((-5, 60), quiet='full')
+        self.run_once()
+        self.assertTrue(self.params['home']['blocked'].startswith('quiet window w1 '), self.params['home'])
+        self.assertIsNone(self.params['deckbox']['blocked'])
 
 
 class DropFlags(unittest.TestCase):
@@ -1253,7 +1574,8 @@ class EaslCli(Sandbox):
 
     def test_tile_agents_keeps_omp_agents_and_shapes_them_like_herdr_agents_for_the_gate(self):
         lead = {'tile': 'obj_a', 'board': 'brd_1', 'name': 'lead', 'kind': 'omp', 'pid': 42, 'focused': False,
-                'draft': False, 'protocol': 1, 'lifecycle': {'state': 'done', 'seen': True, 'restored': False}}
+                'draft': False, 'protocol': 1, 'model': 'anthropic/claude-opus-5-5',
+                'lifecycle': {'state': 'done', 'seen': True, 'restored': False}}
         self.stub_state(agents=[lead, {'tile': 'obj_b', 'name': 'shell', 'kind': 'shell'},
                                 {'tile': 'obj_c', 'name': 'bare', 'kind': 'omp'}])
         tiles, err = self.mod.tile_agents(self.cli)
@@ -1261,9 +1583,10 @@ class EaslCli(Sandbox):
         self.assertEqual(tiles, [
             {'tile': True, 'pane_id': 'obj_a', 'name': 'lead', 'board': 'brd_1', 'agent_status': 'done',
              'lifecycle': lead['lifecycle'], 'focused': False, 'draft': False, 'pid': 42, 'protocol': 1,
-             'cli': self.cli},
+             'model': 'anthropic/claude-opus-5-5', 'cli': self.cli},
             {'tile': True, 'pane_id': 'obj_c', 'name': 'bare', 'board': None, 'agent_status': None,
-             'lifecycle': {}, 'focused': None, 'draft': None, 'pid': None, 'protocol': None, 'cli': self.cli}])
+             'lifecycle': {}, 'focused': None, 'draft': None, 'pid': None, 'protocol': None, 'model': None,
+             'cli': self.cli}])
         self.assertEqual(self.mod.tile_get(self.cli, 'obj_a')['pid'], 42)
         self.assertIsNone(self.mod.tile_get(self.cli, 'obj_b'))
 

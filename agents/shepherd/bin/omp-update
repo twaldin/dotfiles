@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
-"""omp-update: keep omp on one vetted release on home, work and deckbox, and restart
-idle herdr panes onto it. Runs daily on twaldin-home from launchd net.waldin.omp-update;
-work and deckbox get this same file over ssh (`python3 - host ...`), so there is one copy.
+"""omp-update: keep omp on one vetted release on home, work and deckbox, and rotate idle
+agents onto it so no session runs long and heavy. Runs hourly on twaldin-home from launchd
+net.waldin.omp-update; work and deckbox get this same file over ssh (`python3 - host ...`),
+so there is one copy.
 
-Policy (Tim, 2026-10-05, via the meta pane):
+Policy (Tim, 2026-10-05, via the meta pane; hourly rotation 2026-10-07):
 - Target = the newest omp release published on BOTH GitHub releases and npm at least
-  24 h ago. A tag without a published release (e.g. v18.6.2) never counts. Every host
-  goes to the target; a host that is ahead is reported, never downgraded.
-- No install or restart on a host while it is in a quiet window, or when one starts
-  within 30 min (home's book: ~/.config/machine-shepherd/quiet-windows.json, plus the holds in
-  quiet-holds.json beside it). The run
-  waits for the window to end, up to quiet_wait_hours, then skips that host for the day.
-- herdr panes: never touch one that is `working` (or `blocked`). An `idle`/`done` pane is
-  restarted (/exit, then `herdr agent start <name> --kind omp --pane <id> -- --resume=<session>`)
-  when its omp is older than the installed one, its session jsonl is over 100 MB, or its
-  omp is more than 48 h old. Not when it still has child work running (herdr shows
-  background jobs as idle and /exit would kill them), text is waiting in its editor,
-  or the pane runs this job. The restart is verified: same session file, new pid, and
-  the memory before/after is logged.
+  min_age_hours (3 h) ago. A tag without a published release (e.g. v18.6.2) never counts,
+  nor a version in config `blocked_versions`. Hosts go in the canary order deckbox -> work ->
+  home; a host with `hold_below` (hosts.<h>.hold_below + hold_note; delete it to lift) takes
+  the newest such release below that version. A host that is ahead is reported, never
+  downgraded.
+- No install or restart on a host in a FULL quiet hold ("quiet": "full" rows of
+  ~/.config/machine-shepherd/quiet-windows.json and quiet-holds.json beside it), or when one
+  starts within 30 min: the run waits up to quiet_wait_hours, then leaves the host to the next
+  hourly run. A heavy-only hold (any other row) allows both: a resume restart of an idle agent
+  is light.
+- herdr panes and easl tiles: never touch one that is `working` (or `blocked`). An `idle`/`done`
+  one is restarted (pane: /exit, then `herdr agent start <name> --kind omp --pane <id> --
+  --resume=<session>`) when its omp is older than the installed one, its session jsonl is over
+  100 MB, its RSS is over 1.5 GB, or its omp is more than 12 h old. Not when it still has child
+  work running (timers, jobs, servers, test runs, ssh: herdr shows background jobs as idle and
+  /exit would kill them), runs an in-process subagent (a transcript in its session directory
+  it holds open or wrote in the last 3 min), text is waiting in its editor, or it runs this
+  job. The restart is verified: same session file, new pid, and the memory before/after is
+  logged.
+- After every restart the new omp's own log must show no extension that failed to load or
+  bind, and a tile must report easl protocol >= 1 and its model within 60 s. A failure stops
+  the host's other restarts and the rest of the run; when the failing host runs a version a
+  later host lacks (deckbox, the canary), that version goes into `blocked_versions` with the
+  reason, and the agents in config `notify` (canvas, meta) are told through agent-msg.
 - Seats and front doors (config report_only: `lindy-seat`; opt_in overrides it), and every
-  omp outside herdr and easl tiles: the daily run only reports them.
+  omp outside herdr and easl tiles: the run only reports them.
 - launchd omp services (home: auth broker + gateway) restart through launchctl
   kickstart when their omp is older than the installed one.
 - easl tiles (home, behind ~/.config/machine-shepherd/easl.json {"enabled": true, "cli":
@@ -65,6 +77,8 @@ STATE = os.path.join(HOME, ".local", "state", "omp-update")
 CONFIG = os.path.join(HOME, ".config", "omp-update", "config.json")
 CHECKPOINT = os.path.join(HOME, ".local", "state", "machine-shepherd", "checkpoint.md")
 EASL_SWITCH = os.path.join(HOME, ".config", "machine-shepherd", "easl.json")
+OMP_LOGS = os.path.join(HOME, ".omp", "logs")
+AGENT_MSG = os.path.join(HOME, ".local", "bin", "agent-msg")
 ENV = dict(os.environ, PATH=os.pathsep.join([
     BUN_BIN, os.path.join(HOME, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin",
     "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
@@ -80,6 +94,8 @@ DEFAULT_CONFIG = {
                  "easl": "/Applications/easl.app/Contents/Resources/bin/easl"},
         # Its launchd omp services are restarted when they run an older binary (deckbox omp
         # gets its credentials from this broker; Tim 10-05: work keeps its own local store).
+        # Any host may carry "hold_below": "18.8.0" + "hold_note": it then takes the newest
+        # eligible release below that version (delete the two keys to lift the hold).
         "home": {"ssh": None, "quiet_book": "~/.config/machine-shepherd/quiet-windows.json",
                  "services": [
                      {"label": "com.twaldin.omp-auth-broker", "match": "auth-broker serve",
@@ -88,15 +104,22 @@ DEFAULT_CONFIG = {
                       "health": "http://100.85.222.119:4000/healthz"}]},
     },
     "order": ["deckbox", "work", "home"],
-    "min_age_hours": 24,
+    "min_age_hours": 3,
     "max_session_mb": 100,
-    "max_uptime_hours": 48,
+    "max_uptime_hours": 12,
+    "max_rss_mb": 1536,
     "quiet_guard_minutes": 30,
-    "quiet_wait_hours": 6,
-    # Seats/front doors: the daily run only reports them (move a name to opt_in to manage it).
+    # The job runs hourly: wait out a FULL hold for at most this long, then the next run retries.
+    "quiet_wait_hours": 0.5,
+    # Seats/front doors: the hourly run only reports them (move a name to opt_in to manage it).
     "report_only": {"names": ["lindy-seat"], "panes": []},
     "opt_in": [],
     "skip_panes": [],
+    # Versions kept off every host after a restart onto them failed its extension check:
+    # {version: {"reason", "host", "at"}}. Written by the run; delete an entry to lift it.
+    "blocked_versions": {},
+    # Told (agent-msg) when a version is blocked.
+    "notify": ["canvas@canvas", "meta@dotfiles"],
     # Extension changes that need no restart (e.g. a refactor that behaves the same):
     # {content fingerprint: {"since": epoch of the last change that did need one, "note"}}.
     # Written by `omp-update ext-ack`; any later, unacknowledged change re-arms the trigger.
@@ -109,6 +132,13 @@ DEFAULT_CONFIG = {
 TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner/")
 SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|pyright|langserver|language-server|languageserver|"
                         r"tsserver|rust-analyzer|gopls|clangd|sourcekit-lsp|lsp-mux|biome lsp|ruff server")
+# A subagent transcript written this recently counts as a running subagent even when its omp
+# does not hold it open.
+SUBAGENT_FRESH_S = 180
+# How long a restarted tile gets to report its easl protocol and model.
+EXT_CHECK_S = 60
+# What omp logs (~/.omp/logs/omp.<date>.<pid>.log, JSON lines) for an extension it could not use.
+EXT_LOAD_FAILED = ("Failed to load extension", "Failed to bind extension")
 
 
 def note(msg):
@@ -233,12 +263,13 @@ def etime_s(s):
 
 
 def ps_table():
-    cmd = ["ps", "-axo", "pid=,ppid=,etime=,command="] if MAC else ["ps", "-eo", "pid=,ppid=,etime=,args="]
+    """{pid: ppid, age_s, rss_mb (resident set), cmd} for every process."""
+    cmd = ["ps", "-axo", "pid=,ppid=,etime=,rss=,command="] if MAC else ["ps", "-eo", "pid=,ppid=,etime=,rss=,args="]
     procs = {}
     for ln in sh(cmd, timeout=60).stdout.splitlines():
-        p = ln.split(None, 3)
-        if len(p) == 4:
-            procs[int(p[0])] = {"ppid": int(p[1]), "age_s": etime_s(p[2]), "cmd": p[3]}
+        p = ln.split(None, 4)
+        if len(p) == 5:
+            procs[int(p[0])] = {"ppid": int(p[1]), "age_s": etime_s(p[2]), "rss_mb": int(p[3]) // 1024, "cmd": p[4]}
     return procs
 
 
@@ -319,6 +350,65 @@ def live_children(pid, procs):
             found.append(f"{c} {cmd[:70]}")
         stack.extend(kids.get(c, []))
     return found
+
+
+def running_subagents(pid, session):
+    """The in-process subagents the omp `pid` runs now: transcripts it holds open in a session
+    directory (<session>/<Name>.jsonl beside <session>.jsonl, nested ones deeper; omp keeps a
+    running subagent's transcript open), or ones in its own session's directory written in the
+    last SUBAGENT_FRESH_S. A restart would end them mid-task."""
+    folder = session[:-len(".jsonl")] + os.sep if session and session.endswith(".jsonl") else None
+    found = {p for p in open_sessions(pid) if os.path.isfile(os.path.dirname(p) + ".jsonl")}
+    if folder:
+        cutoff = time.time() - SUBAGENT_FRESH_S
+        for p in glob.glob(os.path.join(glob.escape(folder), "**", "*.jsonl"), recursive=True):
+            try:
+                if os.path.getmtime(p) >= cutoff:
+                    found.add(p)
+            except OSError:
+                pass
+    return [f"subagent {p[len(folder):-6] if folder and p.startswith(folder) else os.path.basename(p)[:-6]}"
+            for p in sorted(found)]
+
+
+def extension_load_errors(pid):
+    """'<extension file>: <error>' for each extension the omp `pid` logged it could not load or bind."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(OMP_LOGS, f"omp.*.{pid}.log"))):
+        try:
+            with open(path, errors="replace") as f:
+                for line in f:
+                    if "xtension" not in line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(e, dict) and e.get("message") in EXT_LOAD_FAILED:
+                        out.append(f"{os.path.basename(str(e.get('path') or '?'))}: {str(e.get('error'))[:160]}")
+        except OSError:
+            pass
+    return out
+
+
+def extension_problem(pid, tile=None, model=None):
+    """None when the omp `pid` that just came up from a restart is healthy, else what is wrong.
+    A tile (the restarted agent's tile row) must report easl protocol >= 1 (easl's omp extension
+    reports it) and the `model` it had before, within EXT_CHECK_S; and the omp's own log must name
+    no extension it could not load or bind (omp-inbox, easl, herdr state on any host)."""
+    if tile:
+        deadline = time.time() + EXT_CHECK_S
+        while True:
+            now = tile_get(tile["cli"], tile["pane_id"]) or {}
+            proto = now.get("protocol")
+            if isinstance(proto, (int, float)) and proto >= 1 and (not model or now.get("model") == model):
+                break
+            if time.time() >= deadline:
+                return (f"easl reports protocol {proto!r}, model {now.get('model')!r} after {EXT_CHECK_S} s "
+                        f"(expected protocol >= 1, model {model!r})")
+            time.sleep(2)
+    errs = extension_load_errors(pid)
+    return "extension failed to load: " + "; ".join(errs[:3]) if errs else None
 
 
 def ancestors(procs):
@@ -429,7 +519,8 @@ def tile_agents(cli):
         lc = t.get("lifecycle") or {}
         tiles.append({"tile": True, "pane_id": t["tile"], "name": t.get("name"), "board": t.get("board"),
                       "agent_status": lc.get("state"), "lifecycle": lc, "focused": t.get("focused"),
-                      "draft": t.get("draft"), "pid": t.get("pid"), "protocol": t.get("protocol"), "cli": cli})
+                      "draft": t.get("draft"), "pid": t.get("pid"), "protocol": t.get("protocol"),
+                      "model": t.get("model"), "cli": cli})
     return tiles, None
 
 
@@ -497,6 +588,9 @@ def restart_pane(row, argv):
         time.sleep(2)
     row["session_unchanged"] = now_session == session
     row["memory_dropped"] = (row["mem_after_mb"] or 0) < (row["mem_before_mb"] or 0)
+    row["ext_check"] = extension_problem(new) or "ok"
+    if row["ext_check"] != "ok":
+        return f"restarted, but extension check failed: {row['ext_check']}"
     if not row["session_unchanged"]:
         return f"restarted, but herdr reports session {now_session}"
     return "restarted"
@@ -505,7 +599,8 @@ def restart_pane(row, argv):
 def restart_tile(row, a):
     """`easl agent.restart --mode resume`: same tile, name, model, thinking and session; easl
     refuses (`conflict`) while the tile is working, blocked, focused or has a draft.
-    Verified like a pane restart: a new omp pid and the same session file."""
+    Verified like a pane restart: a new omp pid and the same session file; then its extension
+    check (protocol and model back in easl, no extension that failed to load)."""
     cli, tile, old = a["cli"], row["pane"], row["pid"]
     row.update(mem_before_mb=mem_mb(old), mechanism="easl agent.restart")
     out = easl(cli, "agent.restart", "--target", tile, "--mode", "resume", timeout=120)
@@ -531,6 +626,9 @@ def restart_tile(row, a):
         time.sleep(2)
     row["session_unchanged"] = now_session == row["session"]
     row["memory_dropped"] = (row["mem_after_mb"] or 0) < (row["mem_before_mb"] or 0)
+    row["ext_check"] = extension_problem(new, a, a.get("model")) or "ok"
+    if row["ext_check"] != "ok":
+        return f"restarted, but extension check failed: {row['ext_check']}"
     if not row["session_unchanged"]:
         return f"restarted, but easl reports session {now_session}"
     return "restarted"
@@ -611,15 +709,16 @@ def restart_services(services, installed, dry, blocked, pending, errors):
     return acts
 
 
-def idle_gate(a, pid, procs, mine, blocked, recheck=True):
-    """(skip reason or None, live children) for restarting the omp `pid` in herdr agent or
-    easl tile `a` (a["tile"]). Every restart (daily run, roll, migrate) passes the same
-    gates: no quiet window now or within the guard, idle/done, not focused by Tim (he may
-    start typing; /exit would race his draft), not running this job, no live child work
-    (background jobs show as idle and /exit would kill them), nothing typed in its editor;
-    then the status is read once more right before acting. Tiles also: a lifecycle easl
-    only restored after an app restart is unconfirmed, a `done` Tim hasn't seen keeps its
-    needs-you marker, and an unreported focus or draft counts as present."""
+def idle_gate(a, pid, procs, mine, blocked, recheck=True, session=None):
+    """(skip reason or None, live children or subagents) for restarting the omp `pid` in herdr
+    agent or easl tile `a` (a["tile"]) on `session`. Every restart (hourly run, roll, migrate)
+    passes the same gates: no FULL quiet hold now or within the guard, idle/done, not focused by
+    Tim (he may start typing; /exit would race his draft), not running this job, no live child
+    work (timers, jobs, servers, ssh: background jobs show as idle and /exit would kill them),
+    no in-process subagent running, nothing typed in its editor; then the status is read once
+    more right before acting. Tiles also: a lifecycle easl only restored after an app restart is
+    unconfirmed, a `done` Tim hasn't seen keeps its needs-you marker, and an unreported focus or
+    draft counts as present."""
     pane, status, tile = a["pane_id"], a.get("agent_status"), a.get("tile")
     lc = a.get("lifecycle") or {}
     if blocked:
@@ -639,6 +738,9 @@ def idle_gate(a, pid, procs, mine, blocked, recheck=True):
     busy = live_children(pid, procs)
     if busy:
         return "skip: live child work", busy[:4]
+    subs = running_subagents(pid, session)
+    if subs:
+        return "skip: subagent running", subs[:4]
     if tile:
         if a.get("draft") is None:
             return "skip: draft unknown (easl reports none)", None
@@ -661,7 +763,7 @@ def host_main(params):
     dry, target, pol = params["dry_run"], params["target"], params["policy"]
     only, blocked = params.get("only_pane"), params.get("blocked")
     roll = params.get("roll")  # restart-only pass for panes that predate an extension change
-    res = {"host": params["host"], "actions": [], "panes": [], "unmanaged": [], "errors": []}
+    res = {"host": params["host"], "actions": [], "panes": [], "unmanaged": [], "errors": [], "ext_failures": []}
     acts = res["actions"]
     installed = omp_version()
     res["installed_before"] = installed
@@ -707,6 +809,7 @@ def host_main(params):
     procs = ps_table()
     mine = ancestors(procs)
     managed = set()
+    ext_broken = None  # the agent whose restart failed its extension check: no more restarts here
     agents = []
     if params.get("manage_panes", True) and os.path.exists(HERDR):
         agents = herdr("agent", "list").get("result", {}).get("agents", [])
@@ -736,16 +839,19 @@ def host_main(params):
             continue
         managed.add(pid)
         age = procs.get(pid, {}).get("age_s", 0)
+        rss = procs.get(pid, {}).get("rss_mb")
         older, ver = running_version(pid, age, res["installed_after"])
         older = older or (dry and pending)  # after the pending install, every omp is older
         smb = round(os.path.getsize(session) / 1048576) if session and os.path.exists(session) else None
-        row.update(version=ver, uptime_h=round(age / 3600, 1), session_mb=smb,
+        row.update(version=ver, uptime_h=round(age / 3600, 1), session_mb=smb, rss_mb=rss,
                    mem_mb=None if roll else mem_mb(pid))
         triggers = []
         if older:
             triggers.append(f"binary {ver or 'older'} < {current}")
         if smb and smb > pol["max_session_mb"]:
             triggers.append(f"session {smb} MB")
+        if rss and rss > pol["max_rss_mb"]:
+            triggers.append(f"rss {rss} MB")
         if age > pol["max_uptime_hours"] * 3600:
             triggers.append(f"up {row['uptime_h']} h")
         if ext_mtime and time.time() - age < ext_mtime - 60:
@@ -763,8 +869,10 @@ def host_main(params):
             row["action"] = "none"
         elif only and pane != only:
             row["action"] = "skip: not selected (--only-pane)"
+        elif ext_broken:
+            row["action"] = f"skip: extension check failed after restarting {ext_broken} on this host"
         else:
-            skip, busy = idle_gate(a, pid, procs, mine, blocked, recheck=not dry)
+            skip, busy = idle_gate(a, pid, procs, mine, blocked, recheck=not dry, session=session)
             if busy:
                 row["children"] = busy
             if skip:
@@ -776,7 +884,11 @@ def host_main(params):
                     row["action"] = restart_tile(row, a) if tile else restart_pane(row, argv)
                 except Exception as e:
                     row["action"] = f"failed: {str(e)[:200]}"
-                if row["action"].startswith("failed"):
+                if row.get("ext_check", "ok") != "ok":
+                    ext_broken = name or pane
+                    res["ext_failures"].append({"pane": pane, "name": name, "version": res["installed_after"],
+                                                "problem": row["ext_check"]})
+                if row["action"].startswith(("failed", "restarted, but extension check failed")):
                     res["errors"].append(f"{pane}: {row['action']}")
         acts.append({"kind": "pane", **{k: v for k, v in row.items() if k != "session"},
                      "session": os.path.basename(session or "")})
@@ -814,7 +926,10 @@ def curl_json(url):
     return json.loads(sh(["curl", "-fsSL", "--retry", "3", *hdr, url], timeout=180, check=True).stdout)
 
 
-def resolve_target(min_age_h):
+def resolve_target(min_age_h, blocked=()):
+    """The release the policy picks: the newest one published on GitHub (with the binaries) and
+    npm at least min_age_h ago and not in `blocked`; "eligible" lists every such release (a host
+    under a hold takes the newest one below it)."""
     cutoff = utcnow() - dt.timedelta(hours=min_age_h)
     rels = curl_json(f"https://api.github.com/repos/{REPO}/releases?per_page=30")
     npm = curl_json(f"https://registry.npmjs.org/{NPM_PKG}")
@@ -822,24 +937,35 @@ def resolve_target(min_age_h):
     released = {r["tag_name"].lstrip("v"): r for r in rels if not r["draft"] and not r["prerelease"]}
     need = {"omp-darwin-arm64", "omp-linux-x64", "SHA256SUMS.txt"}
     cands = [v for v, r in released.items()
-             if parse_ts(r["published_at"]) <= cutoff and v in npm.get("versions", {})
+             if v not in blocked and parse_ts(r["published_at"]) <= cutoff and v in npm.get("versions", {})
              and v in npm.get("time", {}) and parse_ts(npm["time"][v]) <= cutoff
              and need <= {x["name"] for x in r.get("assets", [])}]
     if not cands:
-        raise RuntimeError("no release is on both GitHub and npm and 24 h old")
+        raise RuntimeError(f"no release outside blocked_versions is on both GitHub and npm and {min_age_h} h old")
     target = max(cands, key=vtuple)
     info = {"target": target, "published": released[target]["published_at"],
-            "too_young": sorted((v for v in released if vtuple(v) > vtuple(target)), key=vtuple),
+            "eligible": sorted(cands, key=vtuple),
+            "too_young": sorted((v for v in released if vtuple(v) > vtuple(target) and v not in blocked), key=vtuple),
+            "blocked": sorted(blocked, key=vtuple),
             "unpublished_tags": [t["name"] for t in tags
                                  if vtuple(t["name"]) > vtuple(target) and t["name"].lstrip("v") not in released],
             "npm_latest": npm.get("dist-tags", {}).get("latest")}
     return info
 
 
-def quiet_block(book, guard_min):
-    """The booking or hold that blocks restarts now: one running, or starting within guard_min. Holds
-    (quiet-holds.json beside the book) are windows for runs whose driver refuses any booked row; a
-    restart's omp start disturbs them just the same."""
+def host_target(tinfo, hc):
+    """The release this host goes to: the run's target or, while the host's config holds it below
+    a version ("hold_below"), the newest eligible release below that one ("0" when none is)."""
+    hold = hc.get("hold_below")
+    if not hold or vtuple(tinfo["target"]) < vtuple(hold):
+        return tinfo["target"]
+    below = [v for v in tinfo.get("eligible", []) if vtuple(v) < vtuple(hold)]
+    return max(below, key=vtuple) if below else "0"
+
+
+def quiet_rows(book):
+    """The rows of the quiet book and of the holds beside it (quiet-holds.json: windows for runs
+    whose driver refuses any booked row); a missing or unreadable file has none."""
     path = os.path.expanduser(book)
     windows = []
     for f in (path, os.path.join(os.path.dirname(path), "quiet-holds.json")):
@@ -848,12 +974,86 @@ def quiet_block(book, guard_min):
                 windows += json.load(fh)
         except (OSError, ValueError):
             pass
+    return windows
+
+
+def quiet_block(book, guard_min):
+    """The FULL quiet booking or hold ("quiet": "full") that blocks installs and restarts now: one
+    running, or starting within guard_min. Any other row is heavy-only (quiet-window reads a row
+    without a level, written before the levels, as heavy) and blocks nothing here: an install and
+    a resume restart of an idle agent are light."""
     now = utcnow()
-    for w in windows:
+    for w in quiet_rows(book):
+        if w.get("quiet") != "full":
+            continue
         start, end = parse_ts(w["start"]), parse_ts(w["end"])
         if start - dt.timedelta(minutes=guard_min) <= now < end:
             return f"quiet window {w['id']} {w['start']}->{w['end']} ({w.get('owner')})"
     return None
+
+
+def quiet_heavy(book):
+    """The heavy-only booking or hold running now, named for the report, or None."""
+    now = utcnow()
+    for w in quiet_rows(book):
+        if w.get("quiet") != "full" and parse_ts(w["start"]) <= now < parse_ts(w["end"]):
+            return f"heavy hold {w['id']} {w['start']}->{w['end']} ({w.get('owner')})"
+    return None
+
+
+def update_config(change):
+    """Apply `change` to the config as written (defaults not filled in) and save it atomically."""
+    with open(CONFIG) as f:
+        raw = json.load(f)
+    change(raw)
+    with open(CONFIG + ".tmp", "w") as f:
+        json.dump(raw, f, indent=1)
+    os.replace(CONFIG + ".tmp", CONFIG)
+
+
+def notify(addrs, text):
+    """Tell agents (name@board, name@host) through agent-msg: their omp inbox or easl tile, never
+    typed into a terminal. Each attempt is one actions.jsonl row."""
+    for addr in addrs:
+        try:
+            r = sh([AGENT_MSG, "--from", "shepherd", addr, text], timeout=90)
+            rc, err = r.returncode, (r.stderr or "").strip()[:200]
+        except (OSError, subprocess.TimeoutExpired) as e:
+            rc, err = None, str(e)[:200]
+        with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
+            f.write(json.dumps({"ts": stamp(), "kind": "notify", "to": addr, "rc": rc, "error": err,
+                                "text": text}) + "\n")
+
+
+def last_versions():
+    """{host: the omp version it had at the end of the last run}, from last-run.json."""
+    try:
+        with open(os.path.join(STATE, "last-run.json")) as f:
+            return {r["host"]: r.get("installed_after") for r in json.load(f)["results"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def stop_rollout(cfg, name, r, dry):
+    """A restart on host `name` failed its extension check: why the rest of the run only reports.
+    When `name` runs a version a later host in the order lacks (this run installed it, or a later
+    host had an older one at the last run), it is the canary's finding: the version goes into
+    blocked_versions with the reason (delete the entry to lift it), and the agents in `notify`
+    are told at once, once per block."""
+    v, f = r.get("installed_after"), r["ext_failures"][0]
+    why = f"extension check failed on {name} omp {v} after restarting {f.get('name') or f['pane']}: {f['problem']}"
+    order = cfg["order"]
+    later = order[order.index(name) + 1:] if name in order else []
+    known = last_versions()
+    new = r.get("installed_before") != v or any(vtuple(known.get(h) or "0") < vtuple(v) for h in later)
+    if v and new and not dry and v not in (cfg.get("blocked_versions") or {}):
+        def block(raw):
+            raw.setdefault("blocked_versions", {})[v] = {"reason": why, "host": name, "at": stamp()}
+        update_config(block)
+        notify(cfg.get("notify") or [],
+               f"omp-update: omp {v} is blocked: {why}. The rollout stopped there; the other hosts keep their "
+               f"version and no host takes {v}. To lift: delete blocked_versions[\"{v}\"] in {CONFIG}.")
+    return why
 
 
 def run_host(name, hc, params):
@@ -877,11 +1077,12 @@ def short_pane(p):
     return p.split(":")[-1]
 
 
-def summary_line(when, tinfo, results):
+def summary_line(when, tinfo, results, stop=None):
     hosts = []
     for r in results:
         b, a = r.get("installed_before"), r.get("installed_after")
-        hosts.append(f"{r['host']} {b}" + (f"->{a}" if a and a != b else " ="))
+        hosts.append(f"{r['host']} {b}" + (f"->{a}" if a and a != b else " =")
+                     + (f" (held <{r['hold']['below']})" if r.get("hold") else ""))
     restarted, left = [], {}
     for r in results:
         for p in r["panes"]:
@@ -900,25 +1101,27 @@ def summary_line(when, tinfo, results):
     left_s = ", ".join(f"{k} {v}" for k, v in left.items()) or "none"
     svc = [f"{a['label'].rsplit('.', 1)[-1]} {a['action']}" for r in results for a in r["actions"]
            if a.get("kind") == "service" and a.get("action", "").startswith(("restarted", "restart failed"))]
+    skipped = tinfo["unpublished_tags"] + tinfo["too_young"] + [f"{v} blocked" for v in tinfo.get("blocked") or []]
     return (f"- {when} omp-update: target {tinfo['target']}"
-            + (f" (skipped {', '.join(tinfo['unpublished_tags'] + tinfo['too_young'])})"
-               if tinfo["unpublished_tags"] or tinfo["too_young"] else "")
+            + (f" (skipped {', '.join(skipped)})" if skipped else "")
             + f"; {', '.join(hosts)}; restarted {len(restarted)}"
             + (f" ({'; '.join(restarted)})" if restarted else "")
             + f"; due but left: {left_s}; seats/outside herdr: {len(seats)}"
             + (f" ({'; '.join(seats[:4])})" if seats else "")
             + (f"; services restarted {', '.join(svc)}" if svc else "")
+            + (f"; ROLLOUT STOPPED ({stop[:160]})" if stop else "")
             + f"; errors {len(errs)}" + (f" ({'; '.join(e[:80] for e in errs[:2])})" if errs else ""))
 
 
 def checkpoint_line(line, keep=14):
-    head = "## omp update job (daily, net.waldin.omp-update; log ~/.local/state/omp-update/actions.jsonl)"
+    head = "## omp update job (hourly, net.waldin.omp-update; log ~/.local/state/omp-update/actions.jsonl)"
     try:
         with open(CHECKPOINT) as f:
             text = f.read()
     except OSError:
         return
-    lines = text.rstrip("\n").split("\n")
+    old = head.replace("(hourly,", "(daily,")  # the section's name while the job ran daily
+    lines = [head if ln == old else ln for ln in text.rstrip("\n").split("\n")]
     if head not in lines:
         lines += ["", head]
     i = lines.index(head)
@@ -943,12 +1146,16 @@ def load_config():
     return {**DEFAULT_CONFIG, **cfg}
 
 
-def print_report(tinfo, results, dry):
+def print_report(tinfo, results, dry, stop=None):
     print(f"target {tinfo['target']} (GitHub {tinfo['published']}, npm latest {tinfo['npm_latest']}; "
-          f"too young {tinfo['too_young'] or '-'}; tags without release {tinfo['unpublished_tags'] or '-'})"
-          + ("  [DRY RUN]" if dry else ""))
+          f"too young {tinfo['too_young'] or '-'}; tags without release {tinfo['unpublished_tags'] or '-'}; "
+          f"blocked {tinfo.get('blocked') or '-'})" + ("  [DRY RUN]" if dry else ""))
     for r in results:
-        print(f"\n== {r['host']}: installed {r.get('installed_before')} -> {r.get('installed_after')}")
+        hold = r.get("hold")
+        print(f"\n== {r['host']}: installed {r.get('installed_before')} -> {r.get('installed_after')} "
+              f"(target {r.get('target')}" + (f"; held below {hold['below']}: {hold.get('note')}" if hold else "") + ")")
+        if r.get("heavy_hold"):
+            print(f"   {r['heavy_hold']}: light restarts allowed")
         for a in r["actions"]:
             if a["kind"] not in ("pane", "unmanaged"):
                 print(f"   {a['kind']}: " + ", ".join(f"{k}={v}" for k, v in a.items() if k != "kind"))
@@ -956,21 +1163,25 @@ def print_report(tinfo, results, dry):
             extra = ""
             if p.get("new_pid"):
                 extra = (f" | pid {p['pid']}->{p['new_pid']} mem {p.get('mem_before_mb')}->{p.get('mem_after_mb')} MB"
-                         f" session_unchanged={p.get('session_unchanged')} via {p.get('mechanism')}")
+                         f" session_unchanged={p.get('session_unchanged')} via {p.get('mechanism')}"
+                         f" ext_check={p.get('ext_check')}")
             if p.get("children"):
                 extra += f" | children: {p['children'][:2]}"
             print(f"   {p['pane']:8} {str(p.get('name') or '-'):13} {str(p.get('status')):8} "
                   f"v{p.get('version') or '?':8} up {p.get('uptime_h', '?'):>6}h sess {str(p.get('session_mb')):>4} MB "
-                  f"mem {str(p.get('mem_mb')):>5} MB  triggers {p.get('triggers') or '-'} -> {p.get('action')}{extra}")
+                  f"rss {str(p.get('rss_mb')):>5} MB mem {str(p.get('mem_mb')):>5} MB  "
+                  f"triggers {p.get('triggers') or '-'} -> {p.get('action')}{extra}")
         for u in r["unmanaged"]:
             print(f"   outside herdr: pid {u['pid']} v{u['version'] or 'older'} up {u['uptime_h']}h "
                   f"sess {u['session_mb']} MB mem {u['mem_mb']} MB -> {u['action']} | {u['cmd'][:60]}")
         for e in r["errors"]:
             print(f"   ERROR {e}")
+    if stop:
+        print(f"\nROLLOUT STOPPED: {stop}")
 
 
 def take_lock(wait_s):
-    """run.lock serializes the daily run and roll passes, so two never restart one pane."""
+    """run.lock serializes the hourly run and roll passes, so two never restart one pane."""
     os.makedirs(STATE, exist_ok=True)
     lock = open(os.path.join(STATE, "run.lock"), "a")
     deadline = time.time() + wait_s
@@ -990,8 +1201,8 @@ def main_roll(args):
     one pass per minute until none is left or --hours passes. Session-preserving: same
     restart as the daily run (/exit, then herdr agent start ... --resume=<session>)."""
     cfg = load_config()
-    policy = {k: cfg[k] for k in ("max_session_mb", "max_uptime_hours", "report_only", "opt_in", "skip_panes",
-                                  "extensions_pins")}
+    policy = {k: cfg[k] for k in ("max_session_mb", "max_uptime_hours", "max_rss_mb", "report_only", "opt_in",
+                                  "skip_panes", "extensions_pins")}
     policy["opt_in"] = list(policy["opt_in"]) + (args.include.split(",") if args.include else [])
     hosts = args.hosts.split(",")
     deadline, n, left = time.time() + args.hours * 3600, 0, {}
@@ -1148,7 +1359,7 @@ def main_migrate(args):
     hc = cfg["hosts"]["home"]
     blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"]) if hc.get("quiet_book") else None
     procs = ps_table()
-    skip, busy = idle_gate(a, pid, procs, ancestors(procs), blocked, recheck=not dry)
+    skip, busy = idle_gate(a, pid, procs, ancestors(procs), blocked, recheck=not dry, session=session)
     if skip:
         sys.exit(f"migrate: {name}: {skip}" + (f" {busy}" if busy else ""))
     keep, dropped = resume_args(argv)
@@ -1219,26 +1430,36 @@ def main_run(args):
         sys.exit("omp-update: run.lock held for 30 min")
     cfg = load_config()
     started = utcnow()
-    tinfo = resolve_target(cfg["min_age_hours"])
-    policy = {k: cfg[k] for k in ("max_session_mb", "max_uptime_hours", "report_only", "opt_in", "skip_panes",
-                                  "extensions_pins")}
+    tinfo = resolve_target(cfg["min_age_hours"], cfg["blocked_versions"] or {})
+    policy = {k: cfg[k] for k in ("max_session_mb", "max_uptime_hours", "max_rss_mb", "report_only", "opt_in",
+                                  "skip_panes", "extensions_pins")}
     hosts = args.hosts.split(",") if args.hosts else cfg["order"]
-    results = []
+    results, stop = [], None  # stop: why the rest of the run only reports (an extension check failed)
     for name in hosts:
         hc = cfg["hosts"][name]
-        blocked = None
-        if hc.get("quiet_book"):
+        target = host_target(tinfo, hc)
+        blocked = f"rollout stopped: {stop}" if stop else None
+        if hc.get("quiet_book") and not blocked:
             blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"])
             deadline = time.time() + cfg["quiet_wait_hours"] * 3600
             while blocked and not args.dry_run and not args.no_wait and time.time() < deadline:
                 note(f"{name}: waiting for {blocked}")
                 time.sleep(300)
                 blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"])
-        params = {"host": name, "target": tinfo["target"], "dry_run": args.dry_run, "policy": policy,
+        params = {"host": name, "target": target, "dry_run": args.dry_run, "policy": policy,
                   "only_pane": args.only_pane, "blocked": blocked, "manage_panes": hc.get("manage_panes", True),
                   "services": hc.get("services", []), "easl": host_easl(hc)}
         note(f"{name}: running")
-        results.append(run_host(name, hc, params))
+        r = run_host(name, hc, params)
+        r["target"] = target
+        if hc.get("hold_below"):
+            r["hold"] = {"below": hc["hold_below"], "note": hc.get("hold_note")}
+        heavy = quiet_heavy(hc["quiet_book"]) if hc.get("quiet_book") and not blocked else None
+        if heavy:
+            r["heavy_hold"] = heavy
+        results.append(r)
+        if r.get("ext_failures") and not stop:
+            stop = stop_rollout(cfg, name, r, args.dry_run)
     ended = utcnow()
     with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
         f.write(json.dumps({"ts": stamp(started), "kind": "run", "dry_run": args.dry_run, **tinfo}) + "\n")
@@ -1247,18 +1468,20 @@ def main_run(args):
                 f.write(json.dumps({"ts": stamp(ended), "host": r["host"], "dry_run": args.dry_run, **a}) + "\n")
             for e in r["errors"]:
                 f.write(json.dumps({"ts": stamp(ended), "host": r["host"], "kind": "error", "error": e}) + "\n")
+        if stop:
+            f.write(json.dumps({"ts": stamp(ended), "kind": "rollout-stopped", "reason": stop}) + "\n")
     with open(os.path.join(STATE, "last-run.json"), "w") as f:
         json.dump({"started": stamp(started), "ended": stamp(ended), "dry_run": args.dry_run,
-                   "target": tinfo, "results": results}, f, indent=1)
-    print_report(tinfo, results, args.dry_run)
-    line = summary_line(stamp(ended), tinfo, results)
+                   "target": tinfo, "stopped": stop, "results": results}, f, indent=1)
+    print_report(tinfo, results, args.dry_run, stop)
+    line = summary_line(stamp(ended), tinfo, results, stop)
     print("\n" + line)
     if not args.dry_run and not args.only_pane:
         checkpoint_line(line)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="daily omp update + idle pane restarts")
+    ap = argparse.ArgumentParser(description="hourly omp update + idle agent rotation")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
     r.add_argument("--dry-run", action="store_true")
@@ -1295,7 +1518,8 @@ def main():
     elif a.cmd == "ext-ack":
         main_ext_ack(a)
     elif a.cmd == "target":
-        print(json.dumps(resolve_target(load_config()["min_age_hours"]), indent=1))
+        cfg = load_config()
+        print(json.dumps(resolve_target(cfg["min_age_hours"], cfg["blocked_versions"] or {}), indent=1))
     else:
         main_run(a)
 
