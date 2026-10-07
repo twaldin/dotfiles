@@ -2,7 +2,7 @@
 
 One maintained skill library, small project guidance, and native harnesses. OMP runs the sessions; Codex can be used entirely on its own.
 
-`skills.json` selects 21 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. Machine-specific procedure (such as `mac-gui` for Spaces, yabai and virtual screens) lives in skills, not in `instructions.md`, because skill descriptions reach omp subagents and AGENTS.md files do not.
+`skills.json` selects 24 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. Machine-specific procedure (such as `mac-gui` for Spaces, yabai and virtual screens) lives in skills, not in `instructions.md`, because skill descriptions reach omp subagents and AGENTS.md files do not.
 
 ## Install and verify
 
@@ -19,6 +19,8 @@ python3 agents/verify_codex.py                    # native Codex, no model turn
 `~/.agents/skills` is the canonical discovery path. Codex, Claude, OMP, Pi, Factory, Cursor, and other detected global skill directories point to it. Generated skill/reference files live in `~/.local/share/agent-setup/library`. Codex's native `.system` skills, Claude Code's `synced` organization skills, and installed native plugins remain separate from the selected catalog and survive reinstalls. Generated vendor plugin manifests are omitted so skill names are consistent across harnesses.
 
 Global AGENTS/CLAUDE entry points link to `instructions.md`; never edit an installed copy, because a regular file there silently forks from the source. Native browser/computer tools come first. Herdr is the only retained custom hook. Extensions installed by other tools (herdr, Canvas) are left alone. Old custom MCP servers, imported workflow plugins, and legacy instruction/skill copies are archived; native capabilities and model accounts stay local.
+
+The `agent-browser` skill drives Vercel's agent-browser CLI, pinned at 0.38.2 on twaldin-home and deckbox (twaldin-work has none). Home: `npm install -g agent-browser@0.38.2 && agent-browser install`. Deckbox has no Node 24, so the npm tarball (sha1 `3eeb49e7d02a31be255a0462830dd8a147fc5f29`) is unpacked to `~/.local/lib/agent-browser-0.38.2`, `~/.local/bin/agent-browser` links to its `bin/agent-browser-linux-x64`, then `agent-browser install --with-deps`. Run installs through `machine-ok-queue run`.
 
 `omp.json` is the shared OMP baseline. It owns model roles and the explicitly listed shared preferences; installation replaces the entire role map, so removed roles such as vision stay unset. Fallback chains merge per role: the baseline's chains win, other roles keep their local chains. Keep permanent shared changes here and install separately on home, work and Deckbox. Interactive global role changes can cause drift until the next install. Authentication, provider accounts, local tools/connections, QA consent, Codex reset redemption, thinking-block display and project discovery exclusions remain machine-local; exclusions for directories that no longer exist are dropped.
 
@@ -71,7 +73,8 @@ Everything custom around the harnesses (omp extensions, herdr hooks, launchd job
   - the default-deny inbound firewall: `deckbox-inbound.nft` in its own `inet` table, loaded by `deckbox-firewall.service`. It never flushes Docker's or Tailscale's rules, and the stock `nftables.service` is masked;
   - `agents.slice` and herdr's drop-in: one CPU and memory budget shared by herdr and easld tiles;
   - security-only unattended upgrades with no automatic reboot (`20auto-upgrades`, `52deckbox-unattended-upgrades`); kernel and Docker updates wait for the monthly patch window;
-  - a needrestart override (`50-deckbox.conf`) that keeps automatic runs from restarting agents, containers or the vault.
+  - a needrestart override (`50-deckbox.conf`) that keeps automatic runs from restarting agents, containers or the vault;
+  - `agent-browser-chrome`, an AppArmor profile (`/etc/apparmor.d/`) that lets agent-browser's Chrome for Testing create the user namespaces its sandbox needs, which Ubuntu 24.04 denies by default.
 
   The monthly window is booked with hone. It runs `apt full-upgrade` and `snap refresh`, reboots when `/var/run/reboot-required` exists, then checks that the units in `~/.config/machine-shepherd/patch-hosts` are back. Release upgrades need Tim.
 

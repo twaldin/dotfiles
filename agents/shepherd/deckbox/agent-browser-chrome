@@ -1,0 +1,15 @@
+# /etc/apparmor.d/agent-browser-chrome: Ubuntu 24.04 denies unprivileged user namespaces
+# (kernel.apparmor_restrict_unprivileged_userns=1), so the Chrome for Testing that
+# `agent-browser install` puts under ~/.agent-browser exits with "No usable sandbox!".
+# Like Ubuntu's own /etc/apparmor.d/chrome, this names that binary and allows it userns,
+# so Chrome keeps its sandbox instead of running with --no-sandbox. The path is tim-writable;
+# that grants nothing new on deckbox, where tim already has passwordless sudo.
+# Install: sudo install -m 644 agent-browser-chrome /etc/apparmor.d/ && sudo apparmor_parser -r /etc/apparmor.d/agent-browser-chrome
+abi <abi/4.0>,
+include <tunables/global>
+
+profile agent-browser-chrome /home/tim/.agent-browser/browsers/chrome-*/chrome flags=(unconfined) {
+  userns,
+
+  include if exists <local/agent-browser-chrome>
+}

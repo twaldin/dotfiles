@@ -17,6 +17,7 @@
     "pr": "vendor/mattpocock-skills/skills/engineering/pr",
     "retro": "vendor/mattpocock-skills/skills/engineering/retro",
     "browser": "skills/browser",
+    "agent-browser": "skills/agent-browser",
     "mac-gui": "skills/mac-gui",
     "autoresearch": "skills/autoresearch",
     "frontend": "skills/frontend",
