@@ -8,13 +8,14 @@ services. Remote hosts run this same script over ssh.
 
 Named easl omp tiles resume in place only for an older binary or RSS > 1.5 GB.
 Never touch Tim's unnamed tiles or report_only names (including lindy-seat).
-Working/blocked, restored lifecycle, unseen done, focus/draft unknown or present,
-child work and in-process subagents prevent a restart. Recheck immediately before
-acting; easl's non-forced restart also refuses pending prompts/queued messages.
-Require a session on disk and omp on easl's zsh PATH. Within 60 seconds, verify
-the same session, a new pid, protocol >= 1 and the original model. Any failure
-stops the host and rollout, is logged, and exits nonzero; canary verification
-failures block the newly deployed version. No agent messages are sent.
+Working/blocked, closed boards, restored lifecycle, unseen/unknown done, focus or
+draft unknown/present, child work and in-process subagents prevent a restart.
+Recheck immediately before acting; non-forced easl conflicts (including pending
+prompts/messages) are skips. Require a session on disk and omp on easl's zsh PATH.
+Within 60 seconds verify the same session, a new pid, protocol >= 1 and model.
+Errors are logged, end that host and make the run exit nonzero; other hosts
+continue unless a target install or observed resume verification fails. Only
+protocol/model failures can block a version later hosts lack. No messages are sent.
 
 Config: ~/.config/omp-update/config.json; local easl opt-in:
 ~/.config/machine-shepherd/easl.json {"enabled": true, "cli": ".../bin/easl"}.
@@ -23,6 +24,7 @@ Usage: omp-update run [--dry-run] [--hosts deckbox,work,home]
        omp-update target
 """
 import argparse
+import copy
 import datetime as dt
 import fcntl
 import glob
@@ -51,6 +53,7 @@ MAC = platform.system() == "Darwin"
 ORDER = ("deckbox", "work", "home")
 MAX_RSS_MB = 1536
 VERIFY_S = 60
+SUBAGENT_FRESH_S = 180
 DEFAULT_CONFIG = {
     "hosts": {
         "deckbox": {"ssh": "tim@deckbox", "python": "python3"},
@@ -67,6 +70,7 @@ DEFAULT_CONFIG = {
     "blocked_versions": {},
 }
 HOST_KEYS = ("ssh", "python", "easl", "services", "hold_below", "hold_note")
+# Look through omp's workers/kernels for child work; ignore browser/LSP subtrees.
 TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner(-\d+)?/")
 SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|pyright|langserver|language-server|languageserver|"
                         r"tsserver|rust-analyzer|gopls|clangd|sourcekit-lsp|lsp-mux|biome lsp|ruff server")
@@ -141,18 +145,22 @@ def stage_binary(target):
         raise
 
 
+def flock_wait(lock, seconds):
+    deadline = time.time() + seconds
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.time() >= deadline:
+                raise RuntimeError(f"{os.path.basename(lock.name)} held for {seconds} s")
+            time.sleep(min(5, deadline - time.time()))
+
+
 def swap_binary(tmp):
     """Retain the old mapped binary under omp's own backup naming convention."""
     with open(os.path.join(BUN_BIN, "omp.lock"), "a") as lk:
-        deadline = time.time() + 120
-        while True:
-            try:
-                fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.time() >= deadline:
-                    raise RuntimeError("omp.lock held for 2 min")
-                time.sleep(5)
+        flock_wait(lk, 120)
         bak = os.path.join(BUN_BIN, f"omp.{int(time.time() * 1000)}.{os.getpid()}.0.bak")
         os.rename(OMP, bak)
         try:
@@ -161,6 +169,22 @@ def swap_binary(tmp):
             os.rename(bak, OMP)
             raise
     return bak
+
+
+def prune_baks(dry):
+    """Keep the newest backup and any mapped binary; uncertain lsof results are fatal."""
+    acts = []
+    baks = sorted(glob.glob(os.path.join(BUN_BIN, "omp.*.bak")), key=os.path.getmtime, reverse=True)
+    for path in baks[1:]:
+        r = sh(["lsof", "-t", "--", path], timeout=60)
+        if r.returncode not in (0, 1) or (r.returncode == 1 and r.stderr.strip()):
+            raise RuntimeError(f"lsof failed for {path}: {r.stderr.strip()[:200]}")
+        if r.stdout.split():
+            continue
+        acts.append({"kind": "prune-bak", "file": os.path.basename(path), "dry_run": dry})
+        if not dry:
+            os.remove(path)
+    return acts
 
 
 def etime_s(s):
@@ -196,25 +220,16 @@ def is_agent_omp(cmd):
 
 def mem_mb(pid):
     try:
-        if MAC:
-            val = sh(["top", "-l", "1", "-pid", str(pid), "-stats", "mem"], timeout=30).stdout.split()[-1]
-            m = re.match(r"([\d.]+)([BKMGT])", val.upper())
-            return round(float(m[1]) * {"B": 1 / 1048576, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1048576}[m[2]]) if m else None
-        with open(f"/proc/{pid}/status") as f:
-            return next(int(ln.split()[1]) for ln in f if ln.startswith("VmRSS:")) // 1024
-    except (OSError, ValueError, IndexError, StopIteration, subprocess.TimeoutExpired):
+        val = sh(["top", "-l", "1", "-pid", str(pid), "-stats", "mem"], timeout=30).stdout.split()[-1]
+        m = re.match(r"([\d.]+)([BKMGT])", val.upper())
+        return round(float(m[1]) * {"B": 1 / 1048576, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1048576}[m[2]]) if m else None
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
         return None
 
 
 def exe_path(pid):
-    if MAC:
-        out = sh(["lsof", "-a", "-p", str(pid), "-d", "txt", "-Fn"], timeout=60).stdout
-        return next((ln[1:] for ln in out.splitlines() if ln.startswith("n") and "/.bun/bin/omp" in ln), None)
-    try:
-        path = os.readlink(f"/proc/{pid}/exe").removesuffix(" (deleted)")
-        return path if os.path.basename(path).startswith("omp") else None
-    except OSError:
-        return None
+    out = sh(["lsof", "-a", "-p", str(pid), "-d", "txt", "-Fn"], timeout=60, check=True).stdout
+    return next((ln[1:] for ln in out.splitlines() if ln.startswith("n") and "/.bun/bin/omp" in ln), None)
 
 
 def running_version(pid, age_s, installed):
@@ -227,17 +242,9 @@ def running_version(pid, age_s, installed):
 
 
 def open_sessions(pid):
-    if MAC:
-        paths = [ln[1:] for ln in sh(["lsof", "-a", "-p", str(pid), "-Fn"], timeout=60).stdout.splitlines() if ln.startswith("n")]
-    else:
-        paths = []
-        fd = f"/proc/{pid}/fd"
-        for x in os.listdir(fd) if os.path.isdir(fd) else []:
-            try:
-                paths.append(os.readlink(os.path.join(fd, x)))
-            except OSError:
-                pass
-    return sorted({p for p in paths if "/.omp/agent/sessions/" in p and p.endswith(".jsonl")})
+    out = sh(["lsof", "-a", "-p", str(pid), "-Fn"], timeout=60, check=True).stdout
+    return sorted({ln[1:] for ln in out.splitlines()
+                   if ln.startswith("n") and "/.omp/agent/sessions/" in ln and ln.endswith(".jsonl")})
 
 
 def live_children(pid, procs):
@@ -261,7 +268,7 @@ def running_subagents(pid, session):
     found = {p for p in open_sessions(pid) if os.path.isfile(os.path.dirname(p) + ".jsonl")}
     for p in glob.glob(os.path.join(glob.escape(folder), "**", "*.jsonl"), recursive=True):
         try:
-            if os.path.getmtime(p) >= time.time() - 180:
+            if os.path.getmtime(p) >= time.time() - SUBAGENT_FRESH_S:
                 found.add(p)
         except OSError:
             pass
@@ -291,11 +298,20 @@ def host_easl(hc):
     return {"cli": hc["easl"]} if hc.get("easl") else None
 
 
+class EaslConflict(RuntimeError):
+    pass
+
+
 def easl(cli, *args, timeout=60):
-    r = sh([cli, *args], timeout=timeout, check=True)
-    out = json.loads(r.stdout)
-    if not isinstance(out, dict) or out.get("error"):
-        raise RuntimeError(f"easl {args[0]}: {str(out)[:300]}")
+    r = sh([cli, *args], timeout=timeout)
+    try:
+        out = json.loads(r.stdout)
+    except ValueError:
+        out = None
+    if r.returncode or not isinstance(out, dict) or out.get("error"):
+        detail = (r.stderr or r.stdout).strip()[:300] or f"exit {r.returncode}"
+        error = EaslConflict if re.search(r"\bconflict\b", detail) else RuntimeError
+        raise error(f"easl {args[0]}: {detail}")
     return out
 
 
@@ -330,12 +346,14 @@ def easl_finds_omp(cli, procs):
 
 
 def idle_gate(a, procs, session):
+    if a.get("open") is not True:
+        return "board closed or unknown"
     lc = a.get("lifecycle") or {}
     if lc.get("restored"):
         return "lifecycle restored after an app restart, unconfirmed"
     if lc.get("state") not in ("idle", "done"):
         return str(lc.get("state") or "unknown")
-    if lc["state"] == "done" and lc.get("seen") is False:
+    if lc["state"] == "done" and lc.get("seen") is not True:
         return "done, answer not seen by Tim"
     for key in ("focused", "draft"):
         if a.get(key) is not False:
@@ -351,26 +369,35 @@ def idle_gate(a, procs, session):
 def restart_tile(row, a):
     """Non-forced resume is easl's atomic gate for pending prompts/messages too."""
     row["mem_before_mb"] = mem_mb(row["pid"])
-    easl(a["cli"], "agent.restart", "--target", a["tile"], "--mode", "resume", timeout=120)
-    deadline = time.time() + VERIFY_S
-    now, session = {}, None
-    problem = None
     try:
-        while time.time() < deadline:
+        easl(a["cli"], "agent.restart", "--target", a["tile"], "--mode", "resume", timeout=120)
+    except EaslConflict as e:
+        row["action"] = f"skip: easl refused: {e}"
+        return
+    deadline, last, probe_error = time.time() + VERIFY_S, None, None
+    while time.time() < deadline:
+        try:
             now = tile_get(a["cli"], a["tile"], timeout=deadline - time.time()) or {}
             if time.time() >= deadline:
                 break
             session = tile_session(a["cli"], a["tile"], timeout=deadline - time.time())
+            last = now, session
             new, proto = now.get("pid"), now.get("protocol")
             if (time.time() <= deadline and new and new != row["pid"] and session == row["session"]
                     and isinstance(proto, (int, float)) and proto >= 1 and now.get("model") == a["model"]):
                 row.update(new_pid=new, session_unchanged=True, mem_after_mb=mem_mb(new), action="restarted")
                 return
-            time.sleep(min(2, max(0, deadline - time.time())))
-    except Exception as e:
-        problem = f"resume verification failed: {e}"
-    problem = problem or f"resume not verified within {VERIFY_S} s: pid {now.get('pid')!r}, session {session!r}, protocol {now.get('protocol')!r}, model {now.get('model')!r}"
+        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as e:
+            probe_error = str(e)
+        time.sleep(min(2, max(0, deadline - time.time())))
+    if last is None:
+        raise RuntimeError(f"resume verification unavailable after {VERIFY_S} s: {probe_error}; original session: {row['session']}")
+    now, session = last
+    problem = f"resume not verified within {VERIFY_S} s: pid {now.get('pid')!r}, session {session!r}, protocol {now.get('protocol')!r}, model {now.get('model')!r}"
     row["verification_failure"] = problem
+    proto = now.get("protocol")
+    row["protocol_model_failure"] = bool(now.get("pid") and now["pid"] != row["pid"]
+        and (not isinstance(proto, (int, float)) or proto < 1 or now.get("model") != a["model"]))
     raise RuntimeError(f"{problem}; original session: {row['session']}")
 
 
@@ -411,10 +438,12 @@ def restart_services(services, installed, dry, pending, res):
 def host_main(params):
     dry, target = params["dry_run"], params["target"]
     res = {"host": params["host"], "actions": [], "tiles": [], "unmanaged": [], "errors": []}
+    installing = False
     try:
         installed = res["installed_before"] = omp_version()
         pending = vtuple(installed) < vtuple(target)
         if pending:
+            installing = True
             act = {"kind": "install", "from": installed, "to": target, "dry_run": dry}
             res["actions"].append(act)
             if os.path.realpath(OMP).endswith(".js"):
@@ -432,12 +461,15 @@ def host_main(params):
                 installed = omp_version()
                 if installed != target:
                     raise RuntimeError(f"installed {installed}, expected {target}")
+            installing = False
         elif vtuple(installed) > vtuple(target):
             res["actions"].append({"kind": "ahead", "installed": installed, "target": target, "note": "not downgraded"})
         res["installed_after"] = installed
         restart_services(params.get("services") or [], installed, dry, pending, res)
         if res["errors"]:
             return res
+        if not os.path.realpath(OMP).endswith(".js"):
+            res["actions"].extend(prune_baks(dry))
         procs = ps_table()
         ez = params.get("easl")
         tiles = tile_agents(ez["cli"]) if ez else []
@@ -448,6 +480,15 @@ def host_main(params):
             res["actions"].append({"kind": "tile", **row})
             act = res["actions"][-1]
             try:
+                if not a.get("name"):
+                    row["action"] = "skip: Tim's tile"
+                    continue
+                if a["name"] in params["report_only"]["names"]:
+                    row["action"] = "report: seat/front door (owner decides)"
+                    continue
+                if a.get("open") is not True:
+                    row["action"] = "skip: board closed or unknown"
+                    continue
                 if not row["pid"]:
                     row["action"] = "none: easl reports no omp pid"
                     continue
@@ -457,15 +498,11 @@ def host_main(params):
                     continue
                 older, ver = running_version(row["pid"], info["age_s"], installed)
                 rss = info.get("rss_mb") or 0
-                triggers = ([f"binary {ver or 'older'} < {target if dry and pending else installed}"] if older or dry and pending else [])
+                triggers = ([f"binary {ver or 'older'} < {target if dry and pending else installed}"] if older or (dry and pending) else [])
                 if rss > MAX_RSS_MB:
                     triggers.append(f"rss {rss:g} MB")
                 row.update(version=ver, rss_mb=rss, triggers=triggers)
-                if not a.get("name"):
-                    row["action"] = "skip: Tim's tile"
-                elif a["name"] in params["report_only"]["names"]:
-                    row["action"] = "report: seat/front door (owner decides)"
-                elif not triggers:
+                if not triggers:
                     row["action"] = "none"
                 else:
                     session = row["session"] = tile_session(a["cli"], a["tile"])
@@ -499,10 +536,14 @@ def host_main(params):
                 break
             finally:
                 act.update(row)
-        managed = {a.get("pid") for a in tiles}
+        managed = {a.get("pid") for a in tiles} | {p for act in res["actions"] if act["kind"] == "service" for p in act["pids"]}
         res["unmanaged"] = [{"pid": p, "action": "report only (outside easl)"}
                             for p, i in procs.items() if p not in managed and is_agent_omp(i["cmd"])]
+        res["actions"].extend({"kind": "unmanaged", **row} for row in res["unmanaged"])
     except Exception as e:
+        if installing:
+            res["install_failure"] = True
+            res["actions"][-1]["action"] = f"failed: {e}"
         res["errors"].append(str(e))
     return res
 
@@ -516,18 +557,21 @@ def curl_json(url):
 
 
 def resolve_target(min_age_h, blocked=()):
-    cutoff = utcnow() - dt.timedelta(hours=max(3, min_age_h))
+    min_age_h = max(3, min_age_h)
+    cutoff = utcnow() - dt.timedelta(hours=min_age_h)
     rels = curl_json(f"https://api.github.com/repos/{REPO}/releases?per_page=30")
     npm = curl_json(f"https://registry.npmjs.org/{NPM_PKG}")
     need = {"omp-darwin-arm64", "omp-linux-x64", "SHA256SUMS.txt"}
-    eligible = [r["tag_name"].lstrip("v") for r in rels
-                if not r["draft"] and not r["prerelease"] and r["tag_name"].lstrip("v") not in blocked
+    eligible = []
+    for r in rels:
+        version = r["tag_name"].lstrip("v")
+        if (not r["draft"] and not r["prerelease"] and version not in blocked
                 and parse_ts(r["published_at"]) <= cutoff and need <= {a["name"] for a in r.get("assets", [])}
-                and r["tag_name"].lstrip("v") in npm.get("versions", {})
-                and r["tag_name"].lstrip("v") in npm.get("time", {})
-                and parse_ts(npm["time"][r["tag_name"].lstrip("v")]) <= cutoff]
+                and version in npm.get("versions", {}) and version in npm.get("time", {})
+                and parse_ts(npm["time"][version]) <= cutoff):
+            eligible.append(version)
     if not eligible:
-        raise RuntimeError("no unblocked release is on both GitHub and npm and at least 3 h old")
+        raise RuntimeError(f"no unblocked release is on both GitHub and npm and at least {min_age_h} h old")
     return {"target": max(eligible, key=vtuple), "eligible": sorted(eligible, key=vtuple), "blocked": sorted(blocked, key=vtuple)}
 
 
@@ -544,15 +588,44 @@ def save_config(cfg):
     os.replace(CONFIG + ".tmp", CONFIG)
 
 
-def load_config():
+def raw_config():
     try:
         with open(CONFIG) as f:
-            raw = json.load(f)
+            return json.load(f)
     except FileNotFoundError:
-        raw = {}
-    cfg = {k: raw.get(k, v) for k, v in DEFAULT_CONFIG.items()}
+        return {}
+
+
+def update_config(change):
+    raw = raw_config()
+    before = copy.deepcopy(raw)
+    change(raw)
+    if raw != before:
+        save_config(raw)
+
+
+def prune_config(raw):
+    for key in list(raw):
+        if key not in DEFAULT_CONFIG:
+            del raw[key]
+    for host in list(raw.get("hosts", {})):
+        if host not in ORDER:
+            del raw["hosts"][host]
+            continue
+        for key in list(raw["hosts"][host]):
+            if key not in HOST_KEYS:
+                del raw["hosts"][host][key]
+    for key in list(raw.get("report_only", {})):
+        if key != "names":
+            del raw["report_only"][key]
+
+
+def load_config():
+    raw = raw_config()
+    base = copy.deepcopy(DEFAULT_CONFIG)
+    cfg = {**base, **{k: v for k, v in raw.items() if k in DEFAULT_CONFIG}}
     cfg["hosts"] = {h: {k: v for k, v in raw.get("hosts", {}).get(h, defaults).items() if k in HOST_KEYS}
-                    for h, defaults in DEFAULT_CONFIG["hosts"].items()}
+                    for h, defaults in base["hosts"].items()}
     cfg["report_only"] = {"names": sorted(set(cfg["report_only"].get("names", [])) | {"lindy-seat"})}
     return cfg
 
@@ -579,50 +652,50 @@ def run_host(name, hc, params):
 def take_lock():
     os.makedirs(STATE, exist_ok=True)
     lock = open(os.path.join(STATE, "run.lock"), "a")
-    deadline = time.time() + 1800
-    while True:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return lock
-        except BlockingIOError:
-            if time.time() >= deadline:
-                lock.close()
-                raise RuntimeError("run.lock held for 30 min")
-            time.sleep(5)
+    try:
+        flock_wait(lock, 1800)
+        return lock
+    except Exception:
+        lock.close()
+        raise
 
 
 def main_run(args):
     record = {"started": stamp(), "dry_run": args.dry_run, "results": [], "errors": []}
     lock = None
     try:
+        selected = args.hosts.split(",") if args.hosts is not None else ORDER
+        if set(selected) - set(ORDER):
+            raise RuntimeError("--hosts must name deckbox, work or home")
         lock = take_lock()
+        if not args.dry_run:
+            update_config(prune_config)
         cfg = load_config()
         try:
             with open(os.path.join(STATE, "last-run.json")) as f:
                 known = {r["host"]: r.get("installed_after") for r in json.load(f)["results"]}
         except (OSError, ValueError, KeyError, TypeError):
             known = {}
-        if not args.dry_run:
-            save_config(cfg)  # Clean cutover: only supported configuration keys survive.
         tinfo = record["target"] = resolve_target(cfg["min_age_hours"], cfg["blocked_versions"] or {})
-        selected = args.hosts.split(",") if args.hosts else ORDER
-        if set(selected) - set(ORDER):
-            raise RuntimeError("--hosts must name deckbox, work or home")
         for name in (h for h in ORDER if h in selected):
             hc = cfg["hosts"][name]
             params = {"host": name, "target": host_target(tinfo, hc), "dry_run": args.dry_run,
                       "report_only": cfg["report_only"], "services": hc.get("services", []), "easl": host_easl(hc)}
-            res = run_host(name, hc, params)
+            try:
+                res = run_host(name, hc, params)
+            except Exception as e:
+                res = {"host": name, "actions": [], "tiles": [], "unmanaged": [], "errors": [str(e)]}
             res.update(target=params["target"], hold_below=hc.get("hold_below"))
             record["results"].append(res)
-            if res["errors"]:
+            if res.get("install_failure") or any(t.get("verification_failure") for t in res["tiles"]):
                 version = res.get("installed_after")
                 later = ORDER[ORDER.index(name) + 1:]
                 new = version != res.get("installed_before") or any(vtuple(known.get(h) or "0") < vtuple(version) for h in later)
                 if (not args.dry_run and version and new
-                        and any(t.get("verification_failure") for t in res["tiles"])):
-                    cfg["blocked_versions"][version] = {"reason": res["errors"][0], "host": name, "at": stamp()}
-                    save_config(cfg)
+                        and any(t.get("protocol_model_failure") for t in res["tiles"])):
+                    def block(raw):
+                        raw.setdefault("blocked_versions", {})[version] = {"reason": res["errors"][0], "host": name, "at": stamp()}
+                    update_config(block)
                 break
     except Exception as e:
         record["errors"].append(str(e))
