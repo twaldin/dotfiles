@@ -266,6 +266,19 @@ class AgentGui(unittest.TestCase):
                                 start_new_session=True)
         self.assertEqual(result.returncode, 143)
 
+    def test_empty_group_accepts_unreaped_exited_child(self):
+        child = subprocess.Popen([sys.executable, '-c', 'pass'],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            exited = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+            self.assertEqual(exited.si_code, os.CLD_EXITED)
+            self.assertEqual(exited.si_status, 0)
+            self.assertIsNone(child.returncode)
+            self.mod.empty_group(child.pid)
+        finally:
+            child.wait(timeout=5)
+
     def test_busy_diagnostics_exclude_self_and_other_waiters(self):
         cache = self.root / '.cache'
         cache.mkdir()
