@@ -75,6 +75,7 @@ The easl fallback requires easl 0.2.4+ for caller-supplied message IDs. `omp-inb
 - `deckbox/`: deckbox's system config, installed by hand as root, with the live copy under `/etc`. It holds:
   - the default-deny inbound firewall: `deckbox-inbound.nft` in its own `inet` table, loaded by `deckbox-firewall.service`. It never flushes Docker's or Tailscale's rules, and the stock `nftables.service` is masked;
   - `agents.slice` and herdr's drop-in: one CPU and memory budget shared by herdr and easld tiles;
+  - `session-scope-cpus.conf`, installed as `/etc/systemd/system/session-.scope.d/50-off-measured-cpus.conf`: keeps SSH/logind login scopes off hone's measured CPUs (1–4 and 13–16), without changing `user@1000.service` or Docker's `system.slice` scopes;
   - security-only unattended upgrades with no automatic reboot (`20auto-upgrades`, `52deckbox-unattended-upgrades`); kernel and Docker updates wait for the monthly patch window;
   - a needrestart override (`50-deckbox.conf`) that keeps automatic runs from restarting agents, containers or the vault;
   - `agent-browser-chrome`, an AppArmor profile (`/etc/apparmor.d/`) that lets agent-browser's Chrome for Testing create the user namespaces its sandbox needs, which Ubuntu 24.04 denies by default.
