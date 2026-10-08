@@ -18,7 +18,7 @@ SOURCE = Path(__file__).resolve().parent
 LOCAL_SETTINGS = {
     'providers', 'auth', 'enabledModels', 'enabledProviders',
     'modelProviderOrder', 'modelTags', 'setupVersion', 'shellPath',
-    'browser', 'computer', 'tools', 'ssh', 'dev', 'codexResets', 'hideThinkingBlock',
+    'browser', 'computer', 'tools', 'ssh', 'dev', 'codexResets', 'hideThinkingBlock', 'worktree',
 }
 SHARED_PREFERENCES = {
     'modelRoles', 'modelRoleStorage', 'defaultThinkingLevel',
@@ -313,8 +313,10 @@ def main():
                     retry.get('fallbackChains', {}) | shared_retry.get('fallbackChains', {})}
                 settings.update(baseline)
                 settings['skills']['customDirectories'] = [str(canonical)]
-                # Keep key order stable after combining local settings and shared preferences.
-                plan(native / 'config.yml', 'write', yaml_value(dict(sorted(settings.items()))).encode())
+                # Keep key order stable after combining local settings and shared preferences;
+                # rewrite the file only when its meaning changes.
+                if json.dumps(settings, sort_keys=True) != json.dumps(old, sort_keys=True):
+                    plan(native / 'config.yml', 'write', yaml_value(dict(sorted(settings.items()))).encode())
             plan(native / 'AGENTS.md', 'link', SOURCE / 'instructions.md')
             # Same-name user agents replace omp's bundled ones; other agent files stay.
             for agent in sorted((SOURCE / 'omp-agents').glob('*.md')):
@@ -333,7 +335,8 @@ def main():
                 raise ValueError('Install the shared library once before project-only preparation')
             settings = dict(old)
             settings['disabledProviders'] = project_scopes(old.get('disabledProviders', []), args.project)
-            plan(native / 'config.yml', 'write', yaml_value(settings).encode())
+            if json.dumps(settings, sort_keys=True) != json.dumps(old, sort_keys=True):
+                plan(native / 'config.yml', 'write', yaml_value(settings).encode())
 
         selection = json.loads((SOURCE / 'skills.json').read_text())
         codex_disabled = set() if args.project_only or args.library_only else {name for name in selection['retire'] if '*' not in name} | set(selection['replaces'])
@@ -359,6 +362,17 @@ def main():
             for name, relative in json.loads((SOURCE / 'skills.json').read_text())['project'].items():
                 (catalog / name).symlink_to(runtime / relative)
                 codex_allowed.add(str(runtime / relative / 'SKILL.md'))
+            # Team skills remain in place; the project view exposes every skill.
+            for path in sorted((project / '.agent/skills').glob('*')):
+                if not (path / 'SKILL.md').is_file():
+                    continue
+                target = catalog / path.name
+                if target.exists() or target.is_symlink():
+                    if target.resolve() != path.resolve():
+                        raise ValueError(f'Team and managed skill paths conflict: {path}')
+                else:
+                    target.symlink_to(path)
+                codex_allowed.add(str((path / 'SKILL.md').resolve()))
             shared = project / '.agents/skills'
             tracked = subprocess.run(['git', 'ls-files', '--', '.agents/skills'], cwd=project, capture_output=True, text=True, check=True).stdout
             managed_skills = list(catalog.iterdir())
@@ -377,6 +391,8 @@ def main():
                 # Keep the team tree intact and expose only the managed additions.
                 for path in managed_skills:
                     target = project / '.codex/skills' / path.name
+                    if target.resolve() == path.resolve():
+                        continue
                     owned = subprocess.run(['git', 'ls-files', '--', str(target.relative_to(project))], cwd=project, capture_output=True, text=True, check=True).stdout
                     if owned.strip() or ((target.exists() or target.is_symlink()) and target.resolve() != path.resolve()):
                         raise ValueError(f'Existing Codex skill conflicts with managed projection: {target}')
@@ -390,10 +406,10 @@ def main():
                 raise ValueError(f'Selected project entry points are tracked; review before replacing: {project}')
             # Keep team skill files intact, excluding their original paths with
             # native Codex overrides. Selected project copies remain discoverable.
-            for legacy in [project / '.codex/skills', project / '.claude/skills', project / '.agent/skills']:
+            for legacy in [project / '.codex/skills', project / '.claude/skills']:
                 for skill in legacy.glob('**/SKILL.md'):
                     match = re.search(r'^name:\s*[\"\']?([^\s\"\']+)', skill.read_text(), re.M)
-                    if match:
+                    if match and str(skill.resolve()) not in codex_allowed:
                         codex_disabled.add(match.group(1))
             if not tracked.strip():
                 plan(shared, 'link', selected_project)

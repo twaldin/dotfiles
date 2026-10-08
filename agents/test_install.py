@@ -24,6 +24,7 @@ class SharedInstall(unittest.TestCase):
                 'dev': {'autoqaConsent': False},
                 'codexResets': {'autoRedeem': 'yes'},
                 'hideThinkingBlock': False,
+                'worktree': {'clone': False},
                 'setupVersion': 2,
             }
             (home / 'existing-repo').mkdir()
@@ -69,8 +70,16 @@ class SharedInstall(unittest.TestCase):
             self.assertIn(scope, current['disabledProviders'])
             self.assertEqual(fingerprint(auth), auth_before)
             self.assertIn('0 changes', subprocess.run(command, check=True, capture_output=True, text=True).stdout)
-
+            # A value omp reads differently (0 for false) is still rewritten.
             backup = next((home / '.local/state/agent-setup/backups').iterdir())
+            installed = settings.read_text()
+            drifted = read_settings(settings)
+            drifted['skills']['enablePiUser'] = 0
+            settings.write_text(json.dumps(drifted))
+            subprocess.run(command + ['--apply'], check=True, capture_output=True)
+            self.assertIs(read_settings(settings)['skills']['enablePiUser'], False)
+            settings.write_text(installed)
+
             subprocess.run(command + ['--restore', str(backup)], check=True, capture_output=True)
             self.assertEqual(read_settings(settings), original)
             self.assertEqual(fingerprint(auth), auth_before)
@@ -191,6 +200,9 @@ class SharedInstall(unittest.TestCase):
                 team=repo/'.agents/skills/team-skill';team.mkdir(parents=True)
                 (team/'SKILL.md').write_text('---\nname: team-skill\ndescription: Team skill\n---\n'+repo.name)
                 (team/'data.txt').write_text('Local resource '+repo.name)
+                singular = repo / '.agent/skills/singular-team-skill'
+                singular.mkdir(parents=True)
+                (singular / 'SKILL.md').write_text('---\nname: singular-team-skill\ndescription: Team skill\n---\n'+repo.name)
                 subprocess.run(['git','add','.agents'],cwd=repo,check=True)
                 before[repo]=fingerprint(repo/'.agents/skills')
             command=[sys.executable,str(Path(__file__).with_name('install.py')),'--home',str(home),'--project-source',str(profile)]
@@ -203,6 +215,10 @@ class SharedInstall(unittest.TestCase):
                 self.assertEqual((repo/'.omp/skills/team-skill').resolve(),(repo/'.agents/skills/team-skill').resolve())
                 self.assertTrue((repo/'.omp/skills/using-the-work-system/SKILL.md').is_file())
                 self.assertEqual((repo/'.omp/skills/team-skill/data.txt').read_text(),'Local resource '+repo.name)
+                self.assertEqual((repo/'.codex/skills/singular-team-skill/SKILL.md').read_text(),
+                                 '---\nname: singular-team-skill\ndescription: Team skill\n---\n'+repo.name)
+                self.assertEqual((repo/'.omp/skills/singular-team-skill/SKILL.md').read_text(),
+                                 '---\nname: singular-team-skill\ndescription: Team skill\n---\n'+repo.name)
             self.assertIn('0 changes',subprocess.run(command,check=True,capture_output=True,text=True).stdout)
     def test_tracked_entrypoints_and_team_skill_collisions_are_not_replaced(self):
         for relative in ['AGENTS.override.md','.omp/config.yml','.agents/skills/using-the-work-system/SKILL.md']:
@@ -245,6 +261,56 @@ class SharedInstall(unittest.TestCase):
             self.assertEqual((repo/'WORKFLOW.md').read_text(),(profile/'WORKFLOW.md').read_text())
             self.assertTrue((repo/'WORKFLOW.md').is_symlink())
             self.assertIn('0 changes',subprocess.run(args,check=True,capture_output=True,text=True).stdout)
+            # The same settings in another serialization are not rewritten.
+            native.write_text(json.dumps(read_settings(native)))
+            serialized_before = fingerprint(native)
+            subprocess.run(args + ['--apply'], check=True, capture_output=True)
+            self.assertEqual(fingerprint(native), serialized_before)
+
+    def test_team_agent_skills_are_exposed_in_the_project_view_and_enabled_in_codex(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            home = Path(scratch)
+            profile = home / 'profile'
+            profile.mkdir()
+            (profile / 'AGENTS.md').write_text('Managed guidance.')
+            repo = home / 'repo'
+            repo.mkdir()
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            team = repo / '.agent/skills/team-skill'
+            team.mkdir(parents=True)
+            (team / 'SKILL.md').write_text('---\nname: team-skill\ndescription: Team skill\n---\nTeam content')
+            retired = repo / '.agent/skills/be-thorough'
+            retired.mkdir()
+            (retired / 'SKILL.md').write_text('---\nname: be-thorough\ndescription: Retired by the library\n---\nOld')
+            (repo / '.claude').mkdir()
+            (repo / '.claude/skills').symlink_to('../.agent/skills')
+            subprocess.run(['git', 'add', '.agent', '.claude'], cwd=repo, check=True)
+            # An older install hid the team skill by name.
+            codex = home / '.codex/config.toml'
+            codex.parent.mkdir()
+            codex.write_text('[[skills.config]]\nname = "team-skill"\nenabled = false\n')
+            command = [sys.executable, str(Path(__file__).with_name('install.py')), '--home', str(home),
+                       '--project', str(repo), '--project-source', str(profile)]
+            subprocess.run(command + ['--apply'], check=True, capture_output=True)
+            self.assertEqual((repo / '.omp/skills/team-skill').resolve(), team.resolve())
+            self.assertTrue((repo / '.omp/skills/using-the-work-system/SKILL.md').is_file())
+            self.assertEqual((repo / '.omp/skills/be-thorough').resolve(), retired.resolve())
+            entries = tomllib.loads(codex.read_text())['skills']['config']
+            self.assertIn({'name': 'team-skill', 'enabled': False}, entries)
+            self.assertIn({'path': str((team / 'SKILL.md').resolve()), 'enabled': True}, entries)
+            self.assertIn({'path': str((retired / 'SKILL.md').resolve()), 'enabled': True}, entries)
+            self.assertIn('0 changes', subprocess.run(command, check=True, capture_output=True, text=True).stdout)
+            # Another worktree's legacy copy of the same name stays hidden by name.
+            other = home / 'other'
+            legacy = other / '.codex/skills/team-skill'
+            legacy.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', str(other)], check=True)
+            (legacy / 'SKILL.md').write_text('---\nname: team-skill\ndescription: Old copy\n---\nOld')
+            subprocess.run(command + ['--project', str(other), '--apply'], check=True, capture_output=True)
+            entries = tomllib.loads(codex.read_text())['skills']['config']
+            self.assertIn({'name': 'team-skill', 'enabled': False}, entries)
+            self.assertIn({'name': 'be-thorough', 'enabled': False}, entries)
+            self.assertIn({'path': str((team / 'SKILL.md').resolve()), 'enabled': True}, entries)
 
 
 if __name__ == '__main__':
