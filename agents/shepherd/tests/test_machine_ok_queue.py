@@ -40,6 +40,15 @@ EASL = '''#!/bin/sh
 cat "$GATE_DIR/agents.json" 2>/dev/null || exit 1
 '''
 
+# Stands in for `ioreg -r -c IOHIDSystem -d 1`: HIDIdleTime (ns) from $GATE_DIR/idle_ns; no HIDIdleTime line without it.
+IOREG = '''#!/bin/sh
+echo "$*" >> "$GATE_DIR/ioreg.calls"
+echo '+-o IOHIDSystem  <class IOHIDSystem, id 0x100000abc, registered, matched, active, busy 0 (0 ms), retain 7>'
+echo '  {'
+[ -e "$GATE_DIR/idle_ns" ] && echo "    \\"HIDIdleTime\\" = $(cat "$GATE_DIR/idle_ns")"
+echo '  }'
+'''
+
 
 def minute(delta_min):
     t = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=delta_min)
@@ -437,6 +446,123 @@ class Holds(QueueCase):
                       listing.stdout)
         (self.work / 'H.go').touch()
         self.assertEqual(self.finish(p)[0], 0)
+
+
+class Gpu(QueueCase):
+    """Rule 5: while Tim is active, GPU jobs (--gpu) run one at a time; idle, and on Linux, they use the normal slots."""
+
+    def setUp(self):
+        super().setUp()
+        ioreg = self.root / 'ioreg'
+        ioreg.write_text(IOREG)
+        ioreg.chmod(0o755)
+        self.env['MACHINE_OK_QUEUE_IOREG'] = str(ioreg)
+        self.slots(3)
+
+    def tim(self, idle_s):
+        (self.root / 'idle_ns').write_text(str(int(idle_s * 1e9)))
+
+    def status(self):
+        return subprocess.run([sys.executable, str(QUEUE), 'status'], env=self.env, capture_output=True, text=True).stdout
+
+    def gpu_running_and_one_waiting(self):
+        g1 = self.start(*self.blocker('G1'), flags=['--gpu'])
+        self.until(lambda: (self.work / 'G1.pid').exists(), what='G1 running')
+        g2 = self.start(*self.recorder('G2'), flags=['--gpu'])
+        self.until(lambda: g2.pid in self.ticket_pids(), what='G2 ticket')
+        time.sleep(0.4)
+        return g1, g2
+
+    def test_with_tim_active_a_second_gpu_job_waits_for_the_first(self):
+        self.tim(5)
+        g1, g2 = self.gpu_running_and_one_waiting()
+        self.assertEqual(self.order(), [], 'two slots are free, but the GPU is busy while Tim is active')
+        (waiting,) = [json.loads(p.read_text()) for p in self.tickets() if json.loads(p.read_text())['pid'] == g2.pid]
+        self.assertIs(waiting['gpu'], True)
+        out = self.status()
+        self.assertIn('GPU jobs: 1 at a time while Tim is active (idle 5s)', out)
+        self.assertIn('[GPU]  (gpu, Tim active: waits for the running GPU job)', out)
+        self.assertEqual(out.count('[GPU]'), 2, out)
+        self.assertEqual((self.root / 'ioreg.calls').read_text().splitlines()[-1], '-r -c IOHIDSystem -d 1')
+        (self.work / 'G1.go').touch()
+        self.assertEqual(self.finish(g1)[0], 0)
+        code, _, err = self.finish(g2)
+        self.assertEqual(code, 0, err)
+        self.assertIn('lane: gpu, Tim active', err)
+        self.assertEqual(self.order(), ['G1', 'G2'])
+        rows = [(e['event'], e['gpu']) for e in self.events() if e['event'] in ('admit', 'release')]
+        self.assertEqual(rows, [('admit', True), ('release', True), ('admit', True), ('release', True)])
+
+    def test_an_unreadable_idle_time_counts_as_active(self):
+        g1, g2 = self.gpu_running_and_one_waiting()  # no idle_ns: the stand-in prints no HIDIdleTime
+        self.assertEqual(self.order(), [])
+        self.assertIn('GPU jobs: 1 at a time while Tim is active (idle unreadable)', self.status())
+        (self.work / 'G1.go').touch()
+        for p in (g1, g2):
+            self.assertEqual(self.finish(p)[0], 0)
+        self.assertEqual(self.order(), ['G1', 'G2'])
+
+    def test_with_tim_idle_gpu_jobs_use_the_normal_slots(self):
+        self.tim(900)
+        g1 = self.start(*self.blocker('G1'), flags=['--gpu'])
+        self.until(lambda: (self.work / 'G1.pid').exists(), what='G1 running')
+        code, _, err = self.finish(self.start(*self.recorder('G2'), flags=['--gpu']), timeout=10)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.order(), ['G2'])
+        self.assertIsNone(g1.poll(), 'beside G1, not after it')
+        self.assertIn('GPU jobs: 1 at a time while Tim is active (idle 900s); Tim is idle, so they use the normal slots',
+                      self.status())
+        (self.work / 'G1.go').touch()
+        self.assertEqual(self.finish(g1)[0], 0)
+
+    def test_a_waiting_gpu_job_starts_once_tim_goes_idle(self):
+        self.tim(5)
+        g1, g2 = self.gpu_running_and_one_waiting()
+        self.assertEqual(self.order(), [])
+        self.tim(601)
+        self.assertEqual(self.finish(g2, timeout=10)[0], 0)
+        self.assertEqual(self.order(), ['G2'])
+        (self.work / 'G1.go').touch()
+        self.assertEqual(self.finish(g1)[0], 0)
+
+    def test_a_non_gpu_ticket_is_unaffected_by_a_running_gpu_job(self):
+        self.tim(5)
+        g1, g2 = self.gpu_running_and_one_waiting()
+        code, _, err = self.finish(self.start(*self.recorder('C')), timeout=10)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.order(), ['C'], 'the GPU ticket held back by rule 5 is not ahead of a CPU one')
+        self.assertIsNone(g2.poll())
+        (self.work / 'G1.go').touch()
+        for p in (g1, g2):
+            self.assertEqual(self.finish(p)[0], 0)
+        self.assertEqual(self.order(), ['C', 'G1', 'G2'])
+        self.assertEqual([e['gpu'] for e in self.events() if e['event'] == 'admit'], [True, False, True])
+
+    def test_holds_apply_to_gpu_jobs_too(self):
+        self.tim(900)
+        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'gpu a/b', 'quiet': 'full'}])
+        p = self.start(*self.recorder('G'), flags=['--gpu'])
+        self.until(lambda: p.pid in self.ticket_pids(), what='G ticket')
+        time.sleep(0.3)
+        self.assertEqual(self.order(), [])
+        self.holds([])
+        self.assertEqual(self.finish(p)[0], 0)
+        self.assertEqual(self.order(), ['G'])
+
+    @unittest.skipIf(platform.system() == 'Darwin', 'Linux has no Tim at the keyboard')
+    def test_linux_gpu_jobs_use_the_normal_slots(self):
+        del self.env['MACHINE_OK_QUEUE_IOREG']
+        g1 = self.start(*self.blocker('G1'), flags=['--gpu'])
+        self.until(lambda: (self.work / 'G1.pid').exists(), what='G1 running')
+        self.assertEqual(self.finish(self.start(*self.recorder('G2'), flags=['--gpu']), timeout=10)[0], 0)
+        self.assertNotIn('GPU jobs:', self.status())
+        (self.work / 'G1.go').touch()
+        self.assertEqual(self.finish(g1)[0], 0)
+
+    @unittest.skipUnless(platform.system() == 'Darwin', 'HIDIdleTime is macOS')
+    def test_the_real_ioreg_gives_tims_idle_time(self):
+        del self.env['MACHINE_OK_QUEUE_IOREG']
+        self.assertRegex(self.status(), r'GPU jobs: 1 at a time while Tim is active \(idle \d+s\)')
 
 
 class Gate(QueueCase):
