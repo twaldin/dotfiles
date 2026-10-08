@@ -106,7 +106,8 @@
 //     tree ID is sighted and parked individually, even with no AX event and no yabai row, and so is one already on
 //     screen when its owner joins the tree (a window on screen whose owner was outside the tree is read again at the
 //     first poll after the tree gains a root or an adoption); at the end, after its last adoption (its own scan), the
-//     windows on screen are read once more and every tree window on them is sighted before the final sweep (review
+//     windows on screen are read once more and every tree window on them is sighted, and judged then (review 4: before
+//     the final sweep's window list, which may wait while the window closes): one on Tim's screen is a problem (review
 //     3; a read that fails then is a problem). macOS can show an existing window again (a native tab selected again)
 //     with no create event and no Space change. The guard keeps both yabai's last index and the measured Tim
 //     membership.
@@ -145,7 +146,8 @@
 //     screen for all the time from the counting sample to that exempt one, a problem past 250 ms (fail closed); a
 //     sweep's sample of a window yabai's list omits ends it at that sample, before the window's own query (review 3).
 //     A stretch no sample judged by the end (the park its counting sample queued, skipped as the guard ended) counts
-//     until the end, past 250 ms a problem too (review 3).
+//     until the end, past 250 ms a problem too (review 3); one of a window with an unresolved entry is merged into it
+//     first, so earlier reads that showed it off Tim's screen no longer excuse it (review 4).
 //     A final exemption is not permanent: after this guard exits, the wrapper's fresh window list is checked against
 //     fresh WindowServer/SkyLight samples (--window-look, read-only, no activation or AppKit loop). A grown/ordered-in
 //     window is judged by all its current memberships; any unreadable exemption proof fails the check.
@@ -2623,6 +2625,9 @@ let exemptRecords = Locked([[String: Any]]())
 /// The stretch each tree window has counted in, unbroken by an exempt sample: since when (uptime), and whether it was
 /// on Tim's screen then (false: not known before yabai's answer).
 let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
+/// Review 4: the tree windows the end's last read of the windows on screen (ShownWindows.finalPass) found on Tim's
+/// screen, a problem reported then, before the final sweep's window list: the final sweep reports no more of them.
+let endReported = Locked(Set<Int>())
 
 /// A tree window was reported at `seen` (`via`): its first direct sample, before queued yabai work. An exempt sample
 /// is recorded and enrolled for the 100 ms resampler immediately. Any thread; no child process.
@@ -2750,10 +2755,19 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
 /// bounded. The end's own sample of one still unknown counts too. Review 3: so is every stretch a window yabai never
 /// placed counted in on Tim's screen (countingSince) that no park or exempt sample judged, as when the guard's end
 /// skipped the park its counting sample queued (the window grown and gone by then): on his screen, as far as the guard
-/// knows, until now, a problem past onTimsScreenLimit (fail closed).
+/// knows, until now, a problem past onTimsScreenLimit (fail closed). Review 4: an unresolved entry is no proof that such
+/// a stretch was judged (its park may be the one skipped): every one is merged into the window's unresolved entry
+/// first, so an entry whose earlier reads all showed it off Tim's screen is on it after all.
 @Sendable func reportUnplacedAtEnd() {
     let unknown = windowsUnknown.value
     var open = unresolved.value
+    let placed = windowSpaces.value
+    let counted = countingSince.value.filter { $0.value.onTims && placed[$0.key] == nil }
+    var merged = Set<Int>()
+    for id in counted.keys where open[id]?.offTims == true {
+        open[id]?.offTims = false
+        merged.insert(id)
+    }
     for id in unknown.keys where open[id] != nil && WindowLook(id).onTims {
         open[id]?.offTims = false  // on his screen, or SkyLight names no place for it
     }
@@ -2761,12 +2775,12 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
         problem("window \(id) of the tree could not be located at the guard's end: \(why)")
     }
     for (id, u) in open.sorted(by: { $0.key < $1.key }) where unknown[id] == nil && !u.offTims {
-        problem("window \(id) of the tree (reported by \(u.via)) was never placed before it went: \(u.why); nothing showed it off Tim's screen, so its time there cannot be bounded")
+        let evidence = merged.contains(id) ? "a sample counted it on Tim's screen after reads that showed it off" : "nothing showed it off Tim's screen"
+        problem("window \(id) of the tree (reported by \(u.via)) was never placed before it went: \(u.why); \(evidence), so its time there cannot be bounded")
     }
     let end = uptime()
-    let placed = windowSpaces.value
-    for (id, stretch) in countingSince.value.sorted(by: { $0.key < $1.key })
-        where stretch.onTims && placed[id] == nil && unknown[id] == nil && open[id] == nil && end - stretch.at > onTimsScreenLimit {
+    for (id, stretch) in counted.sorted(by: { $0.key < $1.key })
+        where unknown[id] == nil && open[id] == nil && end - stretch.at > onTimsScreenLimit {
         problem(String(format: "window %ld of the tree counted on Tim's screen for up to %.1f ms, never placed, and no sample judged it before the guard's end (more than %.0f ms)",
                        id, (end - stretch.at) * 1000, onTimsScreenLimit * 1000))
     }
@@ -2861,8 +2875,9 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
             return samples[id]
         }
         let back = onTims && wasOnTims == false
-        let flagged = latched || back || (onTims && final)
-        if flagged && !latched {
+        let quiet = latched || (final && endReported.value.contains(id))  // reported already (review 4: the end's last read)
+        let flagged = quiet || back || (onTims && final)
+        if flagged && !quiet {
             problem(back ? "window \(id) of the tree (\(app), pid \(pid)) was on \(look.timLocation) (found by \(via)) after the guard had seen it on Space \(before.map { String($0) } ?? "?"): macOS showed it to him again"
                          : "window \(id) of the tree (\(app), pid \(pid)) was on \(look.timLocation) at the guard's end")
         }
@@ -2982,6 +2997,7 @@ let finalWindowList = Locked([String: Any]())
     }
     let back = onTims && was == false
     if back || (onTims && final) {
+        if final && endReported.value.contains(id) { return true }  // the end's last read reported it (review 4)
         let pid = look.server?.window?.pid.map { "pid \($0)" } ?? "pid unknown"
         problem(back ? "window \(id) of the tree (\(pid)) was on \(look.timLocation) (found by \(via); yabai's window list omits it) after the guard had seen it on Space \(windowSpaces.value[id].map { String($0) } ?? "?"): macOS showed it to him again"
                      : "window \(id) of the tree (\(pid)) was on \(look.timLocation) at the guard's end (yabai's window list omits it)")
@@ -3161,7 +3177,9 @@ final class ShownWindows {
     /// GR2 (review 3): at the guard's end, after its last adoption (the end's own scan) and before the final sweep,
     /// every window on screen whose owner is in the tree now is sighted, so the final sweep judges it: an owner adopted
     /// after the last poll (or by that scan) has windows no poll will read again. A read that fails is a problem.
-    /// shownQueue, waited for by the end.
+    /// Review 4: each such window's sample is judged here, before the final sweep's window list (which may wait while
+    /// the window closes, and then finds it gone): one on Tim's screen, not exempt, is a problem now (endReported, so
+    /// the final sweep reports no more of it). shownQueue, waited for by the end.
     func finalPass() {
         guard let rows = shownWindows() else {
             problem("the windows on screen could not be read at the guard's end: a tree window on Tim's screen whose owner joined the tree late could go unseen")
@@ -3172,7 +3190,12 @@ final class ShownWindows {
         for row in rows {
             guard let pid = row.pid else { continue }
             if member[pid] == nil { member[pid] = tree.contains(pid) }
-            if member[pid] == true { sighted(row.id, at: seen, via: "final-shown") }
+            guard member[pid] == true else { continue }
+            sighted(row.id, at: seen, via: "final-shown")
+            let look = WindowLook(row.id)
+            if look.exempt == nil && look.onTims && endReported.update({ $0.insert(row.id).inserted }) {
+                problem("window \(row.id) of the tree (pid \(pid)) was on \(look.timLocation) at the guard's end (found by the end's last read of the windows on screen)")
+            }
         }
     }
 

@@ -108,7 +108,9 @@ and/or guards one that something else starts, then checks that nothing took it.
   end, fails the check then, and one never placed found on his screen is unresolved (below) even if it closes during
   that query. A new WindowServer ID gets its own first sighting and park/retry, even with no AX event or yabai row,
   and so does one already on screen when its owner joins the tree (read again once the tree gains a root or an
-  adoption). A window yabai will not place
+  adoption). At the end, after the last adoption, the windows on screen are read once more: a tree window on Tim's
+  screen then fails the check at once, before the final window list (which may wait while the window closes).
+  A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
   (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen (every
   counted sample included), also when the guard ends within those 3 s.
@@ -119,7 +121,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   helpers. Each is recorded (window-exempt: id, pid, bounds, ordered state, Spaces), never moved, never a problem;
   the guard samples it every 100 ms from its first sighting, before any yabai query finishes, and judges one that
   orders in or grows past 2x2 px from the first sample that finds it counting. That counted stretch stays evidence
-  until judged: closed unplaced, it is never-placed evidence; exempt again before any placement, the whole time from
+  until judged: closed unplaced, it is never-placed evidence (also when the guard's end skipped its park, and also
+  when earlier reads had shown it off his screen); exempt again before any placement, the whole time from
   that sample to the exempt one counts as on his screen (past 250 ms, a problem). Both exemptions require readable
   membership and bounds and WindowServer presence; an incomplete sample counts, never exempts.
   A window yabai will not place or name the owner of, a window list

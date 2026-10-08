@@ -3264,13 +3264,15 @@ class Guard(unittest.TestCase):
         lines.until(lambda row: row.get('event') == 'guard-end', 20)
         self.assertEqual(process.wait(10), 0)
         result = json.loads((root / 'summary.json').read_text())
-        self.assertIn("window %d of the tree (pid %d) was on Tim's Space 4 at the guard's end (yabai's window list omits it)" % (wid, probe.pid),
-                      result['problems'])
+        self.assertTrue(any(p.startswith("window %d of the tree (pid %d) was on Tim's Space 4 at the guard's end" % (wid, probe.pid))
+                            for p in result['problems']), result['problems'])
 
     def test_a_counted_stretch_ends_at_the_sweeps_exempt_sample_not_at_its_slow_query(self):
         # (P2) the 1x1 helper on Tim's Space 4 grows while a sweep's window list waits; a poll finds it counting; it is
         # 1x1 again before the list answers. The sweep's own sample, before its 1.5 s query about the helper, ends that
-        # stretch, well under 250 ms: no problem.
+        # stretch, well under 250 ms: no problem. Review 4: the rig's `poll` acknowledges the counting sample on every
+        # guard this runs against (the failing-first baseline gets the same rig-only command), and the stimulus is
+        # checked to stay under 250 ms before the verdict is compared.
         wid = 89346
         process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
         put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
@@ -3279,20 +3281,72 @@ class Guard(unittest.TestCase):
         time.sleep(0.2)  # its first park found it exempt too
         self.hold_a_sweep(process, root)
         put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False]]))
+        grown = time.monotonic()  # no sample can count it before this
         self.send(process, 'poll')
-        try:
-            lines.until(lambda r: r.get('event') == 'rig-polled', 0.5)
-        except AssertionError:
-            pass  # a guard without the rig's `poll`: its own 100 ms polls have found the helper counting by now
+        lines.until(lambda r: r.get('event') == 'rig-polled', 5)
         put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
         put(root / 'window-delay', '1.5')
         (root / 'windows-hold').unlink()
+        released = time.monotonic()  # the sweep's next native sample, exempt, follows the list it releases at once
+        self.assertLess(released - grown, 0.15, 'the stimulus itself would be over 250 ms: no valid control')
         exempt = lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid, 10)[-1]
         self.assertEqual(exempt['final'], False)
         time.sleep(1.8)  # the sweep's query about the helper answers
         put(root / 'window-delay', '0')
         _, result = self.end_rig(process, lines, root)
         self.assertEqual([p for p in result['problems'] if p.startswith('window %d ' % wid)], [])
+
+    def test_a_counted_stretch_merges_into_an_older_off_tim_unresolved_entry_when_the_end_skips_its_park(self):
+        # Review 4 (both axes): yabai never places the window. Its first reads find it on CanvasTest (off Tim's screen),
+        # so its unresolved entry says off; then it is 1x1 (exempt). While a sweep holds yabai's queue it grows on Tim's
+        # Space 4 (counted; its park waits), stays 0.5 s and closes; the end skips that park. The window is gone when
+        # the final sweep runs; the counted sample is merged into the old entry and judged.
+        wid = 89347
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [110], 'display': 'D2'}})
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False]]))
+        self.send(process, 'window %d' % wid)
+        time.sleep(0.3)  # its parks find it unplaced, off Tim's screen: unresolved, off
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
+        lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid, 10)
+        time.sleep(0.2)
+        self.hold_a_sweep(process, root)
+        put(root / 'skylight-windows.json', json.dumps({str(wid): {'spaces': [104], 'display': 'D1'}}))
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False]]))
+        time.sleep(0.5)  # the polls find it counting on Tim's Space 4: its park waits behind the sweep
+        put(root / 'onscreen.json', '[]')
+        put(root / 'skylight-windows.json', '{}')
+        self.send(process, 'end')
+        time.sleep(0.3)  # the end has begun: nothing queued runs now
+        (root / 'windows-hold').unlink()
+        lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        self.assertEqual(process.wait(10), 0)
+        result = json.loads((root / 'summary.json').read_text())
+        self.assertTrue(any(p.startswith('window %d of the tree (reported by ax-created) was never placed before it went' % wid)
+                            and "a sample counted it on Tim's screen" in p for p in result['problems']), result['problems'])
+
+    def test_a_window_the_end_finds_on_tims_screen_is_judged_though_it_closes_during_the_final_list(self):
+        # Review 4 (both axes): the window's owner joins the tree in the turn before the end's; the end's last read of
+        # the windows on screen finds it on Tim's Space 4, and it closes while the final window list waits. It is gone
+        # when the final sweep reaches it; the end's sample, taken before the list, is the evidence.
+        wid = 89348
+        probe, _ = self.probe(self.java)
+        process, lines, root = self.rig(space=6, shown=4, onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, True]]))
+        time.sleep(0.35)  # several reads see it on screen, its owner outside the tree
+        put(root / 'windows-hold', '')
+        self.send(process, 'root %d' % probe.pid, 'end')
+        deadline = time.monotonic() + 5
+        while not (root / 'windows-held').exists():
+            self.assertLess(time.monotonic(), deadline, "the final sweep's window list never began")
+            time.sleep(0.01)
+        put(root / 'onscreen.json', '[]')
+        put(root / 'skylight-windows.json', '{}')
+        (root / 'windows-hold').unlink()
+        lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        self.assertEqual(process.wait(10), 0)
+        result = json.loads((root / 'summary.json').read_text())
+        self.assertTrue(any(p.startswith("window %d of the tree (pid %d) was on Tim's Space 4 at the guard's end" % (wid, probe.pid))
+                            for p in result['problems']), result['problems'])
 
 
 if __name__ == '__main__':
