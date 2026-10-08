@@ -114,6 +114,13 @@ and/or guards one that something else starts, then checks that nothing took it.
   before the final window list (which may wait while the window closes). One closed since that read (WindowServer
   shows it gone) is judged by its earlier samples; if the guard had never seen it before, it fails the check (where
   it was is unknown).
+  Every sweep also reads CGWindowList's all-window list, including hidden Spaces, to locate windows yabai omits by
+  the native owner's current pid/start identity. window-native-located / nativeWindows records id, pid, bounds and
+  on-screen state.
+  An id query that exits 1 (untracked), with CG owner/bounds and complete SkyLight memberships proving the window
+  already on its assigned agent Space and on no Tim/Tim-visible Space, is real placement: placed-native (untracked
+  by yabai), recorded in nativePlacements. No native move is made. Unknown/unmapped Space, Tim membership, timed-out
+  queries and earlier counted exposure still fail closed; native location alone excuses none of these.
   A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
   (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen (every
@@ -139,9 +146,12 @@ and/or guards one that something else starts, then checks that nothing took it.
   "caller" or "target"). macOS still lets an app activate itself and
   opens its new windows on the Space Tim is viewing: the guard undoes both within milliseconds, it cannot prevent
   them. The guard exits when gui-launch does, even by SIGKILL. It bounds every yabai call over its exit and its
-  output (2 s; a timeout fails the check, but for the owner query above and a final window list its retry reads;
-  output that reaches 16 MiB is refused,
-  whether or not the helper exits, and fails it), runs none on its main thread, and ends each with its process
+  output. Every query gets up to two attempts with 50 ms backoff, at most 2 s per reply, within one absolute 4 s
+  deadline including helper cleanup; the restore-owner query retains its absolute 1 s deadline. Mutation commands
+  are not retried. A recovered query is no problem; exhausted queries remain fail-closed under the existing owner
+  and window adjudications. yabai-query / yabaiQueries records args, attempts, errors and per-attempt/total latency.
+  Output that reaches 16 MiB is refused,
+  whether or not the helper exits, and fails the check. The guard runs none on its main thread, and ends each with its process
   group (a member it cannot read counts as alive). At its end, work in flight (reverts included) gets 3 s to finish
   and its own final checks 5 s more (its final window list gets one retry: one absolute 4 s deadline for both tries
   including helper termination and reaping, each reply at most 2 s and shortened to leave cleanup time;
@@ -180,9 +190,8 @@ and/or guards one that something else starts, then checks that nothing took it.
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
-space-unrestorable, window, window-unknown, window-located, window-exempt, window-list-failed, window-off-target,
-final-window-list, display-check,
-yabai-timeout,
+space-unrestorable, window, window-unknown, window-located, window-native-located, placed-native, window-exempt,
+window-list-failed, window-off-target, final-window-list, display-check, yabai-query, yabai-timeout,
 problem, fault, guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
 previousFront (the app frontmost before it: in the tree or not, for how long, quit or hidden; whether it just closed
 its last window is not known): diagnostics only. The launched program's own output
@@ -667,6 +676,8 @@ def main():
           'spaceRestored': len([e for e in summary.get('spaceRestores') or [] if e.get('event') == 'space-restored']),
           'spaceHistory': summary.get('spaceHistory') or [], 'ownerQueryTimeouts': summary.get('ownerQueryTimeouts') or [],
           'windowFaults': summary.get('windowFaults') or [], 'exemptWindows': summary.get('exemptWindows') or [],
+          'yabaiQueries': summary.get('yabaiQueries') or [], 'nativeWindows': summary.get('nativeWindows') or [],
+          'nativePlacements': summary.get('nativePlacements') or [],
           'placement': 'caller' if args.allow_caller_placement else 'target',
           'finalWindowList': summary.get('finalWindowList'), 'exemptionProbe': probe})
     if found:

@@ -223,6 +223,7 @@ case "$2 $3" in
     [ -f "$dir/display-focus-fails" ] && exit 1
     printf '{"index": %%s}' "$4" > "$dir/focused-display.json" ;;
   "query --windows")
+    echo "$4 $5" >> "$dir/windows-queries"
     mode="$(cat "$dir/windows-mode")"
     if [ "$mode" = hang ]; then [ -n "$5" ] && : > "$dir/window-$5-asked"; exec sleep 30; fi
     if [ "$mode" = hang-once ] && [ -z "$4" ]; then echo answer > "$dir/windows-mode"; exec sleep 30; fi
@@ -1000,9 +1001,19 @@ class GuiLaunch(unittest.TestCase):
         # no final window list cannot vouch for the tree's windows, and fails the check.
         retried = dict(FINAL_LIST, retried=True, tries=[{'try': 1, 'ms': 2001.0, 'error': 'yabai -m query --windows did not answer within 2.0 s'},
                                                         {'try': 2, 'ms': 15.0, 'error': None}])
-        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(finalWindowList=retried))
+        queries = [dict(retried, event='yabai-query', args=['query', '--windows'])]
+        native = [{'event': 'window-native-located', 'source': 'CGWindowList', 'window': 9008,
+                   'pid': 500, 'bounds': [0, 0, 800, 600], 'onScreen': False}]
+        placements = [dict(native[0], event='placed-native', space=7, placement='placed-native (untracked by yabai)')]
+        result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app),
+                                     summary=summary(finalWindowList=retried, yabaiQueries=queries, nativeWindows=native,
+                                                     nativePlacements=placements))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.check_event(result)['finalWindowList'], retried)
+        check = self.check_event(result)
+        self.assertEqual(check['finalWindowList'], retried)
+        self.assertEqual(check['yabaiQueries'], queries)
+        self.assertEqual(check['nativeWindows'], native)
+        self.assertEqual(check['nativePlacements'], placements)
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(finalWindowList=None))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.check_event(result)['problems'], ["the guard recorded no final read of the tree's windows: they cannot be vouched for"])
@@ -1997,8 +2008,8 @@ class Guard(unittest.TestCase):
 
     def test_a_yabai_that_fails_or_does_not_answer_before_the_launch_launches_nothing(self):
         cases = [
-            ('stuck', STUCK_YABAI, 2, 'yabai -m query --windows did not answer within 2.0 s'),
-            ('leaky', LEAKY_YABAI, 1, 'yabai -m query --windows did not answer within 2.0 s'),
+            ('stuck', STUCK_YABAI, 4, 'yabai -m query --windows did not answer within 4.0 s'),
+            ('leaky', LEAKY_YABAI, 2, 'yabai -m query --windows did not answer within 4.0 s'),
             ('failing', FAILING_WINDOWS_YABAI, 0, 'yabai -m query --windows exited 1'),
             ('unreadable', UNREADABLE_WINDOWS_YABAI, 0, "yabai's window list is unreadable"),
         ]
@@ -2007,7 +2018,12 @@ class Guard(unittest.TestCase):
                 done, took, marker, pids = self.launch_with(body)
                 self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
                 seen = events(done.stdout)
-                self.assertEqual([e['event'] for e in seen], ['guard'] + ['yabai-timeout'] * bool(count) + ['error'])
+                self.assertEqual([e['event'] for e in seen if e['event'] not in ('yabai-query', 'problem')],
+                                 ['guard'] + ['yabai-timeout'] * bool(count) + ['error'])
+                queries = [e for e in seen if e['event'] == 'yabai-query']
+                self.assertEqual(len(queries), 1, seen)
+                self.assertFalse(queries[0]['ok'], queries[0])
+                self.assertEqual(len(queries[0]['tries']), 2, queries[0])
                 self.assertEqual(seen[-1]['message'], 'no baseline, so nothing was launched: ' + why)
                 self.assertTrue(took < 6, took)
                 self.assertFalse(marker.exists())
@@ -2147,8 +2163,14 @@ class Guard(unittest.TestCase):
         put(root / 'windows-mode', 'hang')
         put(root / 'onscreen.json', json.dumps([[9001, probe.pid, 800, 600, False], [9002, probe.pid, 800, 600, False]]))
         self.send(process, 'window 9002')
-        unknown = lines.until(lambda row: row.get('event') == 'window-unknown', 10)[-1]
-        self.assertEqual((unknown['window'], unknown['reason']), (9002, 'yabai -m query --windows --window 9002 did not answer within 2.0 s'))
+        querying = lines.until(lambda row: row.get('event') == 'window-unknown', 10)
+        unknown = querying[-1]
+        query = [row for row in querying if row.get('event') == 'yabai-query' and
+                 row['args'] == ['query', '--windows', '--window', '9002']][-1]
+        self.assertEqual((query['ok'], len(query['tries']), query['limitS']), (False, 2, 4.0), query)
+        self.assertLessEqual(query['ms'], 4100, query)
+        self.assertEqual(query['tries'][0]['error'], 'yabai -m query --windows --window 9002 did not answer within 2.0 s')
+        self.assertEqual((unknown['window'], unknown['reason']), (9002, query['tries'][-1]['error']))
         seen, result = self.end_rig(process, lines, root)
         self.assertIn('window-list-failed', [e.get('event') for e in seen])
         self.assertIn("the tree's windows could not be located at the guard's end: " + result['finalWindowList']['tries'][-1]['error'],
@@ -2814,6 +2836,102 @@ class Guard(unittest.TestCase):
         self.assertEqual((moved['id'], moved['from'], moved['to'], moved['seenBefore']), (88296, 3, 5, 5))
         _, result = self.end_rig(process, lines, root)
         self.assertEqual([p for p in result['problems'] if p.startswith('window ')], [self.back_on_tims_space(easl, 'window-shown')])
+
+    def test_an_activation_window_list_that_answers_on_retry_is_no_problem(self):
+        # The activation sweep, not just the final list, must recover from a transient slow query.
+        process, lines, root = self.rig()
+        put(root / 'windows-mode', 'hang-once')
+        self.send(process, 'sweep')
+        deadline = time.monotonic() + 8
+        while (root / 'windows-mode').read_text().strip() != 'answer' or len((root / 'windows-queries').read_text().splitlines()) < 3:
+            self.assertLess(time.monotonic(), deadline, 'the activation list was never retried')
+            time.sleep(0.01)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+        retried = [q for q in result['yabaiQueries'] if q['args'] == ['query', '--windows'] and q['retried']]
+        self.assertEqual(len(retried), 1, result['yabaiQueries'])
+        query = retried[0]
+        self.assertTrue(query['ok'], query)
+        self.assertEqual([t['try'] for t in query['tries']], [1, 2])
+        self.assertGreaterEqual(query['tries'][0]['ms'], 1900)
+        self.assertIsNone(query['tries'][1]['error'])
+        self.assertLessEqual(query['ms'], 4100)
+
+    def test_an_activation_window_list_that_never_answers_retries_and_fails_closed(self):
+        process, lines, root = self.rig()
+        before = len((root / 'windows-queries').read_text().splitlines())
+        put(root / 'windows-mode', 'hang')
+        self.send(process, 'sweep')
+        lines.until(lambda row: row.get('event') == 'window-list-failed', 8)
+        self.assertEqual(len((root / 'windows-queries').read_text().splitlines()) - before, 2,
+                         'every activation query needs its bounded retry, even when both attempts hang')
+        put(root / 'windows-mode', 'answer')
+        _, result = self.end_rig(process, lines, root)
+        failed = [q for q in result['yabaiQueries'] if q['args'] == ['query', '--windows'] and not q['ok']]
+        self.assertEqual(len(failed), 1, result['yabaiQueries'])
+        self.assertEqual(len(failed[0]['tries']), 2)
+        self.assertTrue(all(t['error'] and t['ms'] > 0 for t in failed[0]['tries']))
+        self.assertLessEqual(failed[0]['ms'], 4100)
+        self.assertTrue(any('yabai -m query --windows did not answer' in p for p in result['problems']), result['problems'])
+
+    def test_a_window_missing_from_yabai_is_located_by_its_native_owner(self):
+        # No AX event, no on-screen poll sighting, no yabai row: the all-window fallback must find an owned window.
+        wid = 89401
+        probe, _ = self.probe(self.java)
+        outsider, _ = self.probe(self.java)
+        process, lines, root = self.rig(onscreen=True, skylight={wid: {'spaces': [107], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, False, 'Probe'],
+                                               [wid + 1, outsider.pid, 800, 600, False, 'Not in the tree']]))
+        self.send(process, 'root %d' % probe.pid, 'sweep')
+        located = lines.until(lambda row: row.get('event') == 'window-native-located' and row.get('window') == wid, 8)[-1]
+        self.assertEqual({k: located[k] for k in ('window', 'pid', 'bounds', 'onScreen', 'source')},
+                         {'window': wid, 'pid': probe.pid, 'bounds': [0, 0, 800, 600], 'onScreen': False, 'source': 'CGWindowList'})
+        _, result = self.end_rig(process, lines, root)
+        self.assertTrue(any(w['window'] == wid and w['pid'] == probe.pid for w in result['nativeWindows']))
+        self.assertFalse(any(w['pid'] == outsider.pid for w in result['nativeWindows']), result['nativeWindows'])
+        self.assertEqual(result['problems'], [])
+
+    def untracked_window_rig(self, wid, memberships, shown=1):
+        probe, _ = self.probe(self.java)
+        skylight = None if memberships is None else {wid: {'spaces': memberships, 'display': 'D1'}}
+        process, lines, root = self.rig(onscreen=True, skylight=skylight, shown=shown)
+        put(root / 'windows.json', json.dumps([{'id': wid, 'pid': probe.pid, 'app': 'Probe', 'title': '',
+                                               'space': 7, 'display': 1, 'has-focus': False, 'has-ax-reference': False}]))
+        put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, False, 'Probe']]))
+        self.send(process, 'root %d' % probe.pid, 'sweep')
+        lines.until(lambda row: row.get('event') == 'window-native-located' and row.get('window') == wid, 8)
+        return process, lines, root, probe.pid
+
+    def test_an_untracked_window_already_on_its_agent_space_is_placed_native(self):
+        wid = 89402
+        process, lines, root, pid = self.untracked_window_rig(wid, [107])
+        placed = lines.until(lambda row: row.get('event') == 'placed-native' and row.get('window') == wid, 8)[-1]
+        self.assertEqual({k: placed[k] for k in ('window', 'pid', 'space', 'placement')},
+                         {'window': wid, 'pid': pid, 'space': 7, 'placement': 'placed-native (untracked by yabai)'})
+        self.assertEqual(placed['spaceIds'], [107])
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+        self.assertTrue(any(w['window'] == wid for w in result['nativePlacements']))
+        self.assertFalse(any(w['window'] == wid and w['event'] == 'window-unknown' for w in result['windowFaults']))
+        self.assertEqual(result['moves'], [], 'already-placed native windows require no move')
+
+    def test_an_untracked_window_on_tims_space_still_fails_closed(self):
+        for memberships, shown in (([102], 1), ([107, 102], 1), ([107], 7)):
+            with self.subTest(memberships=memberships, shown=shown):
+                wid = 89403
+                process, lines, root, _ = self.untracked_window_rig(wid, memberships, shown=shown)
+                _, result = self.end_rig(process, lines, root)
+                self.assertFalse(any(w['window'] == wid for w in result.get('nativePlacements', [])))
+                self.assertTrue(any('window %d ' % wid in p for p in result['problems']), result['problems'])
+
+    def test_an_untracked_window_with_unknown_space_still_fails_closed(self):
+        for memberships in (None, [150]):
+            with self.subTest(memberships=memberships):
+                wid = 89404
+                process, lines, root, _ = self.untracked_window_rig(wid, memberships)
+                _, result = self.end_rig(process, lines, root)
+                self.assertFalse(any(w['window'] == wid for w in result.get('nativePlacements', [])))
+                self.assertTrue(any('window %d ' % wid in p for p in result['problems']), result['problems'])
 
     def test_the_final_window_list_gets_one_retry_and_a_list_it_reads_is_no_problem(self):
         # GR2 (item 5): roblox's run saw the final `yabai -m query --windows` miss its 2.0 s once, and the check failed
