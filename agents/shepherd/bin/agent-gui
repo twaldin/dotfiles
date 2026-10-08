@@ -1,5 +1,16 @@
 #!/usr/bin/python3
-"""Run one headless GUI task under a live lease; invoke through machine-ok-queue."""
+"""Run one headless GUI task under a live lease; invoke through machine-ok-queue.
+
+Lease: ~/.cache/agent-gui.lock (retain its inode). A dedicated keeper holds the
+lease while OMP runs; OMP and its shell children receive no lease descriptor.
+An orphaned running guest is stopped under a free lease before a new boot.
+Teardown stops directly, without another queue or memory-gate wait.
+Busy diagnostics include recorded ownership and lsof's current file holders.
+
+Exit codes: 0 success; 2 usage/unsupported host; 75 lease busy (retry later);
+124 readiness/command deadline; 128+N cancellation by signal N; other nonzero
+codes indicate command, permissions, MCP, ColorSync or teardown failure.
+"""
 import argparse
 import datetime as dt
 import fcntl
@@ -11,6 +22,8 @@ import socket
 import subprocess
 import sys
 import time
+
+KEEPER = 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:], close_fds=True))'
 
 
 class Failure(Exception):
@@ -31,13 +44,16 @@ class Guest:
     def call(self, argv, timeout, capture=False, worker=False, cleanup=False):
         if self.cancelled and not cleanup:
             raise Failure('cancelled before starting another command', 128 + self.cancelled)
+        # Only the keeper inherits the lease; its OMP child closes it at exec.
+        if worker:
+            argv = [sys.executable, '-c', KEEPER, *argv]
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE if capture else None,
                                 text=True, start_new_session=True,
                                 pass_fds=(self.lease.fileno(),) if worker else ())
         try:
             if worker:
-                self.record(worker_pid=proc.pid)
+                self.record(keeper_pid=proc.pid)
             deadline = time.monotonic() + timeout
             while True:
                 try:
@@ -109,26 +125,32 @@ class Guest:
                 time.sleep(min(2, max(0, deadline - time.monotonic())))
             else:
                 raise Failure('signed guest driver not ready within 120s', 124)
-            k = self.call([str(Path.home() / '.local/bin/colorsync-k')], 15, capture=True)
+            self.call(['/usr/bin/sudo', '-n', '-l', '/usr/bin/log'], 10, capture=True)
+            k = self.call([str(Path.home() / '.local/bin/colorsync-k'), '4'], 15, capture=True)
             print('agent-gui: ' + k.strip(), flush=True)
             if not k.startswith('K=0.0 '):
                 raise Failure('post-boot ColorSync check requires K=0.0')
             prompt = ('You are the sole GUI worker inside an owned headless agent-gui batch. '
                       'Only you may call computer-guest tools. Do not boot/stop the VM, acquire/release '
                       'the lease, spawn workers, launch a viewer, or use host GUI input. '
+                      'Stage task files with scp -F ~/.config/agent-gui/ssh_config while this batch '
+                      'is running. Save requested screenshots to host paths and print those paths. '
                       'Read back actual results and finish all calls before exiting. Task: ' + task)
             print('agent-gui: starting fresh OMP worker', flush=True)
-            self.call(['omp', '-p', '--no-session', '--no-title', '--no-skills', '--no-rules',
-                       '--no-lsp', '--auto-approve', '--max-time', '10m', '--mode', 'json', prompt],
-                      660, worker=True)
+            self.call([str(Path.home() / '.bun/bin/omp'), '-p', '--no-session', '--no-title',
+                       '--no-skills', '--no-rules', '--no-lsp', '--auto-approve',
+                       '--max-time', '10m', prompt], 660, worker=True)
         finally:
             self.stop()
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    description, _, contract = __doc__.partition('\n\n')
+    parser = argparse.ArgumentParser(description=description, epilog=contract,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
-    run = commands.add_parser('run', help='claim, recover/boot, run a fresh OMP worker, stop')
+    run = commands.add_parser('run', help='claim, recover/boot, run a fresh OMP worker, stop',
+                              epilog=contract, formatter_class=argparse.RawDescriptionHelpFormatter)
     run.add_argument('--lock-wait', type=float, default=30, metavar='SECONDS',
                      help='bounded lease wait (default: 30 seconds; 0 is immediate)')
     run.add_argument('task', nargs='+', help='GUI assignment and readback criteria')
@@ -156,8 +178,14 @@ def main(argv=None):
                     raise Failure('cancelled while waiting for the guest lease', 128 + guest.cancelled)
                 if time.monotonic() >= deadline:
                     lease.seek(0)
-                    raise Failure('guest lease busy after %ss; owner: %s' %
-                                  (args.lock_wait, lease.read() or '(worker retains the lease)'), 75)
+                    try:
+                        holders = subprocess.run(['/usr/sbin/lsof', '-t', str(path)],
+                                                 stdin=subprocess.DEVNULL, capture_output=True,
+                                                 text=True, timeout=5).stdout.strip() or '(none visible)'
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        holders = '(lsof unavailable: %s)' % exc
+                    raise Failure('guest lease busy after %ss; owner: %s; lsof holders: %s' %
+                                  (args.lock_wait, lease.read() or '(no record)', holders), 75)
                 time.sleep(min(0.25, deadline - time.monotonic()))
         guest.owner = {'host': socket.gethostname(), 'holder_pid': os.getpid(),
                        'tile_id': os.environ.get('EASL_TILE_ID'),

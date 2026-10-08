@@ -7,7 +7,7 @@ On **twaldin-home**, GUI tests default to headless `agent-gui`. Host exceptions:
 
 ## Guest on twaldin-home
 
-Only the CLI's delegated worker calls `computer-guest` tools, even if another session already has them. Stage necessary files over `ssh -F ~/.config/agent-gui/ssh_config`; host paths are not guest paths.
+Only the CLI's delegated worker calls `computer-guest` tools, even if another session already has them. Include file staging in the task: the worker runs `scp -F ~/.config/agent-gui/ssh_config <host-file> agent-gui:<guest-path>` after boot, and saves requested screenshots to host paths it prints. Host paths are not guest paths.
 
 ```sh
 machine-ok-queue run -- agent-gui run -- 'Call computer-guest list_windows with {} and report the actual result.'
@@ -15,9 +15,9 @@ machine-ok-queue run -- agent-gui run -- 'Call computer-guest list_windows with 
 
 Replace the task with the GUI assignment and readback criteria. Use a background job or a tool timeout of at least 20 minutes plus queue wait; wait for its exit status. `agent-gui --help` / `agent-gui run --help` is the command contract.
 
-The CLI waits at most 30 seconds for a kernel-held lease (`--lock-wait` changes that), then reports a busy owner and exits 75. It recovers an orphaned running VM under a free lease, boots headless through this queued job, waits for the signed driver and checks ColorSync K=0, starts a fresh `omp -p` worker with closed stdin, then stops directly without another queue/gate wait. Live workers retain the lease if the holder crashes; after the last process exits the next taker can recover. Lock-file existence is not ownership; never delete it or bypass the CLI.
+The CLI waits at most 30 seconds for a kernel-held lease (`--lock-wait` changes that), then reports the recorded owner and `lsof` holders and exits 75. On 75, keep other work moving and retry later; report repeated 75 or failures with their output to your lead or Tim (subagents in their result). It recovers an orphaned running VM, boots headless, waits for the signed driver, checks ColorSync K=0, starts fresh `omp -p` with closed stdin, prints its final answer and stops directly without another queue/gate wait. A dedicated keeper retains the lease if the holder crashes; OMP and its shell children never inherit it. The lease releases when the keeper exits. Never delete the lock file or bypass the CLI.
 
-The retained MCP entry may warn at session start while stopped. The fresh worker discovers it after boot and requires MCP readiness; spawning an ordinary task subagent does not guarantee rediscovery. Show guest results as screenshots, not a viewer. The pilot's host-state comparison brackets were rollout evidence; ongoing runs keep the post-boot K=0 check.
+The retained MCP entry may warn at session start while stopped. The fresh worker discovers it after boot and requires MCP readiness; an ordinary task subagent does not guarantee rediscovery. Show its saved host screenshots, not a viewer. The pilot's host-state brackets were rollout evidence; ongoing runs check log access and post-boot K=0 over four periods (~20 seconds).
 
 ## Host exceptions: every Mac
 
