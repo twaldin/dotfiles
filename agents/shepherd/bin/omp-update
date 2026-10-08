@@ -35,7 +35,8 @@ Policy (Tim, 2026-10-05, via the meta pane; hourly rotation 2026-10-07):
   later host lacks (deckbox, the canary), that version goes into `blocked_versions` with the
   reason, and the agents in config `notify` (canvas, meta) are told through agent-msg.
 - Seats and front doors (config report_only: `lindy-seat`; opt_in overrides it), and every
-  omp outside herdr and easl tiles: the run only reports them.
+  omp outside herdr and easl tiles: the run only reports them. Tim's own tiles (an easl tile
+  with no agent name, quiet-window's test) are never restarted: "skip: Tim's tile".
 - launchd omp services (home: auth broker + gateway) restart through launchctl
   kickstart when their omp is older than the installed one.
 - easl tiles (home, behind ~/.config/machine-shepherd/easl.json {"enabled": true, "cli":
@@ -901,6 +902,10 @@ def host_main(params):
             and pane not in pol["opt_in"] and name not in pol["opt_in"]
         if seat:
             row["action"] = "report: seat/front door (owner decides)"
+        elif tile and not name:
+            # An unnamed tile is Tim's own session (quiet-window's test): never rotated or restarted here; the binary
+            # upgrade reaches it when Tim restarts omp himself (meta 2026-10-08).
+            row["action"] = "skip: Tim's tile"
         elif pane in pol["skip_panes"]:
             row["action"] = "skip: config skip_panes"
         elif not triggers:

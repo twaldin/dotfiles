@@ -821,6 +821,18 @@ class TileRestart(TileSandbox):
         self.assertEqual(row['action'], 'report: seat/front door (owner decides)')
         self.assertEqual(self.mutations(), [])
 
+    def test_tims_own_unnamed_tile_is_never_restarted_and_a_named_one_over_the_same_lines_is(self):
+        # meta 2026-10-08: an unnamed tile is Tim's own session (quiet-window's test); rotation never touches it.
+        for name, action in ((None, "skip: Tim's tile"), ('worker', 'restarted')):
+            with self.subTest(name=name):
+                world = self.new_world()
+                world.place_tile(name=name, session_mb=10, age_s=13 * 3600)
+                world.procs[world.tile_pid]['rss_mb'] = 1600
+                row = self.row(self.host())
+                self.assertEqual((row['triggers'], row['action']), (['rss 1600 MB', 'up 13.0 h'], action))
+                if name is None:
+                    self.assertEqual(self.mutations(), [])
+
     def assert_left_alone(self, action, blocked=None, setup=None, **tile):
         """A due tile (session over the limit) that one gate keeps from restarting: no easl call changes anything."""
         world = self.world
