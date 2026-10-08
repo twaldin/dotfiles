@@ -170,12 +170,14 @@ def adapt_pstack(skills: Path) -> None:
         text = text.replace('`/deslop`', 'project checks and diff cleanup')
         text = text.replace("**create-skill** skill (Cursor's built-in for authoring SKILL.md files)",
                             '**writing-for-agents** skill (`skill://writing-for-agents`)')
+        text = text.replace('`control-ui` or `control-cli` from `cursor-team-kit`', 'native browser/easl or the real CLI')
         text = text.replace('`control-cli` or `control-ui` from `cursor-team-kit`', 'the real CLI or native browser/easl')
         text = text.replace('`control-ui` from `cursor-team-kit`', 'native browser/easl')
         text = text.replace('`control-cli` from `cursor-team-kit`', 'the real CLI')
         text = text.replace('`cursor-team-kit` publishes `control-cli` (CLIs and TUIs) and `control-ui` (browser / Electron / web UIs).',
                             'Use the real CLI for CLIs/TUIs, native browser/easl for web UI, and `mac-gui` for native windows.')
         text = text.replace('`control-ui` or `control-cli`', 'native browser/easl or the real CLI')
+        text = text.replace('`control-ui`', 'native browser/easl').replace('`control-cli`', 'the real CLI')
         text = text.replace('**Just do it.** Use any MCP tool. Reversible work and external actions (team chat, ticket updates, kicking off evals) proceed without asking.',
                             "**Just do it within authorization.** Reversible scoped work proceeds; outward actions and landing follow Tim's and the project's permission contract.")
         text = text.replace('Open a todolist', 'Track parent phases with native todo (workers without todo report step status)')

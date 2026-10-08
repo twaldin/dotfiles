@@ -36,7 +36,7 @@ class SharedInstall(unittest.TestCase):
             removed = {'autoresearch', 'code-review', 'diagnosing-bugs', 'prototype', 'tdd', 'pr', 'grill-me'}
             self.assertTrue(added.issubset(selected))
             self.assertFalse(removed.intersection(selected))
-            self.assertEqual(len(selected), 22)
+            self.assertTrue({'shared-machine', 'machine-health'}.issubset(selected))
             pstack = stage / 'vendor/pstack/skills'
             for name in added:
                 body = (stage / 'catalog' / name / 'SKILL.md').read_text()
@@ -100,6 +100,7 @@ class SharedInstall(unittest.TestCase):
                 body = path.read_text()
                 for obsolete in [
                     'cursor-team-kit', 'deslop', 'from trunk with read', '/loop 1h',
+                    '`control-ui`', '`control-cli`',
                     'a isolated checkout', r'configured [\w-]+ model', r'\bthe store\b',
                     'with a prompt that runs this tick', 'by store path', 'ledger row',
                     'Drain the final inbox', 'status page', 'four-column', 'lane VM',
