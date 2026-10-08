@@ -25,10 +25,12 @@ BIN = Path(__file__).resolve().parent.parent / 'bin'
 QUEUE = BIN / 'machine-ok-queue'
 GATE_SCRIPT = BIN / 'machine-ok'
 
-# Exits with the number in $GATE_DIR/exit (0 when absent) and records its arguments, one call per line.
+# Exits with the number in $GATE_DIR/exit (0 when absent) and records its arguments, one call per line. With --gpu,
+# $GATE_DIR/exit-gpu wins when it exists (a GPU gate that fails while the memory gate passes).
 GATE = '''#!/bin/sh
 echo "$*" >> "$GATE_DIR/calls"
 echo "free=60% pageins=0/s swap=0/s compressed=25%"
+case " $* " in *" --gpu "*) [ -e "$GATE_DIR/exit-gpu" ] && exit "$(cat "$GATE_DIR/exit-gpu")";; esac
 exit "$(cat "$GATE_DIR/exit" 2>/dev/null || echo 0)"
 '''
 
@@ -594,6 +596,57 @@ class Gate(QueueCase):
         code, out, err = self.finish(self.start('echo', 'linux', gate=False))
         self.assertEqual((code, out), (0, 'linux\n'), err)
         self.assertFalse((self.root / 'calls').exists())
+
+    def gpu_head_with_a_closed_gate(self):
+        (self.root / 'exit-gpu').write_text('1')
+        g = self.start(*self.recorder('G'), flags=['--gpu'])
+        self.until(lambda: (self.root / 'calls').exists() and '--memory --gpu' in (self.root / 'calls').read_text(),
+                   what='the GPU gate sampled')
+        return g
+
+    def test_a_gpu_head_whose_gate_fails_does_not_hold_up_a_memory_ticket_behind_it(self):
+        # 2026-10-08 01:08-01:15Z: head ticket 383 (--gpu whisper) failed its GPU gate; 7 memory-only tickets
+        # waited behind it with 0/6 slots busy.
+        self.slots(2)
+        g = self.gpu_head_with_a_closed_gate()
+        code, _, err = self.finish(self.start(*self.recorder('M')), timeout=10)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.order(), ['M'])
+        self.assertIsNone(g.poll(), 'its own gate is still closed')
+        out = subprocess.run([sys.executable, str(QUEUE), 'status'], env=self.env, capture_output=True, text=True).stdout
+        self.assertIn('(its gate is closed: free=60%', out)
+        (self.root / 'exit-gpu').unlink()
+        self.assertEqual(self.finish(g)[0], 0)
+        self.assertEqual(self.order(), ['M', 'G'])
+
+    def test_eligible_tickets_behind_a_closed_gate_still_go_in_fifo_order(self):
+        holder = self.start(*self.blocker('H'))  # one slot: G samples only once H frees it
+        self.until(lambda: (self.work / 'H.pid').exists(), what='holder running')
+        (self.root / 'exit-gpu').write_text('1')
+        g = self.start(*self.recorder('G'), flags=['--gpu'])
+        self.queued(g, 2)
+        waiters = []
+        for i, name in enumerate(('M1', 'M2', 'M3'), start=3):
+            waiters.append(self.start(*self.recorder(name)))
+            self.queued(waiters[-1], i)
+        (self.work / 'H.go').touch()
+        for p in [holder, *waiters]:
+            self.assertEqual(self.finish(p)[0], 0)
+        self.assertEqual(self.order(), ['H', 'M1', 'M2', 'M3'])
+        self.assertIsNone(g.poll())
+        (self.root / 'exit-gpu').unlink()
+        self.assertEqual(self.finish(g)[0], 0)
+
+    def test_one_closed_sample_answers_every_ticket_with_that_gate(self):
+        (self.root / 'exit').write_text('1')
+        slow = {'MACHINE_OK_QUEUE_GATE_RETRY': '30'}
+        waiters = []
+        for i, name in enumerate(('A', 'B', 'C'), start=1):
+            waiters.append(self.start(*self.recorder(name), env=slow))
+            self.queued(waiters[-1], i)
+        time.sleep(1)
+        self.assertEqual((self.root / 'calls').read_text().splitlines(), ['--memory'], 'one sample, not one each')
+        self.assertEqual(self.order(), [])
 
 
 class RusageV6(ctypes.Structure):

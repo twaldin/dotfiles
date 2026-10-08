@@ -39,8 +39,11 @@ ceiling) and nice 10, both inherited by every child and grandchild (see CLAMP). 
 genuinely needs P-cores at full priority, runs it unclamped; the admit line in queue.jsonl and `status` say so.
 Linux (deckbox) runs commands as they are: offload's units carry their own CPUQuota.
 SIGTERM, SIGINT and SIGHUP are forwarded to the command; SIGINT is not when it came from this terminal,
-which delivered it to the command already. Only the oldest waiter samples the gate: every 30 s while the
-machine is busy. A job admitted before a hold keeps running; quiet-window's STOP NOW still covers it.
+which delivered it to the command already. Each waiter answers to its own gate (its flags): the oldest waiter
+not held back samples it, and a closed gate holds back only the tickets with that same gate, so a --gpu head
+whose GPU gate fails no longer stalls the memory-only tickets behind it; FIFO holds among the rest. A closed
+verdict is shared for 30 s (queue/gates): one sample answers every ticket with that gate, and the oldest
+of them re-samples. A job admitted before a hold keeps running; quiet-window's STOP NOW still covers it.
 `status` prints who runs and who waits (GPU jobs marked), since when, in which lane, what holds are active, and on
 a Mac the GPU rule with Tim's idle time. `log` prints, one JSON line each, every job whose run overlaps the
 window (caller, command prefix, slot, clamp, lane, hold, state, wait s, run s, exit) and every cancel inside it:
@@ -345,6 +348,34 @@ def take_slot(n):
     return None, None
 
 
+def closed_gates():
+    """{gate command: {"at": epoch s, "sample": its line}} for every gate that failed within GATE_RETRY_S: the
+    tickets with that gate wait, and the others pass them. Call under Lock."""
+    try:
+        with open(os.path.join(QUEUE, "gates")) as f:
+            rows = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    t = time.time()
+    return {k: v for k, v in (rows.items() if isinstance(rows, dict) else ())
+            if isinstance(v, dict) and 0 <= t - v.get("at", 0) < GATE_RETRY_S}
+
+
+def note_gate(key, passed, sample):
+    """Share a gate's verdict with every ticket that has the same gate: closed for GATE_RETRY_S, or open. Under Lock."""
+    rows = closed_gates()
+    if key is None or (passed and key not in rows):
+        return
+    if passed:
+        del rows[key]
+    else:
+        rows[key] = {"at": time.time(), "sample": sample}
+    path = os.path.join(QUEUE, "gates")  # no .json: ticket files are <n>.json
+    with open(path + ".tmp", "w") as f:
+        json.dump(rows, f)
+    os.replace(path + ".tmp", path)
+
+
 def gate(argv):
     """(passed, sample): the gate's verdict and the sample line it printed."""
     if argv is None:
@@ -406,9 +437,10 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
         signal.signal(sig, on_signal)
 
     os.makedirs(QUEUE, exist_ok=True)
+    key = gate_argv and shlex.join(gate_argv)
     row = {"pid": os.getpid(), "host": host(), "started": stamp(), "cwd": os.getcwd(), "agent": agent, "pane": pane,
            "names": sorted(me), "command": cmd, "flags": list(flags), "clamp": clamp and clamp["label"], "gpu": gpu,
-           "state": "waiting", "slot": None, "admitted": None}
+           "gate_key": key, "state": "waiting", "slot": None, "admitted": None}
     with Lock():
         counter = os.path.join(QUEUE, "counter")
         try:
@@ -432,7 +464,6 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
     slot = sfd = None
     said = None
     long_logged = False
-    next_gate = 0.0
     sample = None
     try:
         while True:
@@ -440,11 +471,12 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
             with Lock():
                 live = tickets()
                 running = held_slots(live)
+                closed = closed_gates()
             # Each ticket's lane (see lane()) decides who counts as ahead of it. FIFO holds within the line it waits
             # in: the owner lane counts only owner tickets, so a hold's owner passes the foreign tickets; a foreign
             # ticket in a heavy-only hold counts every ticket not paused; with no hold active everyone is back in the
-            # original order. A GPU ticket held back by rule 5 does not count as ahead of a non-GPU one. Only the
-            # head of a line samples the gate.
+            # original order. A GPU ticket held back by rule 5, and a ticket whose gate is closed, do not count as
+            # ahead of the tickets behind them. Only the head of a line samples its gate.
             holds = active_holds()
             kind, hold = lane(holds, me)
             lanes = {t: lane(holds, ticket_names(r))[0] for t, r in live}
@@ -455,7 +487,8 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
                         and gpu_rule()[0])
             counted = ("owner", "normal") if kind in ("owner", "normal") else ("owner", "normal", "heavy-hold")
             ahead = [] if kind == "paused" else [t for t, r in live if t < n and r.get("state") != "running"
-                                                  and lanes[t] in counted and (gpu or not (gpu_full and r.get("gpu")))]
+                                                  and lanes[t] in counted and (gpu or not (gpu_full and r.get("gpu")))
+                                                  and r.get("gate_key") not in closed]
             foreign_running = [s for s, r in running.items() if lanes.get(r.get("ticket")) == "heavy-hold"]
             if kind == "paused":
                 why = f"queue paused by {hold_text(hold)}"
@@ -467,21 +500,24 @@ def run(cmd, gate_argv, flags=(), agent=None, stdin=None, forward=None, clamp=No
             elif gpu and gpu_full:
                 why = (f"ticket {n} is next for the GPU (lane: gpu, Tim active): GPU jobs run {GPU_ACTIVE_SLOTS} at a "
                        f"time while Tim is active, and one runs (slot {gpu_running[0]})")
-            elif time.monotonic() < next_gate:
-                why = said  # the machine was busy at the last sample; keep waiting quietly
+            elif key in closed:
+                why = (f"ticket {n} is next; machine busy ({closed[key]['sample']}); re-checking every "
+                       f"{int(GATE_RETRY_S)}s, and the tickets behind it with other gates go first")
             else:
                 slot, sfd = take_slot(slots)
                 if slot is None:
                     why = f"ticket {n} is next: all {slots} slots busy"
                 else:
                     passed, sample = gate(gate_argv)
+                    with Lock():
+                        note_gate(key, passed, sample)
                     if passed:
                         state["spawning"] = True  # from here a signal waits for the command, which gets it
                         break
                     os.close(sfd)
                     slot = sfd = None
-                    next_gate = time.monotonic() + GATE_RETRY_S
-                    why = f"ticket {n} is next; machine busy ({sample}); re-checking every {int(GATE_RETRY_S)}s"
+                    why = (f"ticket {n} is next; machine busy ({sample}); re-checking every {int(GATE_RETRY_S)}s, "
+                           f"and the tickets behind it with other gates go first")
             if why != said:
                 say(why)
                 said = why
@@ -553,6 +589,7 @@ def listing():
     os.makedirs(QUEUE, exist_ok=True)
     with Lock():
         live = tickets()
+        closed = closed_gates()
     slots = slot_count()
     running = [(t, r) for t, r in live if r.get("state") == "running"]
     waiting = [(t, r) for t, r in live if r.get("state") != "running"]
@@ -582,7 +619,9 @@ def listing():
                        f"  [{' '.join(r.get('flags') or []) or 'full gate'}]" + ("  [GPU]" if r.get("gpu") else "")
                        + {"paused": "  (paused by the hold)", "owner": "  (owner lane)",
                           "heavy-hold": "  (heavy hold: one background slot)"}.get(lane(holds, ticket_names(r))[0], "")
-                       + ("  (gpu, Tim active: waits for the running GPU job)" if gpu_full and r.get("gpu") else ""))
+                       + ("  (gpu, Tim active: waits for the running GPU job)" if gpu_full and r.get("gpu") else "")
+                       + (f"  (its gate is closed: {closed[r['gate_key']]['sample']})"
+                          if r.get("gate_key") in closed else ""))
     return "\n".join(out)
 
 
