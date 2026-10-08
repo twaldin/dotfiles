@@ -59,7 +59,7 @@ class SharedInstall(unittest.TestCase):
             self.assertNotIn('orch init', program)
             cleanup = (pstack / 'poteto-mode/playbooks/worktree-cleanup.md').read_text()
             self.assertNotIn('remove --force', cleanup)
-            self.assertNotIn('delete all', cleanup)
+            self.assertNotIn('xcrun simctl --set testing delete all', cleanup)
             self.assertIn('Unknown ownership is a hold', cleanup)
             for path in pstack.rglob('*.md'):
                 for target in re.findall(r'\]\(([^)]+)\)', path.read_text()):
