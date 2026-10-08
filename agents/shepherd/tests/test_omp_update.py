@@ -1,1603 +1,635 @@
-"""Smoke test for bin/omp-update: the extension-fingerprint pins that decide whether a
-pane is due a restart, the checkpoint summary line, the easl tiles (the switch file, tile restarts and their
-gates, roll, `migrate`), the hourly rotation triggers and gates, the post-restart extension check and the
-rollout it can stop, and per-host version holds.
+"""Behavior tests for vetted releases, canary installs and safe in-place lead resumes.
 
-The script is loaded as a module with HOME = a temp dir, so every path it derives (state, config, HERDR, the easl
-switch) is sandboxed. What it reaches outside itself is replaced by one fake `World`: herdr's JSON, the easl CLI
-(FakeEasl), the process table and the clock (sleeps advance it; nothing really waits). Config, state files, the run
-lock (a real flock), idle_gate, live_children and the session-size check run for real. A few tests run the script
-itself, or the easl helpers, against real processes.
+HOME, process probes, ssh, launchctl and easl are sandboxed: no live agent or
+service is changed. The native easl refusal of pending messages is modeled at
+the non-forced agent.restart boundary, where the app enforces that guard.
 """
 import argparse
 import contextlib
+import copy
 import datetime as dt
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
 import json
 import os
 import plistlib
-import shutil
-import shlex
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-import warnings
 from pathlib import Path
 from unittest import mock
 
 OMP_UPDATE = Path(__file__).resolve().parent.parent / 'bin' / 'omp-update'
+MISSING = object()
+MODEL = 'anthropic/claude-opus-5-5'
 
 
-def load_omp_update():
-    loader = importlib.machinery.SourceFileLoader('omp_update_under_test', str(OMP_UPDATE))
+def load_module():
+    loader = importlib.machinery.SourceFileLoader('omp_update_test', str(OMP_UPDATE))
     spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    keep, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # no __pycache__ in the repo's bin/
-    try:
-        loader.exec_module(module)
-    finally:
-        sys.dont_write_bytecode = keep
-    return module
-
-
-class Clock:
-    """Stands in for the script's `time` module: starts at the real now, only sleep() moves it."""
-
-    def __init__(self):
-        self.now = time.time()
-
-    def time(self):
-        return self.now
-
-    def sleep(self, seconds):
-        self.now += seconds
-
-    advance = sleep
-
-
-EMPTY_EDITOR = 'working on it...\n╭────────────\n│\n╰─\n'
-DRAFT_IN_EDITOR = 'working on it...\n╭────────────\n│ half-typed message to the agent\n'
-
-
-MISSING = object()  # a field the easl CLI does not report
-
-OMP_HELP = '''Usage: omp [options] [prompt]
-  -m, --model=<model>      Model to use
-      --thinking=<level>   Thinking level
-  -r, --resume=<id>        Resume a session
-      --no-skills          Skip skills
-'''
-
-
-class FakeEasl:
-    """The easl CLI as omp-update calls it (`easl <command> --opt value`, JSON on stdout, non-zero exit on refusal):
-    argv is recorded and answered from `agents` and `session` (the file each tile's omp reported), reached through
-    World.sh. An in-process stand-in rather than a script because the polling loops make hundreds of calls."""
-
-    def __init__(self, world, cli):
-        self.world, self.cli = world, cli
-        self.agents, self.session, self.calls = [], {}, []
-        self.fail = {}  # command -> (returncode, stdout, stderr)
-        self.lists, self.on_list = 0, {}  # on_list[n](easl) runs just before the n-th agent.list is answered
-        self.restart_changes_pid, self.session_after_restart = True, None
-        self.after_restart = {}  # fields the tile reports once its omp came back (e.g. protocol None)
-        self.create = 'with pid'  # what object.create leaves behind: 'with pid', 'without pid' or 'not listed'
-        self.reported_session = None  # a created tile's omp reports this instead of the --resume= in its command
-        self.created, self.deleted = [], []
-
-    def run(self, argv):
-        self.calls.append(list(argv))
-        self.world.events.append(('easl', *argv))
-        done = lambda rc, out, err: subprocess.CompletedProcess([self.cli, *argv], rc, out, err)
-        if argv[0] in self.fail:
-            return done(*self.fail[argv[0]])
-        handler = getattr(self, 'cmd_' + argv[0].replace('.', '_'), None)
-        if handler is None:
-            raise AssertionError(f'unexpected easl call {argv}')
-        return done(0, json.dumps(handler(argv[1:])), '')
-
-    @staticmethod
-    def opt(opts, flag):
-        return opts[opts.index(flag) + 1]
-
-    def find(self, tile):
-        return next((a for a in self.agents if a['tile'] == tile), None)
-
-    def cmd_agent_list(self, opts):
-        self.lists += 1
-        if self.lists in self.on_list:
-            self.on_list[self.lists](self)
-        return {'agents': [dict(a) for a in self.agents]}
-
-    def cmd_object_get(self, opts):
-        tile = self.opt(opts, '--id')
-        path = self.session.get(tile)
-        return {'object': {'id': tile, 'props': {'agent': {'sessionPath': path}} if path else {}}}
-
-    def cmd_agent_restart(self, opts):
-        tile = self.find(self.opt(opts, '--target'))
-        if self.restart_changes_pid:
-            tile['pid'] = self.world.pid()
-            self.world.born(tile['pid'])
-        tile.update(self.after_restart)
-        if self.session_after_restart == 'gone':  # easl 0.2.2 dropped props.agent.sessionPath on some restarts
-            self.session.pop(tile['tile'], None)
-        elif self.session_after_restart:
-            self.session[tile['tile']] = self.session_after_restart
-        return {'ok': True}
-
-    def cmd_board_open(self, opts):
-        return {'board': 'brd_' + os.path.basename(self.opt(opts, '--root').rstrip('/'))}
-
-    def cmd_object_create(self, opts):
-        payload = json.loads(self.opt(opts, '--json'))
-        self.created.append(payload)
-        if self.create != 'not listed':
-            agent = {'tile': 'obj_new', 'board': payload['board'], 'name': payload['props']['name'], 'kind': 'omp',
-                     'protocol': 1, 'focused': False, 'draft': False,
-                     'lifecycle': {'state': 'idle' if self.create == 'with pid' else 'unknown',
-                                   'seen': True, 'restored': False}}
-            if self.create == 'with pid':
-                agent['pid'] = self.world.pid()
-                resume = next(w for w in payload['props']['command'][-1].split() if w.startswith('--resume='))
-                self.session['obj_new'] = self.reported_session or resume[len('--resume='):]
-            self.agents.append(agent)
-        return {'object': {'id': 'obj_new'}}
-
-    def cmd_object_delete(self, opts):
-        tile = self.opt(opts, '--id')
-        self.deleted.append(tile)
-        self.agents = [a for a in self.agents if a['tile'] != tile]
-        return {'deleted': tile}
-
-
-class World:
-    """herdr, ps and the clock, as seen from omp-update."""
-    PID = 500000  # above any real pid, so nothing here can be the test process's own ancestry
-
-    def __init__(self, mod, root):
-        self.mod, self.root = mod, root
-        self.agents, self.process_info, self.procs, self.pane_text = [], {}, {}, {}
-        self.herdr_calls, self.events = [], []  # events: the order of mutating herdr and every easl call
-        self.typed, self.closed, self.agent_starts = [], [], []  # `/exit` prompts, closed panes, `agent start` argv
-        self.agent_start_rc, self.agent_start_err = 0, ''
-        self.omp_pid = None
-        self.new_omp_log = None  # JSON log lines every omp started from here on writes to ~/.omp/logs
-        self.zsh_finds_omp = True  # `zsh -c 'command -v omp'` in easl's environment resolves omp
-        self.zsh_checks, self.app_env = [], {}  # each check's argv; the easl app's environment (ps -E)
-        self.next_pid = self.PID
-        self.sessions = root / 'sessions'
-        self.sessions.mkdir(exist_ok=True)
-        self.easl = FakeEasl(self, str(root / '.local' / 'bin' / 'easl'))
-
-    def pid(self):
-        self.next_pid += 1
-        return self.next_pid
-
-    # -- building the scene
-
-    def place_agent(self, name, pane, status='idle', focused=False, session_mb=0, omp_cmd=None, with_omp=True,
-                    omp_pid=None, age_s=7200):
-        session = self.sessions / f'{pane.replace(":", "_")}-{self.pid()}.jsonl'
-        with open(session, 'wb') as f:
-            f.truncate(session_mb * 1048576)  # sparse: only the size matters
-        shell, omp = self.pid(), omp_pid or self.pid()
-        agent = {'agent': 'omp', 'name': name, 'pane_id': pane, 'agent_status': status, 'focused': focused,
-                 'agent_session': {'kind': 'path', 'value': str(session)}}
-        self.agents.append(agent)
-        self.pane_text[pane] = EMPTY_EDITOR
-        self.procs[shell] = {'ppid': 1, 'age_s': 7200, 'cmd': '-zsh'}
-        cmd = (omp_cmd or '/Users/x/.bun/bin/omp --resume={session}').format(session=session)
-        self.process_info[pane] = {'shell_pid': shell, 'foreground_process_group_id': omp,
-                                   'foreground_processes': [{'pid': omp, 'argv': cmd.split()}]}
-        if with_omp:
-            self.procs[omp] = {'ppid': shell, 'age_s': age_s, 'cmd': cmd}
-        self.omp_pid, self.pane, self.agent, self.session = omp, pane, agent, session
-        return agent
-
-    def born(self, pid):
-        """A new omp `pid` came up: it writes its own log, as omp does (omp.<date>.<pid>.log)."""
-        if self.new_omp_log is not None:
-            logs = self.root / '.omp' / 'logs'
-            logs.mkdir(parents=True, exist_ok=True)
-            (logs / f'omp.2026-10-07.{pid}.log').write_text(self.new_omp_log)
-
-    def place_tile(self, name='lead', tile='obj_lead', state='idle', seen=True, restored=False, focused=False,
-                   draft=False, session_mb=150, age_s=7200, board='brd_dotfiles', with_pid=True,
-                   model='anthropic/claude-opus-5-5'):
-        """An omp agent in an easl terminal tile, as `easl agent.list` reports it."""
-        agent = {'tile': tile, 'board': board, 'name': name, 'kind': 'omp', 'protocol': 1, 'model': model,
-                 'thinking': 'xhigh',
-                 'lifecycle': {'state': state, 'seen': seen, 'restored': restored}}
-        for key, value in (('focused', focused), ('draft', draft)):
-            if value is not MISSING:
-                agent[key] = value
-        if with_pid:
-            session = self.sessions / f'{tile}.jsonl'
-            with open(session, 'wb') as f:
-                f.truncate(session_mb * 1048576)
-            agent['pid'] = self.tile_pid = self.pid()
-            self.procs[self.tile_pid] = {'ppid': 1, 'age_s': age_s, 'cmd': f'/Users/x/.bun/bin/omp --resume={session}'}
-            self.easl.session[tile] = str(session)
-            self.tile_session = session
-        self.easl.agents.append(agent)
-        return agent
-
-    def add_child(self, parent, cmd):
-        pid = self.pid()
-        self.procs[pid] = {'ppid': parent, 'age_s': 60, 'cmd': cmd}
-        return pid
-
-    # -- the seams omp-update calls
-
-    def herdr(self, *args, timeout=60):
-        self.herdr_calls.append(args)
-        if args[:2] == ('agent', 'list'):
-            return {'result': {'agents': list(self.agents)}}
-        if args[:2] == ('agent', 'get'):
-            agent = next((a for a in self.agents if args[2] in (a['name'], a['pane_id'])), None)
-            if agent is None:
-                return {'error': 'no such agent'}
-            return {'result': {'agent': agent}}
-        if args[:2] == ('pane', 'process-info'):
-            return {'result': {'process_info': self.process_info.get(args[3], {})}}
-        if args[:2] == ('agent', 'prompt'):
-            self.typed.append((args[2], args[3]))
-            self.events.append(('herdr', 'prompt', args[2], args[3]))
-            return {'result': {}}
-        if args[:2] == ('pane', 'close'):
-            self.closed.append(args[2])
-            self.events.append(('herdr', 'pane close', args[2]))
-            return {'result': {}}
-        raise AssertionError(f'unexpected herdr call {args}')
-
-    def agent_start(self, cmd):
-        """`herdr agent start NAME --kind omp --pane PANE ... -- FLAGS`: a fresh omp comes up in the pane."""
-        self.agent_starts.append(cmd[3:])
-        self.events.append(('herdr', 'agent start', cmd[3]))
-        if self.agent_start_rc == 0:
-            info = self.process_info[cmd[cmd.index('--pane') + 1]]
-            new = self.pid()
-            argv = [self.mod.OMP, *cmd[cmd.index('--') + 1:]]
-            info.update(foreground_process_group_id=new, foreground_processes=[{'pid': new, 'argv': argv}])
-            self.born(new)
-            self.procs[new] = {'ppid': info['shell_pid'], 'age_s': 5, 'cmd': ' '.join(argv)}
-        return subprocess.CompletedProcess(cmd, self.agent_start_rc, '', self.agent_start_err)
-
-    def sh(self, cmd, timeout=120, check=False, **kw):
-        if cmd[:3] == [self.mod.HERDR, 'pane', 'read']:
-            return subprocess.CompletedProcess(cmd, 0, self.pane_text[cmd[3]], '')
-        if cmd == [self.mod.OMP, '--help']:
-            return subprocess.CompletedProcess(cmd, 0, OMP_HELP, '')
-        if cmd[:3] == [self.mod.HERDR, 'agent', 'start']:
-            return self.agent_start(cmd)
-        if cmd[0] == self.easl.cli:
-            return self.easl.run(cmd[1:])
-        if cmd[:2] == ['/bin/ps', '-E']:
-            app = self.procs[int(cmd[-1])]['cmd']
-            return subprocess.CompletedProcess(cmd, 0, ' '.join([app, *(f'{k}={v}' for k, v in self.app_env.items())]), '')
-        if cmd[0] == '/usr/bin/env' and cmd[-3:] == ['/bin/zsh', '-c', 'command -v omp']:
-            self.zsh_checks.append(cmd)
-            found = self.zsh_finds_omp
-            return subprocess.CompletedProcess(cmd, 0 if found else 1, self.mod.OMP + '\n' if found else '', '')
-        raise AssertionError(f'unexpected command {cmd}')
-
-    def ps_table(self):
-        return {pid: dict(info) for pid, info in self.procs.items()}
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
 
 
 class Sandbox(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        home = mock.patch.dict(os.environ, {'HOME': str(self.root)})
-        home.start()
-        self.addCleanup(home.stop)
-        # The script leaves its lock and script files to the garbage collector; that is its business, not noise here.
-        quiet = warnings.catch_warnings()
-        quiet.__enter__()
-        self.addCleanup(quiet.__exit__, None, None, None)
-        warnings.simplefilter('ignore', ResourceWarning)
-        self.mod = load_omp_update()
-        self.clock = Clock()
-        self.mod.time = self.clock
-        os.makedirs(self.mod.STATE)
-        self.new_world()
-
-    def new_world(self):
-        self.world = World(self.mod, self.root)
-        self.mod.herdr, self.mod.sh, self.mod.ps_table = self.world.herdr, self.world.sh, self.world.ps_table
-        shutil.rmtree(self.mod.STATE)
-        os.makedirs(self.mod.STATE)
-        return self.world
-
-    def actions(self):
-        path = Path(self.mod.STATE) / 'actions.jsonl'
-        return [json.loads(ln) for ln in path.read_text().splitlines()] if path.exists() else []
-
-
-class ExtensionFingerprint(Sandbox):
-    def setUp(self):
-        super().setUp()
-        self.ext = self.root / '.omp' / 'agent' / 'extensions'
-        self.ext.mkdir(parents=True)
-        (self.ext / 'guard.ts').write_text('export default 1\n')
-
-    def test_it_follows_content_and_names_but_not_timestamps(self):
-        base = self.mod.extensions_fingerprint()
-        self.assertEqual(base, self.mod.extensions_fingerprint())
-        os.utime(self.ext / 'guard.ts', (1, 1))
-        self.assertEqual(self.mod.extensions_fingerprint(), base, 'touching a file is not a change')
-        (self.ext / 'guard.ts').write_text('export default 2\n')
-        edited = self.mod.extensions_fingerprint()
-        self.assertNotEqual(edited, base)
-        (self.ext / 'guard.ts').rename(self.ext / 'renamed.ts')
-        self.assertNotEqual(self.mod.extensions_fingerprint(), edited)
-        (self.ext / 'other.ts').write_text('x\n')
-        self.assertNotEqual(self.mod.extensions_fingerprint(), edited)
-
-    def test_a_linked_extension_counts_by_its_target_contents(self):
-        target = self.root / 'dotfiles-ext.ts'
-        target.write_text('v1\n')
-        (self.ext / 'linked.ts').symlink_to(target)
-        before = self.mod.extensions_fingerprint()
-        target.write_text('v2\n')
-        self.assertNotEqual(self.mod.extensions_fingerprint(), before)
-
-    def test_ext_fp_prints_the_fingerprint_the_pins_are_keyed_by(self):
-        os.utime(self.ext / 'guard.ts', (1_700_000_000, 1_700_000_000))
-        r = subprocess.run([sys.executable, str(OMP_UPDATE), 'ext-fp'], capture_output=True, text=True,
-                           env={**os.environ, 'HOME': str(self.root)}, timeout=60)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        printed = json.loads(r.stdout.split('EXTFP ', 1)[1])
-        self.assertEqual(printed, {'fingerprint': self.mod.extensions_fingerprint(), 'mtime': 1_700_000_000})
-
-
-class ExtensionPins(Sandbox):
-    """host_main decides per pane whether the extensions changed after it started; ext-ack pins a
-    change as needing no restart for panes started after --since."""
-
-    def setUp(self):
-        super().setUp()
-        self.mod.omp_version = lambda path=None: '1.2.3'
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        patch = mock.patch.dict(os.environ, HOME=str(self.root))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.mod = load_module()
+        self.real_stage, self.real_swap, self.real_run_host = self.mod.stage_binary, self.mod.swap_binary, self.mod.run_host
+        self.now = time.time()
+        self.mod.time = mock.Mock(time=lambda: self.now, sleep=self.advance)
+        Path(self.mod.OMP).parent.mkdir(parents=True)
+        Path(self.mod.OMP).write_bytes(b'old binary')
+        self.installed = '1.2.3'
+        self.mod.omp_version = mock.Mock(side_effect=lambda path=None: self.installed)
+        self.mod.install_time = lambda: self.now - 30 * 86400
         self.mod.exe_path = lambda pid: None
-        self.mod.mem_mb = lambda pid: 300
-        self.mod.open_sessions = lambda pid: []  # lsof on a fake pid: the subagent gate finds nothing open
-        omp = Path(self.mod.OMP)
-        omp.parent.mkdir(parents=True)
-        omp.write_text('#!/bin/sh\n')
-        os.utime(omp, (time.time() - 30 * 86400,) * 2)  # installed long before any pane started
-        self.ext = self.root / '.omp' / 'agent' / 'extensions'
-        self.ext.mkdir(parents=True)
-        self.guard = self.ext / 'guard.ts'
-        self.guard.write_text('export default 1\n')
-        self.set_extension_change(minutes_ago=10)
-        self.world.place_agent('worker', 'w1:p5')
-        self.world.procs[self.world.omp_pid]['age_s'] = 45 * 60  # started 45 min ago
-        Path(self.mod.HERDR).parent.mkdir(parents=True, exist_ok=True)
-        Path(self.mod.HERDR).write_text('')  # host_main only manages panes where herdr exists
-
-    def set_extension_change(self, minutes_ago):
-        t = time.time() - minutes_ago * 60
-        os.utime(self.guard, (t, t))
-
-    def ack(self, since_minutes_ago):
-        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=since_minutes_ago)).strftime(
-            '%Y-%m-%dT%H:%M:%SZ')
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.mod.main_ext_ack(argparse.Namespace(since=since, note='refactor, same behaviour', hosts='home'))
-        return out.getvalue()
-
-    def pane_row(self, blocked=None):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.mod.host_main({'host': 'home', 'dry_run': True, 'target': '1.2.3', 'blocked': blocked,
-                                'policy': self.mod.load_config(), 'manage_panes': True, 'services': []})
-        res = json.loads(out.getvalue().rsplit('RESULT ', 1)[1])
-        self.assertEqual(res['errors'], [])
-        (row,) = res['panes']
-        return row, res['extensions']
-
-    def test_a_pane_that_started_before_the_extensions_changed_is_due_a_restart(self):
-        row, ext = self.pane_row()
-        self.assertEqual(row['triggers'], ['extensions changed'])
-        self.assertEqual(row['action'], 'would restart')
-        self.assertFalse(ext['pinned'])
-
-    def test_a_pane_that_started_after_the_change_is_current(self):
-        self.set_extension_change(minutes_ago=60)
-        row, _ = self.pane_row()
-        self.assertEqual((row['triggers'], row['action']), ([], 'none'))
-
-    def test_acknowledging_the_change_spares_panes_started_after_since_but_not_older_ones(self):
-        self.assertIn('pinned', self.ack(since_minutes_ago=50))
-        row, ext = self.pane_row()
-        self.assertEqual((row['triggers'], row['action'], ext['pinned']), ([], 'none', True))
-        # The same pin, counted from after this pane started (30 min ago): it predates it, so it is due.
-        config = json.loads(Path(self.mod.CONFIG).read_text())
-        (fp,) = config['extensions_pins']
-        config['extensions_pins'][fp]['since'] = int(time.time()) - 30 * 60
-        Path(self.mod.CONFIG).write_text(json.dumps(config))
-        row, ext = self.pane_row()
-        self.assertEqual((row['triggers'], row['action'], ext['pinned']), (['extensions changed'], 'would restart', True))
-
-    def test_a_later_unacknowledged_change_rearms_the_trigger(self):
-        self.ack(since_minutes_ago=50)
-        self.guard.write_text('export default 2\n')  # new content: the pin no longer matches
-        self.set_extension_change(minutes_ago=1)
-        row, ext = self.pane_row()
-        self.assertEqual((row['triggers'], ext['pinned']), (['extensions changed'], False))
-
-    def test_acknowledging_a_since_after_the_change_pins_nothing(self):
-        self.assertIn('unchanged since', self.ack(since_minutes_ago=5))
-        self.assertEqual(json.loads(Path(self.mod.CONFIG).read_text())['extensions_pins'], {})
-        row, ext = self.pane_row()
-        self.assertEqual((row['triggers'], ext['pinned']), (['extensions changed'], False))
-
-    def test_a_due_pane_waits_once_the_rollout_stopped(self):
-        reason = 'rollout stopped: extension check failed on deckbox omp 18.8.0 after restarting hutter: x'
-        row, _ = self.pane_row(blocked=reason)
-        self.assertEqual(row['triggers'], ['extensions changed'])
-        self.assertEqual(row['action'], f'skip: {reason}')
-
-
-class SummaryLine(Sandbox):
-    def test_the_checkpoint_line_counts_restarts_leftovers_seats_services_and_errors(self):
-        tinfo = {'target': '18.6.0', 'unpublished_tags': ['v18.6.2'], 'too_young': ['18.7.0']}
-        results = [
-            {'host': 'deckbox', 'installed_before': '18.6.0', 'installed_after': '18.6.0', 'actions': [],
-             'unmanaged': [], 'errors': [], 'panes': []},
-            {'host': 'home', 'installed_before': '18.5.0', 'installed_after': '18.6.0',
-             'actions': [{'kind': 'service', 'label': 'com.twaldin.omp-auth-broker', 'action': 'restarted'}],
-             'unmanaged': [{'pid': 4100, 'version': None, 'uptime_h': 80.5, 'session_mb': 210, 'service': False},
-                           {'pid': 4200, 'version': '18.6.0', 'uptime_h': 3.0, 'session_mb': None, 'service': True}],
-             'errors': ['w2:p9: failed: omp did not come back'],
-             'panes': [
-                 {'pane': 'w1:p3', 'action': 'restarted', 'mem_before_mb': 1900, 'mem_after_mb': 400,
-                  'triggers': ['session 150 MB']},
-                 {'pane': 'w1:p4', 'action': 'skip: working', 'triggers': ['up 60.0 h']},
-                 {'pane': 'w1:p5', 'action': 'skip: focused by Tim',
-                  'triggers': ['extensions changed']},
-                 {'pane': 'w1:p6', 'action': 'skip: working', 'triggers': []},  # nothing due, so nothing left over
-                 {'pane': 'w1:p7', 'action': 'report: seat/front door (owner decides)', 'version': '18.6.0',
-                  'triggers': []},
-             ]},
-        ]
-        line = self.mod.summary_line('2026-10-05T21:00Z', tinfo, results)
-        self.assertEqual(
-            line,
-            '- 2026-10-05T21:00Z omp-update: target 18.6.0 (skipped v18.6.2, 18.7.0); '
-            'deckbox 18.6.0 =, home 18.5.0->18.6.0; restarted 1 (p3 1900->400 MB); '
-            'due but left: working 1, focused by Tim 1; '
-            'seats/outside herdr: 2 (home 4100 older up 80.5h 210 MB; home p7 18.6.0); '
-            'services restarted omp-auth-broker restarted; '
-            'errors 1 (w2:p9: failed: omp did not come back)')
-
-    def test_a_quiet_clean_run_says_so(self):
-        tinfo = {'target': '18.6.0', 'unpublished_tags': [], 'too_young': []}
-        results = [{'host': 'home', 'installed_before': '18.6.0', 'installed_after': '18.6.0', 'actions': [],
-                    'unmanaged': [], 'errors': [], 'panes': []}]
-        self.assertEqual(self.mod.summary_line('2026-10-05T21:00Z', tinfo, results),
-                         '- 2026-10-05T21:00Z omp-update: target 18.6.0; home 18.6.0 =; restarted 0; '
-                         'due but left: none; seats/outside herdr: 0; errors 0')
-
-
-EASL_STUB = '''#!@PY@
-import json, sys
-open('@CALLS@', 'a').write(json.dumps(sys.argv[1:]) + '\\n')
-state = json.load(open('@STATE@'))
-cmd = sys.argv[1]
-if cmd in state.get('fail', {}):
-    sys.stderr.write(state['fail'][cmd])
-    sys.exit(1)
-if cmd == 'agent.list':
-    print(json.dumps({'agents': state['agents']}))
-elif cmd == 'object.get':
-    print(json.dumps({'object': {'props': state['props'].get(sys.argv[3], {})}}))
-elif cmd == 'noise':
-    print('easl: segfault')
-else:
-    sys.exit(2)
-'''
-
-
-class TileSandbox(Sandbox):
-    """host_main, main_roll and main_migrate with the easl switch on, a fake easl CLI and herdr, a frozen ps and
-    stubbed memory/binary probes (lsof and top on fake pids are slow)."""
-    RESTART = ['agent.restart', '--target', 'obj_lead', '--mode', 'resume']
-
-    def setUp(self):
-        super().setUp()
-        self.mem = {}
-        self.mod.omp_version = lambda path=None: '1.2.3'
-        self.mod.exe_path = lambda pid: None
-        self.mod.install_time = lambda: self.clock.now - 30 * 86400  # installed long before any omp here started
-        self.mod.mem_mb = lambda pid: self.mem.get(pid, 400)
+        self.mod.mem_mb = lambda pid: 1900 if pid < 600000 else 400
         self.mod.open_sessions = lambda pid: []
-        Path(self.mod.HERDR).parent.mkdir(parents=True, exist_ok=True)
-        Path(self.mod.HERDR).write_text('')  # host_main only manages panes where herdr exists
-        self.set_switch(json.dumps({'enabled': True, 'cli': self.easl.cli}))
-
-    @property
-    def easl(self):
-        return self.world.easl
-
-    def set_switch(self, text):
-        path = Path(self.mod.EASL_SWITCH)
-        if text is None:
-            if path.exists():
-                path.unlink()
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-
-    def host(self, blocked=None, roll=False, dry_run=False):
-        """host_main as the orchestrator runs it on home: its easl param is whatever the switch file says."""
-        params = {'host': 'home', 'dry_run': dry_run, 'target': '1.2.3', 'blocked': blocked,
-                  'policy': self.mod.load_config(), 'manage_panes': True, 'services': [],
-                  'easl': self.mod.easl_switch()}
-        if roll:
-            params['roll'] = True
-        return self.run_host_main(params)
-
-    def run_host_main(self, params):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.mod.host_main(json.loads(json.dumps(params)))
-        return json.loads(out.getvalue().rsplit('RESULT ', 1)[1])
-
-    @staticmethod
-    def row(res, pane='obj_lead'):
-        return next(p for p in res['panes'] if p['pane'] == pane)
-
-    def calls(self, command):
-        return [c for c in self.easl.calls if c[0] == command]
-
-    def mutations(self):
-        """The easl calls that change something."""
-        return [c for c in self.easl.calls if c[0] not in ('agent.list', 'object.get')]
-
-    def extension_changed(self, minutes_ago):
-        ext = self.root / '.omp' / 'agent' / 'extensions'
-        ext.mkdir(parents=True, exist_ok=True)
-        guard = ext / 'guard.ts'
-        guard.write_text('export default 1\n')
-        t = time.time() - minutes_ago * 60
-        os.utime(guard, (t, t))
-
-    def roll_scene(self):
-        """A herdr pane `worker` and a tile `lead`, both started 45 min ago, 10 min after the last extension change."""
-        self.extension_changed(minutes_ago=10)
-        self.world.place_agent('worker', 'w1:p5', age_s=45 * 60)
-        self.world.place_tile(session_mb=0, age_s=45 * 60)
-        self.mem[self.world.omp_pid] = self.mem[self.world.tile_pid] = 1900
-        return self.world.omp_pid, self.world.tile_pid
-
-    def roll(self):
-        """`omp-update roll` for home, one pass; its host runs in process. Returns the lines of roll.log."""
-        def run_host(name, hc, params):
-            return self.run_host_main(params)
-        self.mod.run_host = run_host
-        self.mod.main_roll(argparse.Namespace(hosts='home', include=None, hours=1, dry_run=False))
-        return (Path(self.mod.STATE) / 'roll.log').read_text().splitlines()
-
-
-class EaslSwitch(TileSandbox):
-    def test_the_switch_must_say_enabled_true_and_name_a_cli(self):
-        cli = self.easl.cli
-        cases = [
-            ('no file', None, None),
-            ('disabled', json.dumps({'enabled': False, 'cli': cli}), None),
-            ('bad JSON', '{"enabled": true,', None),
-            ('truthy, not true', json.dumps({'enabled': 'yes', 'cli': cli}), None),
-            ('no cli', json.dumps({'enabled': True}), None),
-            ('empty cli', json.dumps({'enabled': True, 'cli': ''}), None),
-            ('not an object', '[true]', None),
-            ('on', json.dumps({'enabled': True, 'cli': cli}), {'enabled': True, 'cli': cli}),
-        ]
-        for label, text, expected in cases:
-            with self.subTest(switch=label):
-                self.set_switch(text)
-                self.assertEqual(self.mod.easl_switch(), expected)
-
-    def test_with_the_switch_off_host_main_makes_no_easl_call_and_herdr_panes_restart_as_before(self):
-        cli = self.easl.cli
-        for label, text in (('no file', None), ('disabled', json.dumps({'enabled': False, 'cli': cli})),
-                            ('bad JSON', '{"enabled": true,')):
-            with self.subTest(switch=label):
-                world = self.new_world()
-                self.set_switch(text)
-                world.place_agent('worker', 'w1:p5', session_mb=150)
-                world.place_tile(session_mb=150)  # due too, but nobody asks easl about it
-                res = self.host()
-                self.assertEqual(self.easl.calls, [])
-                (row,) = res['panes']
-                self.assertEqual((row['pane'], row['triggers'], row['action']), ('w1:p5', ['session 150 MB'], 'restarted'))
-                self.assertNotIn('tile', row)
-                self.assertEqual(res['errors'], [])
-                (start,) = world.agent_starts  # herdr agent start worker --kind omp --pane w1:p5 ... --resume=<session>
-                self.assertEqual((start[0], start[start.index('--pane') + 1], start[-1]),
-                                 ('worker', 'w1:p5', f'--resume={world.session}'))
-
-    def test_with_the_switch_on_the_same_scene_restarts_the_tile_as_well(self):
-        world = self.world
-        world.place_agent('worker', 'w1:p5', session_mb=150)
-        world.place_tile(session_mb=150)
-        res = self.host()
-        self.assertEqual({p['pane']: p['action'] for p in res['panes']}, {'w1:p5': 'restarted', 'obj_lead': 'restarted'})
-        self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-        self.assertEqual(len(world.agent_starts), 1)
-
-
-class RemoteHostTiles(TileSandbox):
-    """A remote host (work) names its easl CLI in config: its tiles pass the tile gates although its herdr panes
-    are never managed; while easl can't be reached, a tile's omp is only reported."""
-
-    def remote(self):
-        params = {'host': 'work', 'dry_run': False, 'target': '1.2.3', 'blocked': None,
-                  'policy': self.mod.load_config(), 'manage_panes': False, 'services': [],
-                  'easl': self.mod.host_easl({'ssh': 'twaldin-work', 'easl': self.easl.cli})}
-        return self.run_host_main(params)
-
-    def test_host_easl_is_homes_switch_or_a_remote_hosts_configured_cli(self):
-        self.assertEqual(self.mod.host_easl({'ssh': None}), {'enabled': True, 'cli': self.easl.cli})
-        self.set_switch(None)
-        self.assertIsNone(self.mod.host_easl({'ssh': None, 'easl': '/x/easl'}))  # home follows its switch only
-        self.assertEqual(self.mod.host_easl({'ssh': 'twaldin-work', 'easl': '/x/easl'}),
-                         {'enabled': True, 'cli': '/x/easl'})
-        self.assertIsNone(self.mod.host_easl({'ssh': 'tim@deckbox'}))
-
-    def test_a_due_tile_is_restarted_and_the_hosts_herdr_panes_are_never_asked_about(self):
-        world = self.world
-        world.place_agent('worker', 'w1:p5', session_mb=150)
-        world.place_tile(session_mb=150)
-        res = self.remote()
-        self.assertEqual({p['pane']: p['action'] for p in res['panes']}, {'obj_lead': 'restarted'})
-        self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-        self.assertEqual((world.herdr_calls, world.agent_starts), ([], []))
-
-    def test_a_tile_easl_reports_no_draft_for_is_left_alone(self):
-        self.world.place_tile(draft=MISSING)
-        self.assertEqual(self.row(self.remote())['action'], 'skip: draft unknown (easl reports none)')
-        self.assertEqual(self.mutations(), [])
-
-    def test_with_easl_unreachable_the_tiles_omp_is_only_reported(self):
-        self.world.place_tile(session_mb=150)
-        self.easl.fail['agent.list'] = (1, '', 'easl: cannot reach the app')
-        res = self.remote()
-        self.assertEqual((res['panes'], res['errors']), ([], ['easl agent.list: easl: cannot reach the app']))
-        (seat,) = [u for u in res['unmanaged'] if u['pid'] == self.world.tile_pid]
-        self.assertEqual(seat['action'], 'report only (outside herdr)')
-        self.assertEqual(self.mutations(), [])
-
-
-class TileRestart(TileSandbox):
-    def test_an_idle_or_seen_done_tile_over_the_session_limit_is_restarted_once_and_verified(self):
-        for state in ('idle', 'done'):
-            with self.subTest(state=state):
-                world = self.new_world()
-                world.place_tile(state=state, seen=True, focused=False, draft=False, session_mb=150)
-                old = world.tile_pid
-                self.mem[old] = 1900
-                res = self.host()
-                row = self.row(res)
-                new = self.easl.find('obj_lead')['pid']
-                self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-                self.assertEqual((row['triggers'], row['action']), (['session 150 MB'], 'restarted'))
-                self.assertNotEqual(new, old)
-                self.assertEqual((row['pid'], row['new_pid']), (old, new))
-                self.assertTrue(row['session_unchanged'])
-                self.assertEqual((row['mem_before_mb'], row['mem_after_mb'], row['memory_dropped']), (1900, 400, True))
-                self.assertEqual((row['tile'], row['board'], row['mechanism']),
-                                 (True, 'brd_dotfiles', 'easl agent.restart'))
-                self.assertEqual(res['errors'], [])
-                self.assertEqual(world.herdr_calls, [('agent', 'list')])  # the tile never goes through herdr
-                (act,) = [a for a in res['actions'] if a['kind'] == 'pane']
-                self.assertEqual((act['pane'], act['name'], act['action']), ('obj_lead', 'lead', 'restarted'))
-
-    def test_a_tile_is_due_for_a_big_session_or_a_long_uptime_and_not_otherwise(self):
-        cases = [(60, 2 * 3600, [], 'none'), (150, 2 * 3600, ['session 150 MB'], 'restarted'),
-                 (60, 49 * 3600, ['up 49.0 h'], 'restarted')]
-        for session_mb, age_s, triggers, action in cases:
-            with self.subTest(session_mb=session_mb, age_h=age_s / 3600):
-                world = self.new_world()
-                world.place_tile(session_mb=session_mb, age_s=age_s)
-                row = self.row(self.host())
-                self.assertEqual((row['triggers'], row['action']), (triggers, action))
-                self.assertEqual(len(self.calls('agent.restart')), 1 if action == 'restarted' else 0)
-
-    def test_a_tile_is_due_after_twelve_hours_up(self):
-        for age_h, triggers, action in ((11, [], 'none'), (13, ['up 13.0 h'], 'restarted')):
-            with self.subTest(age_h=age_h):
-                world = self.new_world()
-                world.place_tile(session_mb=10, age_s=age_h * 3600)
-                row = self.row(self.host())
-                self.assertEqual((row['triggers'], row['action']), (triggers, action))
-
-    def test_a_tile_whose_omp_rss_is_over_1_5_gb_is_due(self):
-        for rss_mb, triggers, action in ((1400, [], 'none'), (1600, ['rss 1600 MB'], 'restarted')):
-            with self.subTest(rss_mb=rss_mb):
-                world = self.new_world()
-                world.place_tile(session_mb=10)
-                world.procs[world.tile_pid]['rss_mb'] = rss_mb
-                row = self.row(self.host())
-                self.assertEqual((row['triggers'], row['action'], row['rss_mb']), (triggers, action, rss_mb))
-
-    def test_a_dry_run_says_would_restart_and_changes_nothing(self):
-        self.world.place_tile()
-        res = self.host(dry_run=True)
-        self.assertEqual(self.row(res)['action'], 'would restart')
-        self.assertEqual(self.mutations(), [])
-
-    def test_a_tile_named_as_a_seat_is_reported_never_restarted(self):
-        self.world.place_tile(name='lindy-seat')
-        row = self.row(self.host())
-        self.assertEqual(row['action'], 'report: seat/front door (owner decides)')
-        self.assertEqual(self.mutations(), [])
-
-    def test_tims_own_unnamed_tile_is_never_restarted_and_a_named_one_over_the_same_lines_is(self):
-        # meta 2026-10-08: an unnamed tile is Tim's own session; rotation never touches it.
-        for name, action in ((None, "skip: Tim's tile"), ('worker', 'restarted')):
-            with self.subTest(name=name):
-                world = self.new_world()
-                world.place_tile(name=name, session_mb=10, age_s=13 * 3600)
-                world.procs[world.tile_pid]['rss_mb'] = 1600
-                row = self.row(self.host())
-                self.assertEqual((row['triggers'], row['action']), (['rss 1600 MB', 'up 13.0 h'], action))
-                if name is None:
-                    self.assertEqual(self.mutations(), [])
-
-    def assert_left_alone(self, action, blocked=None, setup=None, **tile):
-        """A due tile (session over the limit) that one gate keeps from restarting: no easl call changes anything."""
-        world = self.world
-        world.place_tile(**tile)
-        if setup:
-            setup(world)
-        res = self.host(blocked=blocked)
-        row = self.row(res)
-        self.assertEqual(row['triggers'], ['session 150 MB'], 'due, so only the gate stands in the way')
-        self.assertEqual(row['action'], action)
-        self.assertNotIn('new_pid', row)
-        self.assertEqual(self.mutations(), [])
-        self.assertEqual(res['errors'], [])
-        return row
-
-    def test_a_lifecycle_easl_only_restored_after_an_app_restart_is_not_trusted(self):
-        self.assert_left_alone('skip: lifecycle restored after an app restart, unconfirmed', restored=True)
-
-    def test_a_done_tim_has_not_seen_keeps_its_needs_you_marker(self):
-        self.assert_left_alone('skip: done, answer not seen by Tim', state='done', seen=False)
-
-    def test_a_focused_tile_is_left_alone(self):
-        self.assert_left_alone('skip: focused by Tim', focused=True)
-
-    def test_a_tile_easl_reports_no_focus_for_counts_as_focused(self):
-        self.assert_left_alone('skip: focus unknown (easl reports none)', focused=MISSING)
-
-    def test_a_tile_with_a_draft_is_left_alone(self):
-        self.assert_left_alone('skip: text waiting in the editor', draft=True)
-
-    def test_a_tile_easl_reports_no_draft_for_counts_as_having_one(self):
-        self.assert_left_alone('skip: draft unknown (easl reports none)', draft=MISSING)
-
-    def test_a_working_or_blocked_tile_is_left_alone(self):
-        for state in ('working', 'blocked'):
-            with self.subTest(state=state):
-                self.new_world()
-                self.assert_left_alone(f'skip: {state}', state=state)
-
-    def test_a_tile_with_live_child_work_is_left_alone(self):
-        row = self.assert_left_alone('skip: live child work',
-                                     setup=lambda w: w.add_child(w.tile_pid, '/usr/bin/cargo build --release'))
-        self.assertIn('cargo build', row['children'][0])
-
-    def test_omps_python_runner_is_plumbing_under_either_of_its_paths(self):
-        # omp 18.7.0 moved its eval kernels from .../T/omp-python-runner/ to .../T/omp-python-runner-<uid>/.
-        for runner in ('/var/folders/x/T/omp-python-runner/runner-1.py', '/var/folders/x/T/omp-python-runner-501/runner-2.py'):
-            with self.subTest(runner=runner):
-                world = self.new_world()
-                world.place_tile()
-                world.add_child(world.tile_pid, f'Python -u {runner}')
-                self.assertEqual(self.row(self.host())['action'], 'restarted')
-
-    def test_a_tile_with_an_armed_timer_a_server_or_ssh_under_its_kernel_is_left_alone(self):
-        # omp's own python runner is plumbing: what runs under it is the agent's work.
-        for cmd in ('sleep 1800', 'python3 -m http.server 8765', 'ssh tim@deckbox tail -f /tmp/run.log'):
-            with self.subTest(cmd=cmd):
-                self.new_world()
-
-                def under_kernel(w, cmd=cmd):
-                    kernel = w.add_child(w.tile_pid, 'Python -u /var/folders/x/T/omp-python-runner/runner-1.py')
-                    w.add_child(kernel, cmd)
-                row = self.assert_left_alone('skip: live child work', setup=under_kernel)
-                self.assertIn(cmd[:20], row['children'][0])
-
-    def subagent(self, world, name='Worker', written_s_ago=900, held=True):
-        """A subagent transcript in the tile's session directory, as omp writes one; `held`: the omp has it open."""
-        folder = Path(str(world.tile_session)[:-len('.jsonl')])
-        folder.mkdir(exist_ok=True)
-        transcript = folder / f'{name}.jsonl'
-        transcript.write_text('{"type": "session"}\n')
-        t = self.clock.now - written_s_ago
-        os.utime(transcript, (t, t))
-        if held:
-            pid = world.tile_pid
-            self.mod.open_sessions = lambda p: [str(world.tile_session), str(transcript)] if p == pid else []
-        return transcript
-
-    def test_a_tile_running_an_in_process_subagent_is_left_alone(self):
-        row = self.assert_left_alone('skip: subagent running', setup=self.subagent)
-        self.assertEqual(row['children'], ['subagent Worker'])
-
-    def test_a_subagent_transcript_written_in_the_last_three_minutes_counts_as_running(self):
-        self.assert_left_alone('skip: subagent running',
-                               setup=lambda w: self.subagent(w, written_s_ago=60, held=False))
-        world = self.new_world()
-        world.place_tile()
-        self.subagent(world, written_s_ago=600, held=False)  # finished ten minutes ago
-        self.assertEqual(self.row(self.host())['action'], 'restarted')
-
-    def test_a_tile_is_left_alone_once_the_rollout_stopped(self):
-        reason = 'rollout stopped: extension check failed on deckbox omp 18.8.0 after restarting hutter: x'
-        self.assert_left_alone(f'skip: {reason}', blocked=reason)
-
-    def test_a_tile_that_turned_busy_or_vanished_since_the_listing_is_not_restarted(self):
-        def turns_working(world):
-            world.easl.on_list[2] = lambda e: [a['lifecycle'].update(state='working') for a in e.agents]
-
-        def vanishes(world):
-            world.easl.on_list[2] = lambda e: e.agents.clear()
-
-        for label, setup, action in (('turns working', turns_working, 'skip: working'),
-                                     ('vanishes', vanishes, 'skip: gone')):
-            with self.subTest(label):
-                self.new_world()
-                self.assert_left_alone(action, setup=setup)
-
-
-class TileFailures(TileSandbox):
-    def test_a_refused_restart_is_a_failure_with_easls_reason(self):
-        cases = [('stderr', (1, '', 'conflict: tile has a draft'), 'failed: agent.restart: conflict: tile has a draft'),
-                 ('json only', (1, json.dumps({'error': 'conflict'}), ''), 'failed: agent.restart: {"error": "conflict"}')]
-        for label, reply, expected in cases:
-            with self.subTest(label):
-                world = self.new_world()
-                world.place_tile()
-                old = world.tile_pid
-                self.easl.fail['agent.restart'] = reply
-                res = self.host()
-                row = self.row(res)
-                self.assertEqual(row['action'], expected)
-                self.assertEqual(res['errors'], [f'obj_lead: {expected}'])
-                self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-                self.assertEqual(self.easl.find('obj_lead')['pid'], old)
-                self.assertNotIn('new_pid', row)
-
-    def test_a_tile_whose_omp_never_gets_a_new_pid_is_a_failure_after_waiting(self):
-        self.world.place_tile()
-        self.easl.restart_changes_pid = False
-        started = self.clock.now
-        res = self.host()
-        row = self.row(res)
-        self.assertEqual(row['action'], "failed: the tile's omp did not come back with a new pid; to resume it, run in "
-                                        f"the tile: {self.mod.OMP} --model=anthropic/claude-opus-5-5 --thinking=xhigh "
-                                        f"--resume={self.world.tile_session}")
-        self.assertEqual(res['errors'], [f"obj_lead: {row['action']}"])
-        self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-        self.assertGreaterEqual(self.clock.now - started, 120)
-        self.assertNotIn('new_pid', row)
-
-    def test_a_tile_reporting_another_session_after_the_restart_is_flagged(self):
-        self.world.place_tile()
-        self.easl.session_after_restart = '/elsewhere/other.jsonl'
-        row = self.row(self.host())
-        self.assertEqual(row['action'], 'restarted, but easl reports session /elsewhere/other.jsonl; its session '
-                                        f'before the restart: {self.world.tile_session}')
-        self.assertFalse(row['session_unchanged'])
-
-    def test_a_failing_agent_list_is_one_error_and_herdr_panes_are_still_processed(self):
-        self.world.place_agent('worker', 'w1:p5', session_mb=150)
-        self.easl.fail['agent.list'] = (1, '', 'easl: cannot reach the app')
-        res = self.host()
-        self.assertEqual(res['errors'], ['easl agent.list: easl: cannot reach the app'])
-        self.assertEqual(self.easl.calls, [['agent.list']])
-        (row,) = res['panes']
-        self.assertEqual((row['pane'], row['action']), ('w1:p5', 'restarted'))
-        self.assertEqual(len(self.world.agent_starts), 1)
-
-    def test_a_tile_easl_reports_no_omp_pid_for_is_left_alone_without_asking_for_its_session(self):
-        self.world.place_tile(with_pid=False)
-        res = self.host()
-        row = self.row(res)
-        self.assertEqual((row['pid'], row['action']), (None, 'none: easl reports no omp pid'))
-        self.assertEqual(self.calls('object.get'), [])
-        self.assertEqual(self.mutations(), [])
-        self.assertEqual(res['errors'], [])
-
-
-class ExtensionCheck(TileSandbox):
-    """After every restart the new omp must have loaded its extensions (no load or bind failure in its own log) and
-    a tile must report easl protocol >= 1 and the model it had, within a bounded time. A failure stops the host's
-    other restarts."""
-    MODEL = 'anthropic/claude-opus-5-5'
-
-    def test_a_tile_back_with_its_protocol_and_model_passes(self):
-        self.world.place_tile()
-        res = self.host()
-        row = self.row(res)
-        self.assertEqual((row['action'], row['ext_check']), ('restarted', 'ok'))
-        self.assertEqual((res['ext_failures'], res['errors']), ([], []))
-
-    def test_a_tile_without_protocol_or_on_another_model_fails_in_bounded_time_and_stops_the_hosts_restarts(self):
-        cases = [('no protocol', {'protocol': None}, None, self.MODEL),
-                 ('another model', {'model': 'openai/gpt-6.1-sol'}, 1, 'openai/gpt-6.1-sol')]
-        for label, after, protocol, model in cases:
-            with self.subTest(label):
-                world = self.new_world()
-                world.place_tile(name='lead', tile='obj_lead')
-                world.place_tile(name='scout', tile='obj_scout')
-                self.easl.after_restart = after
-                started = self.clock.now
-                res = self.host()
-                problem = (f'easl reports protocol {protocol!r}, model {model!r} after 60 s '
-                           f'(expected protocol >= 1, model {self.MODEL!r})')
-                lead, scout = self.row(res, 'obj_lead'), self.row(res, 'obj_scout')
-                self.assertEqual(lead['action'], f'restarted, but extension check failed: {problem}')
-                self.assertEqual(lead['ext_check'], problem)
-                self.assertEqual(scout['action'], 'skip: extension check failed after restarting lead on this host')
-                self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-                self.assertEqual(res['ext_failures'], [{'pane': 'obj_lead', 'name': 'lead', 'version': '1.2.3',
-                                                        'problem': problem}])
-                self.assertEqual(res['errors'], [f'obj_lead: {lead["action"]}'])
-                self.assertLess(self.clock.now - started, 400)
-
-    def test_a_pane_whose_new_omp_failed_to_load_an_extension_fails_the_check(self):
-        self.set_switch(None)  # deckbox: herdr panes, no easl
-        self.world.place_agent('hutter', 'wT:p4', session_mb=150)
-        self.world.new_omp_log = ''.join(json.dumps(e) + '\n' for e in [
-            {'level': 'warn', 'message': 'Claude usage fetch failed', 'status': 429},
-            {'level': 'error', 'message': 'Failed to load extension',
-             'path': '/home/tim/.omp/agent/extensions/omp-inbox.ts', 'error': 'TypeError: pi.on is not a function'}])
-        res = self.host()
-        (row,) = res['panes']
-        problem = 'extension failed to load: omp-inbox.ts: TypeError: pi.on is not a function'
-        self.assertEqual((row['action'], row['ext_check']), (f'restarted, but extension check failed: {problem}', problem))
-        self.assertEqual([f['problem'] for f in res['ext_failures']], [problem])
-
-    def test_a_clean_log_passes_a_pane(self):
-        self.set_switch(None)
-        self.world.place_agent('hutter', 'wT:p4', session_mb=150)
-        self.world.new_omp_log = json.dumps({'level': 'warn', 'message': 'Claude usage fetch failed'}) + '\n'
-        (row,) = self.host()['panes']
-        self.assertEqual((row['action'], row['ext_check']), ('restarted', 'ok'))
-
-
-class RestartSafety(TileSandbox):
-    """2026-10-07: easl's resume ran the tiles' bare `omp` through a zsh that had no ~/.bun/bin on PATH, killed three
-    agents and left their tiles at a shell. Tiles restart only where zsh in easl's environment finds omp, a session
-    must be on disk to be resumed, and a restart that loses its agent stops the host's other restarts."""
-    DEFAULT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
-
-    def test_no_tile_restarts_while_zsh_in_easls_environment_finds_no_omp(self):
-        self.world.zsh_finds_omp = False
-        self.world.place_tile(name='lead', tile='obj_lead')
-        self.world.place_tile(name='scout', tile='obj_scout')
-        self.world.place_agent('worker', 'w1:p5', session_mb=150)  # herdr panes do not go through easl
-        res = self.host()
-        why = f"easl's zsh finds no omp (zsh -c 'command -v omp' with PATH {self.DEFAULT_PATH})"
-        self.assertEqual({p['pane']: p['action'] for p in res['panes']},
-                         {'w1:p5': 'restarted', 'obj_lead': f'skip: {why}', 'obj_scout': f'skip: {why}'})
-        self.assertEqual(self.calls('agent.restart'), [])
-        self.assertEqual(res['errors'], [f'easl tile restarts held: {why}'])
-        self.assertEqual(len(self.world.zsh_checks), 1, 'checked once per host pass')
-
-    def test_the_check_runs_in_the_easl_apps_own_environment(self):
-        cli = '/Applications/easl.app/Contents/Resources/bin/easl'
-        self.easl.cli = cli
-        self.set_switch(json.dumps({'enabled': True, 'cli': cli}))
-        self.world.procs[self.world.pid()] = {'ppid': 1, 'age_s': 9999, 'cmd': '/Applications/easl.app/Contents/MacOS/Easl'}
-        self.world.app_env = {'PATH': '/usr/bin:/bin:/usr/local/bin', 'HOME': '/Users/x', 'SHELL': '/bin/zsh'}
-        self.world.place_tile()
-        self.assertEqual(self.row(self.host())['action'], 'restarted')
-        self.assertEqual(self.world.zsh_checks, [['/usr/bin/env', '-i', 'HOME=/Users/x', 'PATH=/usr/bin:/bin:/usr/local/bin',
-                                                  'SHELL=/bin/zsh', '/bin/zsh', '-c', 'command -v omp']])
-
-    def test_a_session_not_on_disk_is_never_resumed(self):
-        self.world.place_tile(session_mb=0, age_s=13 * 3600)
-        os.remove(self.world.tile_session)
-        row = self.row(self.host())
-        self.assertEqual((row['triggers'], row['action']), (['up 13.0 h'], 'skip: no session file on disk to resume'))
-        self.assertEqual(self.mutations(), [])
-
-    def test_a_restart_that_loses_its_agent_stops_the_hosts_other_restarts_and_names_the_way_back(self):
-        self.world.place_tile(name='lead', tile='obj_lead')
-        session = self.world.tile_session
-        self.world.place_tile(name='scout', tile='obj_scout')
-        self.easl.restart_changes_pid = False
-        self.easl.after_restart = {'pid': None, 'kind': 'unknown', 'protocol': None}  # left at its shell
-        res = self.host()
-        lead = ("failed: the tile's omp did not come back with a new pid; to resume it, run in the tile: "
-                f"{self.mod.OMP} --model=anthropic/claude-opus-5-5 --thinking=xhigh --resume={session}")
-        self.assertEqual((self.row(res, 'obj_lead')['action'], self.row(res, 'obj_scout')['action']),
-                         (lead, 'skip: restarting lead lost its agent on this host'))
-        self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-        self.assertEqual(res['errors'], [f'obj_lead: {lead}'])
-
-    def test_a_restart_that_loses_the_tiles_session_path_stops_the_host_and_names_the_session(self):
-        for after, reported in (('gone', 'no props.agent.sessionPath'), ('/elsewhere/fresh.jsonl', 'session /elsewhere/fresh.jsonl')):
-            with self.subTest(after=after):
-                world = self.new_world()
-                world.place_tile(name='lead', tile='obj_lead')
-                session = world.tile_session
-                world.place_tile(name='scout', tile='obj_scout')
-                self.easl.session_after_restart = after
-                res = self.host()
-                lead = f'restarted, but easl reports {reported}; its session before the restart: {session}'
-                self.assertEqual((self.row(res, 'obj_lead')['action'], self.row(res, 'obj_scout')['action']),
-                                 (lead, 'skip: restarting lead lost its session path on this host'))
-                self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-                self.assertEqual(res['errors'], [f'obj_lead: {lead}'])
-
-
-class TileRoll(TileSandbox):
-    def test_a_tile_started_before_the_extension_change_is_restarted_through_the_same_path(self):
-        self.extension_changed(minutes_ago=10)
-        self.world.place_tile(session_mb=0, age_s=45 * 60)
-        old = self.world.tile_pid
-        res = self.host(roll=True)
-        row = self.row(res)
-        self.assertEqual((row['triggers'], row['action']), (['extensions changed'], 'restarted'))
-        self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-        self.assertNotEqual(self.easl.find('obj_lead')['pid'], old)
-        self.assertEqual((row['pid'], row['new_pid']), (old, self.easl.find('obj_lead')['pid']))
-        self.assertTrue(row['session_unchanged'])
-        self.assertEqual(res['errors'], [])
-
-    def test_a_tile_started_after_the_change_is_current_and_roll_ignores_every_other_trigger(self):
-        self.extension_changed(minutes_ago=10)
-        self.world.place_tile(session_mb=150, age_s=5 * 60)  # over the session limit, but roll only follows extensions
-        row = self.row(self.host(roll=True))
-        self.assertEqual((row['triggers'], row['action']), ([], 'none'))
-        self.assertEqual(self.mutations(), [])
-
-    def test_a_due_tile_in_roll_waits_for_the_same_gates(self):
-        self.extension_changed(minutes_ago=10)
-        self.world.place_tile(session_mb=0, age_s=45 * 60, focused=True)
-        row = self.row(self.host(roll=True))
-        self.assertEqual((row['triggers'], row['action']), (['extensions changed'], 'skip: focused by Tim'))
-        self.assertEqual(self.mutations(), [])
-
-    def test_roll_restarts_tiles_when_easl_is_on_next_to_herdr_panes(self):
-        pane_old, tile_old = self.roll_scene()
-        log = self.roll()
-        tile_new = self.easl.find('obj_lead')['pid']
-        pane_new = self.world.process_info['w1:p5']['foreground_process_group_id']
-        self.assertEqual(self.calls('agent.restart'), [self.RESTART])
-        self.assertEqual(len(self.world.agent_starts), 1)
-        self.assertTrue(any(f'home lead obj_lead: restarted pid {tile_old}->{tile_new} mem 1900->400 MB '
-                            f'session_unchanged=True' in ln for ln in log), log)
-        self.assertTrue(any(f'home worker w1:p5: restarted pid {pane_old}->{pane_new} mem 1900->400 MB '
-                            f'session_unchanged=True' in ln for ln in log), log)
-        self.assertTrue(log[-1].endswith('done after 1 pass(es)'), log)
-        rolled = {a['pane']: a for a in self.actions() if a['kind'] == 'roll'}
-        self.assertEqual(sorted(rolled), ['obj_lead', 'w1:p5'])
-        self.assertEqual((rolled['obj_lead']['tile'], rolled['obj_lead']['action']), (True, 'restarted'))
-
-    def test_roll_with_the_switch_off_never_calls_easl_and_still_rolls_herdr_panes(self):
-        self.set_switch(json.dumps({'enabled': False, 'cli': self.easl.cli}))
-        self.roll_scene()
-        log = self.roll()
-        self.assertEqual(self.easl.calls, [])
-        self.assertEqual(len(self.world.agent_starts), 1)
-        self.assertTrue(any('home worker w1:p5: restarted' in ln for ln in log), log)
-        self.assertFalse(any('obj_lead' in ln for ln in log), log)
-
-
-class Policy(Sandbox):
-    def test_the_defaults_rotate_agents_for_freshness(self):
-        cfg = self.mod.load_config()
-        self.assertEqual({k: cfg[k] for k in ('min_age_hours', 'max_uptime_hours', 'max_session_mb', 'max_rss_mb')},
-                         {'min_age_hours': 3, 'max_uptime_hours': 12, 'max_session_mb': 100, 'max_rss_mb': 1536})
-
-    def test_the_job_runs_hourly_under_its_old_label(self):
-        plist = plistlib.loads((OMP_UPDATE.parent.parent / 'launchd' / 'net.waldin.omp-update.plist').read_bytes())
-        self.assertEqual(plist['Label'], 'net.waldin.omp-update')
-        self.assertEqual(plist['StartInterval'], 3600)
-        self.assertNotIn('StartCalendarInterval', plist)
-        self.assertEqual(plist['ProgramArguments'][1:], ['/Users/twaldin/.local/bin/omp-update', 'run'])
-
-
-class Target(Sandbox):
-    """resolve_target against GitHub releases/tags and npm as curl_json returns them."""
-    NEED = ('omp-darwin-arm64', 'omp-linux-x64', 'SHA256SUMS.txt')
-
-    @staticmethod
-    def ago(hours):
-        return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%SZ')
-
-    def feed(self, published, tags=()):
-        """published: {version: hours since its GitHub release}; npm gets each 6 min later. tags: tags without one."""
-        rels = [{'tag_name': 'v' + v, 'draft': False, 'prerelease': False, 'published_at': self.ago(h),
-                 'assets': [{'name': n} for n in self.NEED]} for v, h in published.items()]
-        npm = {'versions': {v: {} for v in published}, 'time': {v: self.ago(h - 0.1) for v, h in published.items()},
-               'dist-tags': {'latest': max(published, key=self.mod.vtuple)}}
-        tag_rows = [{'name': 'v' + v} for v in published] + [{'name': t} for t in tags]
-        self.mod.curl_json = lambda url: npm if 'registry.npmjs.org' in url else rels if '/releases' in url else tag_rows
-
-    def test_a_release_three_hours_old_on_github_and_npm_is_the_target_and_a_pulled_one_never_is(self):
-        self.feed({'18.6.1': 72, '18.6.3': 4, '18.7.0': 2.5}, tags=['v18.6.2', 'v18.6.4'])
-        info = self.mod.resolve_target(self.mod.load_config()['min_age_hours'])
-        self.assertEqual((info['target'], info['eligible'], info['too_young'], info['unpublished_tags']),
-                         ('18.6.3', ['18.6.1', '18.6.3'], ['18.7.0'], ['v18.6.4']))
-
-    def test_a_blocked_version_is_never_the_target(self):
-        self.feed({'18.6.1': 72, '18.6.3': 4})
-        info = self.mod.resolve_target(3, blocked={'18.6.3': {'reason': 'easl protocol missing'}})
-        self.assertEqual((info['target'], info['eligible'], info['blocked'], info['too_young']),
-                         ('18.6.1', ['18.6.1'], ['18.6.3'], []))
-
-
-class Rollout(Sandbox):
-    """main_run across the hosts in canary order with run_host stubbed: per-host version holds and the stop an
-    extension failure on the canary causes."""
-    HOLD = {'hold_below': '18.8.0', 'hold_note': 'canvas checks easl against 18.8.x'}
-    CONFIG = {'hosts': {'deckbox': {'ssh': 'tim@deckbox'},
-                        'work': {'ssh': 'twaldin-work', **HOLD},
-                        'home': {'ssh': None, **HOLD}},
-              'order': ['deckbox', 'work', 'home'], 'notify': ['canvas@canvas', 'meta@dotfiles']}
-
-    def setUp(self):
-        super().setUp()
-        self.write_config(self.CONFIG)
-        self.params, self.results, self.msgs, self.asked_blocked = {}, {}, [], []
-
-        def resolve_target(min_age_h, blocked=()):
-            self.asked_blocked.append(sorted(blocked))
-            eligible = [v for v in ('18.6.1', '18.7.0', '18.8.0') if v not in blocked]
-            return {'target': eligible[-1], 'eligible': eligible, 'published': '-', 'too_young': [],
-                    'unpublished_tags': [], 'npm_latest': '18.8.3', 'blocked': sorted(blocked)}
-
-        def run_host(name, hc, params):
-            self.params[name] = params
-            res = {'host': name, 'installed_before': '18.6.1',
-                   'installed_after': '18.6.1' if params['blocked'] else params['target'],
-                   'actions': [], 'panes': [], 'unmanaged': [], 'errors': [], 'ext_failures': []}
-            res.update(self.results.get(name, {}))
-            return res
-
-        def sh(cmd, timeout=120, check=False, **kw):
-            if cmd[0] != self.mod.AGENT_MSG:
-                raise AssertionError(f'unexpected command {cmd}')
-            self.msgs.append(cmd[1:])
-            return subprocess.CompletedProcess(cmd, 0, '', '')
-
-        self.mod.resolve_target, self.mod.run_host, self.mod.sh = resolve_target, run_host, sh
+        self.procs, self.tiles, self.sessions, self.calls = {}, [], {}, []
+        self.mod.ps_table = lambda: copy.deepcopy(self.procs)
+        self.mod.sh = mock.Mock(side_effect=self.command)
+        self.list_count, self.on_list, self.after_restart = 0, {}, {}
+        self.new_pid, self.new_session, self.pending = True, None, False
+        self.zsh_finds_omp, self.app_env = True, {}
+        self.cli = '/Applications/easl.app/Contents/Resources/bin/easl'
+        self.mod.stage_binary = mock.Mock(side_effect=self.stage)
+        self.mod.swap_binary = mock.Mock(side_effect=self.swap)
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def stage(self, target):
+        path = self.root / 'staged'
+        path.write_bytes(b'new binary')
+        return str(path)
+
+    def swap(self, path):
+        self.installed = '1.2.4'
+        self.mod.install_time = lambda: self.now
+        os.remove(path)
+        return self.mod.OMP + '.bak'
+
+    def place(self, name='lead', tile='obj_lead', state='idle', seen=True, restored=False,
+              focused=False, draft=False, rss=1600, age=7200, model=MODEL, with_pid=True):
+        a = {'tile': tile, 'name': name, 'board': 'brd_dotfiles', 'kind': 'omp', 'model': model,
+             'protocol': 1, 'thinking': 'xhigh', 'lifecycle': {'state': state, 'seen': seen, 'restored': restored}}
+        for key, value in (('focused', focused), ('draft', draft)):
+            if value is not MISSING:
+                a[key] = value
+        if with_pid:
+            pid = 500000 + len(self.tiles)
+            path = self.root / '.omp' / 'agent' / 'sessions' / f'{tile}.jsonl'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"type":"session"}\n')
+            a['pid'] = pid
+            self.sessions[tile] = str(path)
+            self.procs[pid] = {'ppid': 1, 'age_s': age, 'rss_mb': rss, 'cmd': self.mod.OMP + ' --resume=' + str(path)}
+        self.tiles.append(a)
+        return a
+
+    def child(self, parent, cmd):
+        pid = 700000 + len(self.procs)
+        self.procs[pid] = {'ppid': parent, 'cmd': cmd, 'age_s': 60, 'rss_mb': 10}
+        return pid
+
+    def command(self, cmd, timeout=120, check=False, **kw):
+        self.calls.append(list(cmd))
+        if cmd[0] == self.cli:
+            method = cmd[1]
+            if method == 'agent.list':
+                self.list_count += 1
+                if self.list_count in self.on_list:
+                    self.on_list[self.list_count]()
+                out = {'agents': copy.deepcopy(self.tiles)}
+            elif method == 'object.get':
+                out = {'object': {'props': {'agent': {'sessionPath': self.sessions.get(cmd[3])}}}}
+            elif method == 'agent.restart':
+                if self.pending:
+                    raise RuntimeError('conflict: pending message or prompt')
+                a = next(a for a in self.tiles if a['tile'] == cmd[3])
+                if self.new_pid:
+                    a['pid'] += 100000
+                a.update(self.after_restart)
+                if self.new_session:
+                    self.sessions[a['tile']] = None if self.new_session == 'gone' else self.new_session
+                out = {'agent': copy.deepcopy(a)}
+            else:
+                raise AssertionError(f'unexpected mutating easl command {cmd}')
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(out), '')
+        if cmd[:2] == ['/bin/ps', '-E']:
+            return subprocess.CompletedProcess(cmd, 0, ' '.join(f'{k}={v}' for k, v in self.app_env.items()), '')
+        if cmd[0] == '/usr/bin/env':
+            return subprocess.CompletedProcess(cmd, 0 if self.zsh_finds_omp else 1,
+                                               self.mod.OMP if self.zsh_finds_omp else '', '')
+        raise AssertionError(f'unexpected command {cmd}')
+
+    def host(self, dry=False, target='1.2.3', services=(), easl=True):
+        return self.mod.host_main({'host': 'home', 'target': target, 'dry_run': dry,
+                                  'services': services, 'report_only': self.mod.load_config()['report_only'],
+                                  'easl': {'cli': self.cli} if easl else None})
+
+    def restarts(self):
+        return [c for c in self.calls if c[:2] == [self.cli, 'agent.restart']]
+
+    def row(self, res, tile='obj_lead'):
+        return next(t for t in res['tiles'] if t['tile'] == tile)
 
     def write_config(self, cfg):
         Path(self.mod.CONFIG).parent.mkdir(parents=True, exist_ok=True)
         Path(self.mod.CONFIG).write_text(json.dumps(cfg))
 
-    def config(self):
-        return json.loads(Path(self.mod.CONFIG).read_text())
 
-    def run_once(self):
-        self.params.clear()
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.mod.main_run(argparse.Namespace(dry_run=False, hosts=None, only_pane=None))
-        return out.getvalue()
+class ReleasePolicy(Sandbox):
+    def feed(self):
+        now = dt.datetime(2026, 10, 8, tzinfo=dt.timezone.utc)
+        self.mod.utcnow = lambda: now
+        ago = lambda h: (now - dt.timedelta(hours=h)).isoformat()
+        self.releases = [{'tag_name': 'v' + v, 'draft': False, 'prerelease': False, 'published_at': ago(hours),
+                          'assets': [{'name': n} for n in ('omp-darwin-arm64', 'omp-linux-x64', 'SHA256SUMS.txt')]}
+                         for v, hours in (('18.6.1', 72), ('18.7.0', 4), ('18.8.0', 3))]
+        self.npm = {'versions': {v: {} for v in ('18.6.1', '18.7.0', '18.8.0', '18.9.0')},
+                    'time': {v: ago(h) for v, h in (('18.6.1', 72), ('18.7.0', 4), ('18.8.0', 3), ('18.9.0', 10))}}
+        self.mod.curl_json = lambda url: self.npm if 'registry.npmjs.org' in url else self.releases
 
-    def test_held_hosts_take_the_newest_release_below_their_hold_and_the_report_says_why(self):
-        out = self.run_once()
-        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
-        self.assertEqual({h: p['target'] for h, p in self.params.items()},
-                         {'deckbox': '18.8.0', 'work': '18.7.0', 'home': '18.7.0'})
-        self.assertIn('== deckbox: installed 18.6.1 -> 18.8.0 (target 18.8.0)\n', out)
-        self.assertIn('== home: installed 18.6.1 -> 18.7.0 (target 18.7.0; held below 18.8.0: '
-                      'canvas checks easl against 18.8.x)\n', out)
-        self.assertIn('home 18.6.1->18.7.0 (held <18.8.0)', out.splitlines()[-1])
+    def test_newest_release_on_both_registries_at_least_three_hours_old(self):
+        self.feed()
+        self.assertEqual(self.mod.resolve_target(3)['target'], '18.8.0')
+        self.npm['time']['18.8.0'] = self.mod.utcnow().isoformat()
+        self.assertEqual(self.mod.resolve_target(0)['target'], '18.7.0')
+        self.releases[-1]['published_at'] = self.mod.utcnow().isoformat()
+        self.npm['time']['18.8.0'] = self.npm['time']['18.6.1']
+        self.assertEqual(self.mod.resolve_target(3)['target'], '18.7.0')
 
-    def test_lifting_a_hold_in_config_lets_that_host_take_the_target(self):
-        cfg = self.config()
-        del cfg['hosts']['home']['hold_below']
-        self.write_config(cfg)
-        self.run_once()
-        self.assertEqual({h: p['target'] for h, p in self.params.items()},
-                         {'deckbox': '18.8.0', 'work': '18.7.0', 'home': '18.8.0'})
+    def test_missing_npm_version_time_assets_draft_or_prerelease_cannot_win(self):
+        for case in ('version', 'time', 'assets', 'draft', 'prerelease'):
+            with self.subTest(case=case):
+                self.feed()
+                if case in ('version', 'time'):
+                    del self.npm['versions' if case == 'version' else 'time']['18.8.0']
+                elif case == 'assets':
+                    self.releases[-1]['assets'].pop()
+                else:
+                    self.releases[-1][case] = True
+                self.assertEqual(self.mod.resolve_target(3)['target'], '18.7.0')
 
-    def test_an_extension_failure_on_the_canary_blocks_its_version_stops_the_rollout_and_tells_canvas_and_meta(self):
-        self.results['deckbox'] = {'ext_failures': [{'pane': 'wT:p4', 'name': 'hutter', 'version': '18.8.0',
-                                                     'problem': 'extension failed to load: omp-inbox.ts: TypeError'}]}
-        out = self.run_once()
-        why = ('extension check failed on deckbox omp 18.8.0 after restarting hutter: '
-               'extension failed to load: omp-inbox.ts: TypeError')
-        self.assertEqual((self.params['work']['blocked'], self.params['home']['blocked']),
-                         (f'rollout stopped: {why}',) * 2)
-        cfg = self.config()
-        self.assertEqual(sorted(cfg['blocked_versions']), ['18.8.0'])
-        block = cfg['blocked_versions']['18.8.0']
-        self.assertEqual((block['reason'], block['host']), (why, 'deckbox'))
-        self.assertEqual(cfg['hosts'], self.CONFIG['hosts'], 'the rest of the config is left as it was')
-        self.assertEqual([m[:3] for m in self.msgs], [['--from', 'shepherd', 'canvas@canvas'],
-                                                       ['--from', 'shepherd', 'meta@dotfiles']])
-        self.assertTrue(all('omp 18.8.0 is blocked' in m[3] and why in m[3] for m in self.msgs), self.msgs)
-        self.assertIn(f'ROLLOUT STOPPED: {why}', out)
-        notes = [a for a in self.actions() if a['kind'] == 'notify']
-        self.assertEqual([(n['to'], n['rc']) for n in notes], [('canvas@canvas', 0), ('meta@dotfiles', 0)])
-        # The next hourly run: the version stays out of every target, and nobody is told twice.
-        self.results.clear()
-        self.msgs.clear()
-        self.run_once()
-        self.assertEqual(self.asked_blocked[-1], ['18.8.0'])
-        self.assertEqual((self.params['work']['blocked'], self.msgs), (None, []))
+    def test_blocked_versions_and_no_eligible_release(self):
+        self.feed()
+        info = self.mod.resolve_target(3, {'18.8.0': {'reason': 'bad protocol'}})
+        self.assertEqual(info['eligible'], ['18.6.1', '18.7.0'])
+        with self.assertRaises(RuntimeError):
+            self.mod.resolve_target(3, {v['tag_name'][1:] for v in self.releases})
 
-    def test_a_failure_on_a_version_the_later_hosts_already_run_stops_the_run_and_blocks_nothing(self):
-        (Path(self.mod.STATE) / 'last-run.json').write_text(json.dumps({'results': [
-            {'host': h, 'installed_after': '18.6.1'} for h in ('deckbox', 'work', 'home')]}))
-        self.results['deckbox'] = {'installed_after': '18.6.1', 'ext_failures': [
-            {'pane': 'wT:p4', 'name': 'hutter', 'version': '18.6.1', 'problem': 'extension failed to load: x.ts: y'}]}
-        self.run_once()
-        self.assertTrue(self.params['home']['blocked'].startswith('rollout stopped: extension check failed on deckbox'))
-        self.assertNotIn('blocked_versions', self.config())
-        self.assertEqual(self.msgs, [])
+    def test_host_hold_is_strict_and_lifting_it_restores_target(self):
+        info = {'target': '18.8.0', 'eligible': ['18.6.1', '18.7.0', '18.8.0']}
+        self.assertEqual(self.mod.host_target(info, {'hold_below': '18.8.0'}), '18.7.0')
+        self.assertEqual(self.mod.host_target(info, {'hold_below': '18.6.1'}), '0')
+        self.assertEqual(self.mod.host_target(info, {}), '18.8.0')
+
+    def test_config_retains_only_supported_keys_and_lindy_is_always_report_only(self):
+        self.write_config({'notify': ['unused'], 'max_session_mb': 100, 'max_uptime_hours': 12,
+                           'max_rss_mb': 1, 'opt_in': ['lindy-seat'], 'skip_panes': [], 'extensions_pins': {},
+                           'order': ['home'], 'hosts': {'work': {'ssh': 'twaldin-work', 'manage_panes': False}},
+                           'report_only': {'names': [], 'panes': ['old']}})
+        cfg = self.mod.load_config()
+        self.assertEqual(set(cfg), set(self.mod.DEFAULT_CONFIG))
+        self.assertEqual(cfg['report_only'], {'names': ['lindy-seat']})
+        self.assertNotIn('manage_panes', cfg['hosts']['work'])
+
+    def test_hourly_job_still_calls_run(self):
+        plist = plistlib.loads((OMP_UPDATE.parent.parent / 'launchd' / 'net.waldin.omp-update.plist').read_bytes())
+        self.assertEqual(plist['StartInterval'], 3600)
+        self.assertEqual(plist['ProgramArguments'][-1], 'run')
 
 
-class DropFlags(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.mod = load_omp_update()
+class BinaryInstall(Sandbox):
+    def test_install_is_verified_before_resuming_leads(self):
+        self.place(rss=1)
+        res = self.host(target='1.2.4')
+        self.assertEqual(res['installed_after'], '1.2.4')
+        self.assertEqual(self.row(res)['action'], 'restarted')
+        self.assertEqual(self.mod.stage_binary.call_args.args, ('1.2.4',))
+        self.assertEqual(res['errors'], [])
 
-    def test_every_spelling_of_model_goes_and_the_other_flags_stay_in_order(self):
-        for old in (['--model', 'opus'], ['-m', 'opus'], ['--model=opus']):
-            with self.subTest(old=old):
-                self.assertEqual(self.mod.drop_flags(['--thinking', 'high', *old, '--no-skills'], ('--model', '-m')),
-                                 ['--thinking', 'high', '--no-skills'])
-        self.assertEqual(self.mod.drop_flags(['--thinking', 'high'], ('--model', '-m')), ['--thinking', 'high'])
+    def test_never_downgrade_even_with_a_hold_below_every_release(self):
+        res = self.host(target='0')
+        self.assertEqual(res['actions'][0]['kind'], 'ahead')
+        self.mod.stage_binary.assert_not_called()
+        self.mod.swap_binary.assert_not_called()
+
+    def test_dry_run_downloads_checks_then_discards_without_install_or_restart(self):
+        self.place(rss=1)
+        res = self.host(dry=True, target='1.2.4')
+        self.assertEqual(self.row(res)['action'], 'would restart')
+        self.mod.swap_binary.assert_not_called()
+        self.assertFalse((self.root / 'staged').exists())
+        self.assertEqual(self.restarts(), [])
+
+    def test_install_failure_or_wrong_version_stops_host(self):
+        self.place()
+        self.mod.stage_binary.side_effect = RuntimeError('checksum failed')
+        res = self.host(target='1.2.4')
+        self.assertEqual(res['errors'], ['checksum failed'])
+        self.assertEqual(res['tiles'], [])
+        self.mod.stage_binary.side_effect = self.stage
+        self.mod.swap_binary.side_effect = lambda p: self.mod.OMP + '.bak'
+        res = self.host(target='1.2.4')
+        self.assertIn('installed 1.2.3, expected 1.2.4', res['errors'][0])
+        self.assertFalse((self.root / 'staged').exists())
+        self.assertEqual(self.restarts(), [])
+
+    def test_npm_install_keeps_existing_package_installation_mode(self):
+        realpath = self.mod.os.path.realpath
+        with mock.patch.object(self.mod.os.path, 'realpath', side_effect=lambda p: '/package/cli.js' if p == self.mod.OMP else realpath(p)):
+            def install(cmd, **kw):
+                self.installed = '1.2.4'
+                return subprocess.CompletedProcess(cmd, 0, '', '')
+            self.mod.sh.side_effect = install
+            res = self.host(target='1.2.4', easl=False)
+        self.assertEqual(res['errors'], [])
+        self.mod.stage_binary.assert_not_called()
+        self.assertEqual(self.mod.sh.call_args.args[0][-1], '@oh-my-pi/pi-coding-agent@1.2.4')
+
+    def test_release_download_checks_hash_and_version_and_removes_bad_stage(self):
+        self.mod.stage_binary = self.real_stage
+        content = b'release binary'
+        def download(cmd, **kw):
+            if cmd[-1].endswith('SHA256SUMS.txt'):
+                asset = 'omp-' + self.mod.platform.system().lower() + '-' + ('arm64' if self.mod.platform.machine().lower() in ('arm64', 'aarch64') else 'x64')
+                return subprocess.CompletedProcess(cmd, 0, hashlib.sha256(content).hexdigest() + '  ' + asset, '')
+            Path(cmd[cmd.index('-o') + 1]).write_bytes(content)
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        self.mod.sh.side_effect = download
+        self.mod.omp_version.side_effect = lambda path=None: '1.2.4'
+        path = self.mod.stage_binary('1.2.4')
+        self.assertEqual(Path(path).read_bytes(), content)
+        os.remove(path)
+        self.mod.omp_version.side_effect = lambda path=None: 'wrong'
+        with self.assertRaisesRegex(RuntimeError, 'expected 1.2.4'):
+            self.mod.stage_binary('1.2.4')
+        self.assertFalse(Path(path).exists())
+        def corrupt(cmd, **kw):
+            result = download(cmd, **kw)
+            if '-o' in cmd:
+                Path(cmd[cmd.index('-o') + 1]).write_bytes(b'corrupt')
+            return result
+        self.mod.sh.side_effect = corrupt
+        with self.assertRaisesRegex(RuntimeError, 'sha256 mismatch'):
+            self.mod.stage_binary('1.2.4')
+        self.assertFalse(Path(path).exists())
+
+    def test_swap_preserves_old_binary_for_running_processes_and_rolls_back_failed_rename(self):
+        swap = self.real_swap
+        staged = self.stage('1.2.4')
+        backup = swap(staged)
+        self.assertEqual(Path(backup).read_bytes(), b'old binary')
+        self.assertEqual(Path(self.mod.OMP).read_bytes(), b'new binary')
+        rename = os.rename
+        def fail_stage(src, dst):
+            if src == staged:
+                raise OSError('swap failed')
+            return rename(src, dst)
+        self.advance(1)
+        staged = self.stage('1.2.4')
+        with mock.patch.object(os, 'rename', side_effect=fail_stage), self.assertRaisesRegex(OSError, 'swap failed'):
+            swap(staged)
+        self.assertEqual(Path(self.mod.OMP).read_bytes(), b'new binary')
 
 
-class SessionModel(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.mod = load_omp_update()
+class TileResume(Sandbox):
+    def test_idle_and_seen_done_resume_in_place_with_same_session_and_model(self):
+        for state in ('idle', 'done'):
+            with self.subTest(state=state):
+                self.tiles.clear()
+                a = self.place(state=state)
+                old = a['pid']
+                res = self.host()
+                row = self.row(res)
+                self.assertEqual(row['action'], 'restarted')
+                self.assertEqual(row['new_pid'], old + 100000)
+                self.assertTrue(row['session_unchanged'])
+                self.assertEqual((row['mem_before_mb'], row['mem_after_mb']), (1900, 400))
+                self.assertEqual(self.restarts()[-1], [self.cli, 'agent.restart', '--target', 'obj_lead', '--mode', 'resume'])
+                self.assertEqual(a['model'], MODEL)
+                self.assertEqual(res['errors'], [])
 
-    def write(self, *entries):
-        fd, path = tempfile.mkstemp(suffix='.jsonl')
-        self.addCleanup(os.unlink, path)
-        with os.fdopen(fd, 'w') as f:
-            for e in entries:
-                f.write((e if isinstance(e, str) else json.dumps(e)) + '\n')
-        return path
+    def test_only_binary_version_and_rss_over_1536_mb_trigger_resume(self):
+        for rss, older, action in ((1536, False, 'none'), (1536.1, False, 'restarted'), (1, True, 'restarted')):
+            with self.subTest(rss=rss, older=older):
+                self.tiles.clear()
+                self.place(rss=rss, age=49 * 3600)
+                self.mod.running_version = lambda *args: (older, '1.2.2' if older else '1.2.3')
+                with open(self.sessions['obj_lead'], 'wb') as f:
+                    f.truncate(200 * 1048576)
+                row = self.row(self.host())
+                self.assertEqual(row['action'], action)
+                self.assertFalse(any('session' in t or 'up ' in t or 'extensions' in t for t in row['triggers']))
 
-    def test_the_last_recorded_model_and_thinking_level_win(self):
-        path = self.write(
-            {'type': 'session', 'cwd': '/tmp'},
-            {'type': 'model_change', 'model': 'anthropic/claude-opus-5-5'},
-            {'type': 'thinking_level_change', 'thinkingLevel': 'xhigh'},
-            {'type': 'message', 'message': {'role': 'user', 'content': 'switch to "model_change" please'}},
-            '{"type": "model_change", truncated',
-            {'type': 'model_change', 'model': 'openai/gpt-6.1-sol'},
-            {'type': 'thinking_level_change', 'thinkingLevel': 'high'})
-        self.assertEqual(self.mod.session_model(path), ('openai/gpt-6.1-sol', 'high'))
+    def test_unnamed_tiles_and_report_only_names_never_restart(self):
+        for name, action in ((None, "skip: Tim's tile"), ('', "skip: Tim's tile"), ('lindy-seat', 'report: seat/front door (owner decides)')):
+            with self.subTest(name=name):
+                self.tiles.clear()
+                self.place(name=name)
+                self.assertEqual(self.row(self.host())['action'], action)
+        self.assertEqual(self.restarts(), [])
 
-    def test_no_records_or_no_file_gives_none(self):
-        self.assertEqual(self.mod.session_model(self.write({'type': 'session'})), (None, None))
-        self.assertEqual(self.mod.session_model('/nonexistent/session.jsonl'), (None, None))
-
-    def test_a_configured_thinking_setting_beats_the_level_it_resolved_to(self):
-        path = self.write({'type': 'model_change', 'model': 'openai-codex/gpt-6.1-sol'},
-                          {'type': 'thinking_level_change', 'thinkingLevel': 'low', 'configured': 'auto'})
-        self.assertEqual(self.mod.session_model(path), ('openai-codex/gpt-6.1-sol', 'auto'))
-
-
-class Migrate(TileSandbox):
-    FLAGS = ['--model', 'opus', '--thinking', 'high']
-
-    def setUp(self):
-        super().setUp()
-        self.scene()
-
-    def scene(self, flags=None, **kw):
-        """A herdr pane `lead` at w1:p3 running omp with FLAGS on a session, started with a prompt."""
-        world = self.new_world()
-        omp_cmd = '/Users/x/.bun/bin/omp ' + ' '.join(flags or self.FLAGS) + ' --resume={session} fix the login bug'
-        world.place_agent('lead', 'w1:p3', omp_cmd=omp_cmd, **kw)
-        self.pane, self.session = 'w1:p3', str(world.session)
-        self.board_root = os.path.join(str(self.root), 'dotfiles')
-        return world
-
-    def command(self, *flags):
-        return ['/bin/zsh', '-l', '-c',
-                ' '.join(shlex.quote(x) for x in [self.mod.OMP, *flags, f'--resume={self.session}'])]
-
-    def migrate(self, name='lead', board='~/dotfiles', model=None, dry_run=False):
-        """(exit: None when it returns, the code or message of sys.exit; the MIGRATE json it printed or None)."""
-        out, code = io.StringIO(), None
-        with contextlib.redirect_stdout(out):
-            try:
-                self.mod.main_migrate(argparse.Namespace(name=name, board=board, model=model, dry_run=dry_run))
-            except SystemExit as e:
-                code = e.code
-        lines = [ln for ln in out.getvalue().splitlines() if ln.startswith('MIGRATE ')]
-        return code, (json.loads(lines[0][len('MIGRATE '):]) if lines else None)
-
-    def assert_nothing_done(self, easl_calls=()):
-        self.assertEqual(self.world.typed, [])
-        self.assertEqual(self.world.closed, [])
-        self.assertEqual(self.world.agent_starts, [])
-        self.assertEqual(self.easl.calls, [list(c) for c in easl_calls])
-        self.assertEqual(self.actions(), [])
-
-    def migrated_actions(self):
-        return [a for a in self.actions() if a['kind'] == 'migrate']
-
-    def sequence(self, *names):
-        return [e[1] for e in self.world.events if e[1] in names]
-
-    # -- refusals
-
-    def test_with_the_switch_off_it_exits_non_zero_before_any_herdr_or_easl_call(self):
-        cli = self.easl.cli
-        for label, text in (('no file', None), ('disabled', json.dumps({'enabled': False, 'cli': cli})),
-                            ('bad JSON', '{"enabled": true,')):
-            with self.subTest(switch=label):
-                self.scene()
-                self.set_switch(text)
-                code, res = self.migrate()
-                self.assertTrue(str(code).startswith('migrate: easl is off ('), code)
-                self.assertIsNone(res)
-                self.assertEqual(self.world.herdr_calls, [])
-                self.assert_nothing_done()
-
-    def test_a_name_already_taken_by_a_tile_is_refused(self):
-        self.world.place_tile(name='lead', tile='obj_old')
-        code, res = self.migrate()
-        self.assertEqual(code, 'migrate: a tile named lead already exists')
-        self.assertIsNone(res)
-        self.assert_nothing_done(easl_calls=[['agent.list']])
-
-    def test_an_unreadable_tile_list_refuses_rather_than_risk_a_duplicate(self):
-        self.easl.fail['agent.list'] = (1, '', 'easl: cannot reach the app')
-        code, _ = self.migrate()
-        self.assertEqual(code, 'migrate: easl agent.list: easl: cannot reach the app')
-        self.assert_nothing_done(easl_calls=[['agent.list']])
-
-    def test_no_herdr_agent_of_that_name_is_refused(self):
-        code, _ = self.migrate(name='ghost')
-        self.assertEqual(code, 'migrate: no herdr omp agent named ghost')
-        self.assert_nothing_done()
-
-    def test_a_pane_that_fails_the_idle_gate_is_refused_and_nothing_is_done(self):
-        def busy_child(w):
-            w.add_child(w.omp_pid, '/usr/bin/cargo build --release')
-
-        cases = [
-            ('focused', lambda w: w.agent.update(focused=True), 'migrate: lead: skip: focused by Tim'),
-            ('working', lambda w: w.agent.update(agent_status='working'), 'migrate: lead: skip: working'),
-            ('draft', lambda w: w.pane_text.__setitem__(w.pane, DRAFT_IN_EDITOR),
-             'migrate: lead: skip: text waiting in the editor'),
-            ('child work', busy_child, 'migrate: lead: skip: live child work'),
-        ]
-        for label, setup, expected in cases:
-            with self.subTest(gate=label):
-                setup(self.scene())
-                code, res = self.migrate()
-                self.assertTrue(str(code).startswith(expected), code)
-                self.assertIsNone(res)
-                self.assert_nothing_done(easl_calls=[['agent.list']])
-
-    # -- dry run
-
-    def test_a_dry_run_reports_the_tile_command_and_does_not_touch_the_pane(self):
-        code, res = self.migrate(dry_run=True)
-        self.assertIsNone(code)
-        self.assertEqual((res['action'], res['dry_run'], res['name'], res['pane'], res['session'], res['root']),
-                         ('would migrate', True, 'lead', 'w1:p3', self.session, self.board_root))
-        self.assertEqual(res['command'], self.command('--model', 'opus', '--thinking', 'high'))
-        self.assertIn('fix', res['args_dropped'])  # the positional prompt is not sent again
-        self.assertIn(f'--resume={self.session}', res['args_dropped'])
-        self.assertEqual((self.world.typed, self.world.closed, self.world.agent_starts), ([], [], []))
-        self.assertEqual(self.easl.calls, [['agent.list']])  # no board.open, no tile
-        (act,) = self.migrated_actions()
-        self.assertEqual((act['action'], act['dry_run']), ('would migrate', True))
-
-    def test_the_board_directory_is_expanded_and_taken_as_given_when_absolute(self):
-        self.assertEqual(self.migrate(dry_run=True)[1]['root'], self.board_root)
-        self.assertEqual(self.migrate(board='/srv/other', dry_run=True)[1]['root'], '/srv/other')
-
-    def test_model_replaces_the_panes_own_in_whatever_spelling_and_keeps_the_other_flags(self):
-        for old in (['--model', 'opus'], ['-m', 'opus'], ['--model=opus'], []):
-            with self.subTest(old=old):
-                self.scene(flags=old + ['--thinking', 'high'])
-                _, res = self.migrate(model='sonnet-5', dry_run=True)
-                self.assertEqual(res['command'], self.command('--thinking', 'high', '--model', 'sonnet-5'))
-
-    def test_the_sessions_own_model_and_thinking_replace_the_panes_flags_never_the_default_role(self):
-        for old in (['--model', 'opus', '--thinking', 'low'], ['-m', 'opus'], []):
-            with self.subTest(old=old):
-                self.scene(flags=old)
-                with open(self.session, 'a') as f:
-                    f.write(json.dumps({'type': 'model_change', 'model': 'anthropic/claude-opus-5-5'}) + '\n')
-                    f.write(json.dumps({'type': 'thinking_level_change', 'thinkingLevel': 'medium'}) + '\n')
-                    f.write(json.dumps({'type': 'model_change', 'model': 'openai/gpt-6.1-sol'}) + '\n')
-                _, res = self.migrate(dry_run=True)
-                self.assertEqual(res['command'], self.command('--model', 'openai/gpt-6.1-sol', '--thinking', 'medium'))
-                self.assertEqual((res['model'], res['thinking']), ('openai/gpt-6.1-sol', 'medium'))
-
-    def test_the_tile_runs_in_the_panes_own_cwd_and_the_board_root_only_without_one(self):
-        cases = [({'foreground_cwd': '/w/astra', 'cwd': '/w/shell'}, '/w/astra'), ({'cwd': '/w/shell'}, '/w/shell'),
-                 ({}, None)]
-        for fields, want in cases:
+    def test_every_lifecycle_focus_and_draft_gate(self):
+        cases = [({'state': 'working'}, 'working'), ({'state': 'blocked'}, 'blocked'),
+                 ({'state': 'unknown'}, 'unknown'), ({'state': 'done', 'seen': False}, 'answer not seen'),
+                 ({'restored': True}, 'restored'), ({'focused': True}, 'focused'),
+                 ({'focused': MISSING}, 'focused'), ({'draft': True}, 'draft'), ({'draft': MISSING}, 'draft'),
+                 ({'model': None}, 'model unknown')]
+        for fields, reason in cases:
             with self.subTest(fields=fields):
-                self.scene()
-                self.world.agent.update(fields)
-                self.easl.created.clear()
-                code, res = self.migrate()
-                self.assertIsNone(code)
-                self.assertEqual(self.easl.created[-1]['props']['cwd'], want or self.board_root)
-                self.assertEqual(res['root'], self.board_root)
+                self.tiles.clear()
+                self.place(**fields)
+                self.assertIn(reason, self.row(self.host())['action'])
+        self.assertEqual(self.restarts(), [])
 
-    # -- the move
+    def test_child_work_under_transparent_workers_is_protected_but_browser_lsp_subtrees_are_not(self):
+        a = self.place()
+        kernel = self.child(a['pid'], 'Python /tmp/omp-python-runner-501/runner.py')
+        self.child(kernel, 'ssh tim@deckbox run-build')
+        self.assertIn('live child', self.row(self.host())['action'])
+        del self.procs[max(self.procs)]
+        browser = self.child(a['pid'], '/tmp/.omp/puppeteer/chrome')
+        self.child(browser, 'chrome renderer')
+        self.child(a['pid'], 'pyright langserver')
+        self.assertEqual(self.row(self.host())['action'], 'restarted')
 
-    def test_a_migration_exits_the_pane_creates_a_verified_tile_and_closes_the_pane(self):
-        code, res = self.migrate()
-        self.assertIsNone(code)
-        command = self.command('--model', 'opus', '--thinking', 'high')
-        self.assertEqual(self.world.typed, [(self.pane, '/exit')])
-        self.assertEqual(self.calls('board.open'), [['board.open', '--root', self.board_root]])
-        self.assertEqual(self.easl.created, [{'board': 'brd_dotfiles', 'type': 'terminal',
-                                              'props': {'name': 'lead', 'cwd': self.board_root, 'command': command}}])
-        self.assertEqual(self.world.closed, [self.pane])
-        self.assertEqual((self.world.agent_starts, self.easl.deleted), ([], []))
-        steps = self.sequence('board.open', 'prompt', 'object.create', 'pane close')
-        self.assertLess(steps.index('prompt'), steps.index('object.create'), 'never two omp on one session')
-        self.assertLess(steps.index('board.open'), steps.index('object.create'))
-        self.assertEqual(steps[-1], 'pane close', 'the pane closes only after the tile is verified')
-        tile = self.easl.find('obj_new')
-        self.assertEqual((res['action'], res['tile'], res['board'], res['new_pid'], res['status']),
-                         ('migrated', 'obj_new', 'brd_dotfiles', tile['pid'], 'idle'))
-        (act,) = self.migrated_actions()
-        self.assertEqual((act['host'], act['name'], act['action'], act['tile']), ('home', 'lead', 'migrated', 'obj_new'))
+    def test_open_or_recent_nested_in_process_subagent_prevents_resume(self):
+        a = self.place()
+        folder = Path(self.sessions[a['tile']][:-6]) / 'Worker'
+        folder.mkdir(parents=True)
+        transcript = folder / 'Nested.jsonl'
+        transcript.write_text('{}\n')
+        os.utime(transcript, (self.now - 60,) * 2)
+        self.assertIn('subagents', self.row(self.host())['action'])
+        os.utime(transcript, (self.now - 900,) * 2)
+        (folder.parent / 'Worker.jsonl').write_text('{}\n')
+        os.utime(folder.parent / 'Worker.jsonl', (self.now - 900,) * 2)
+        self.mod.open_sessions = lambda pid: [str(transcript)]
+        self.assertIn('subagents', self.row(self.host())['action'])
+        self.mod.open_sessions = lambda pid: []
+        self.assertEqual(self.row(self.host())['action'], 'restarted')
 
-    def test_a_tile_that_never_gets_an_omp_is_deleted_and_the_session_resumes_in_the_pane(self):
-        cases = [('without a pid', 'without pid', None, ['obj_new']), ('never listed', 'not listed', None, ['obj_new']),
-                 ('create refused', 'with pid', (1, '', 'easl: board is read-only'), [])]
-        for label, create, fail, deleted in cases:
-            with self.subTest(label):
-                self.scene()
-                self.easl.create = create
-                if fail:
-                    self.easl.fail['object.create'] = fail
-                code, res = self.migrate()
-                self.assertEqual(code, 1)
-                self.assertTrue(res['action'].startswith('failed: no omp came up in the tile ('), res['action'])
-                self.assertTrue(res['action'].endswith(f'resumed in herdr pane {self.pane} again (rc 0)'), res['action'])
-                if fail:
-                    self.assertIn('board is read-only', res['action'])
-                self.assertEqual(self.easl.deleted, deleted)
-                self.assertEqual(self.world.agent_starts, [[
-                    'lead', '--kind', 'omp', '--pane', self.pane, '--timeout', '240000', '--',
-                    '--model', 'opus', '--thinking', 'high', f'--resume={self.session}']])
-                self.assertEqual(self.world.closed, [])
-                if deleted:
-                    steps = self.sequence('object.delete', 'agent start')
-                    self.assertEqual(steps, ['object.delete', 'agent start'], 'the tile goes before the pane resumes')
-                self.assertEqual([a['action'] for a in self.migrated_actions()], [res['action']])
+    def test_tile_running_this_job_is_protected(self):
+        a = self.place()
+        self.procs[os.getpid()] = {'ppid': a['pid'], 'cmd': 'python omp-update', 'rss_mb': 1, 'age_s': 1}
+        self.assertIn('runs this job', self.row(self.host())['action'])
+        self.assertEqual(self.restarts(), [])
 
-    def test_a_tile_whose_omp_reports_another_session_is_left_for_a_human(self):
-        self.easl.reported_session = '/elsewhere/other.jsonl'
-        code, res = self.migrate()
-        tile = self.easl.find('obj_new')
-        self.assertEqual(code, 1)
-        self.assertTrue(res['action'].startswith(f"failed: tile obj_new runs omp {tile['pid']} (status idle, session "
-                                                 f"/elsewhere/other.jsonl); herdr pane {self.pane} left empty"),
-                        res['action'])
-        self.assertTrue(res['action'].endswith('check by hand'))
-        self.assertEqual(self.world.agent_starts, [], 'a second omp on that session would corrupt it')
-        self.assertEqual(self.easl.deleted, [])
-        self.assertEqual(self.world.closed, [])
-        self.assertEqual(self.world.typed, [(self.pane, '/exit')])
+    def test_all_tile_safety_fields_are_rechecked_before_resume(self):
+        for field, value in (('draft', True), ('focused', True), ('model', 'other'), ('pid', 900000)):
+            with self.subTest(field=field):
+                self.tiles.clear()
+                self.list_count = 0
+                a = self.place()
+                self.on_list[2] = lambda a=a, field=field, value=value: a.update({field: value})
+                self.assertTrue(self.row(self.host())['action'].startswith('skip:'))
+        self.assertEqual(self.restarts(), [])
 
-    def test_a_pane_whose_omp_does_not_exit_is_left_alone_and_no_tile_is_created(self):
-        self.scene(omp_pid=os.getpid(), with_omp=False)  # a pid that stays alive, as an omp stuck in a dialog does
-        code, res = self.migrate()
-        self.assertEqual(code, 1)
-        self.assertEqual(res['action'], "failed: the pane's omp did not exit after /exit; left alone")
-        self.assertEqual(self.world.typed, [(self.pane, '/exit')])
-        self.assertEqual(self.calls('object.create'), [])
-        self.assertEqual((self.world.closed, self.world.agent_starts, self.easl.deleted), ([], [], []))
-        self.assertEqual([a['action'] for a in self.migrated_actions()], [res['action']])
+    def test_status_changes_or_tile_disappears_before_resume(self):
+        a = self.place()
+        self.on_list[2] = lambda: a['lifecycle'].update(state='working')
+        self.assertIn('working', self.row(self.host())['action'])
+        a["lifecycle"]["state"] = "idle"
+        self.list_count = 0
+        self.on_list[2] = self.tiles.clear
+        self.assertIn('tile changed', self.row(self.host())['action'])
+        self.assertEqual(self.restarts(), [])
 
-    def test_a_board_that_will_not_open_fails_before_the_pane_is_exited(self):
-        self.easl.fail['board.open'] = (1, '', 'easl: no such root')
-        code, res = self.migrate()
-        self.assertEqual(code, 1)
-        self.assertEqual(res['action'], f'failed: board.open {self.board_root}: easl: no such root')
-        self.assertEqual((self.world.typed, self.world.closed, self.world.agent_starts), ([], [], []))
-        self.assertEqual(self.calls('object.create'), [])
+    def test_pending_message_refusal_is_nonforced_and_stops_host(self):
+        self.place()
+        self.place(tile='obj_second', name='other-lead')
+        self.pending = True
+        res = self.host()
+        self.assertIn('pending message', res['errors'][0])
+        self.assertEqual(len(self.restarts()), 1)
+        self.assertNotIn('--force', self.restarts()[0])
+        self.assertEqual(len(res['tiles']), 1)
+        self.assertEqual(self.tiles[0]['pid'], 500000)
+
+    def test_missing_session_or_pid_never_restarts(self):
+        a = self.place()
+        os.remove(self.sessions[a['tile']])
+        self.assertIn('no session file', self.row(self.host())['action'])
+        self.tiles.clear()
+        self.place(with_pid=False)
+        self.calls.clear()
+        self.assertIn('no omp pid', self.row(self.host())['action'])
+        self.assertFalse(any(c[1] == 'object.get' for c in self.calls))
+        self.assertEqual(self.restarts(), [])
+
+    def test_easl_zsh_path_is_checked_using_app_environment(self):
+        self.place()
+        self.procs[800000] = {'ppid': 1, 'cmd': '/Applications/easl.app/Contents/MacOS/Easl', 'age_s': 1, 'rss_mb': 1}
+        self.app_env = {'HOME': str(self.root), 'PATH': '/usr/bin:/bin:/usr/local/bin'}
+        self.assertEqual(self.row(self.host())['action'], 'restarted')
+        env = next(c for c in self.calls if c[0] == '/usr/bin/env')
+        self.assertIn('PATH=/usr/bin:/bin:/usr/local/bin', env)
+        self.tiles.clear()
+        self.place()
+        self.zsh_finds_omp = False
+        res = self.host()
+        self.assertIn('zsh finds no omp', res['errors'][0])
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_verification_failures_stop_host_with_original_session_in_log(self):
+        for field, value in (('pid', 'same'), ('session', 'gone'), ('session', '/different.jsonl'),
+                             ('protocol', None), ('protocol', 0), ('model', 'other')):
+            with self.subTest(field=field, value=value):
+                self.tiles.clear()
+                self.calls.clear()
+                self.after_restart = {}
+                self.new_session, self.new_pid = None, True
+                self.place()
+                session = self.sessions['obj_lead']
+                self.place(tile='obj_second', name='other-lead')
+                if field == 'pid':
+                    self.new_pid = False
+                elif field == 'session':
+                    self.new_session = value
+                else:
+                    self.after_restart = {field: value}
+                started = self.now
+                res = self.host()
+                self.assertEqual(self.now - started, 60)
+                self.assertIn(session, res['errors'][0])
+                self.assertIn('verification_failure', self.row(res))
+                self.assertEqual(len(self.restarts()), 1)
+                self.assertEqual(len(res['tiles']), 1)
+
+    def test_protocol_and_model_can_arrive_later_within_sixty_seconds(self):
+        a = self.place()
+        self.after_restart = {'protocol': None, 'model': None}
+        self.on_list[5] = lambda: a.update(protocol=1, model=MODEL)
+        started = self.now
+        res = self.host()
+        self.assertEqual(self.row(res)['action'], 'restarted')
+        self.assertLess(self.now - started, 60)
+
+    def test_verification_probes_share_one_sixty_second_deadline(self):
+        self.place()
+        verifying = False
+        def slow_command(cmd, timeout=120, **kw):
+            nonlocal verifying
+            if verifying and cmd[0] == self.cli:
+                duration = 45 if cmd[1] == 'agent.list' else 30
+                self.advance(min(duration, timeout))
+                if duration > timeout:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+            out = self.command(cmd, timeout=timeout, **kw)
+            if cmd[:2] == [self.cli, 'agent.restart']:
+                verifying = True
+            return out
+        self.mod.sh.side_effect = slow_command
+        started = self.now
+        res = self.host()
+        self.assertEqual(self.now - started, 60)
+        self.assertIn('verification failed', res['errors'][0])
+        self.assertIn('verification_failure', self.row(res))
+
+    def test_switch_off_or_unreachable_never_mutates_tiles(self):
+        self.place()
+        res = self.host(easl=False)
+        self.assertEqual(res['tiles'], [])
+        self.assertEqual(res['unmanaged'][0]['action'], 'report only (outside easl)')
+        self.mod.sh.side_effect = RuntimeError('cannot reach app')
+        self.assertEqual(self.host()['errors'], ['cannot reach app'])
+        self.assertEqual(self.restarts(), [])
+
+    def test_switch_requires_enabled_true_and_cli_remote_uses_host_cli(self):
+        switch = Path(self.mod.EASL_SWITCH)
+        switch.parent.mkdir(parents=True)
+        for data in ('bad json', '[]', '{"enabled":"yes","cli":"x"}', '{"enabled":true}'):
+            switch.write_text(data)
+            self.assertIsNone(self.mod.easl_switch())
+        switch.write_text(json.dumps({'enabled': True, 'cli': self.cli}))
+        self.assertEqual(self.mod.host_easl({'ssh': None})['cli'], self.cli)
+        self.assertEqual(self.mod.host_easl({'ssh': 'twaldin-work', 'easl': self.cli})['cli'], self.cli)
+        self.assertIsNone(self.mod.host_easl({'ssh': 'tim@deckbox'}))
 
 
-class MigrateCli(unittest.TestCase):
-    """`omp-update migrate` as a process with the switch off: stand-in herdr and easl in $HOME record any call."""
+class Services(Sandbox):
+    def test_only_older_services_restart_and_health_or_kickstart_failure_stops_host(self):
+        service = {'label': 'com.twaldin.omp-auth-broker', 'match': 'auth-broker serve', 'health': 'http://twaldin-home:8765/v1/healthz'}
+        self.procs[800000] = {'ppid': 1, 'cmd': self.mod.OMP + ' auth-broker serve', 'rss_mb': 20, 'age_s': 86400}
+        self.mod.running_version = lambda *args: (False, '1.2.3')
+        self.assertEqual(self.host(services=[service], easl=False)['actions'][0]['action'], 'none: current')
+        self.mod.running_version = lambda *args: (True, '1.2.2')
+        def service_command(cmd, **kw):
+            if cmd[0] == 'launchctl':
+                return subprocess.CompletedProcess(cmd, 0, '', '')
+            if cmd[0] == 'curl':
+                return subprocess.CompletedProcess(cmd, 0, '{"version":"1.2.3"}\n200', '')
+            return self.command(cmd, **kw)
+        self.mod.sh.side_effect = service_command
+        self.assertEqual(self.host(services=[service], easl=False)['actions'][0]['action'], 'restarted')
+        self.assertEqual(self.mod.sh.call_args_list[-2].args[0][:3], ['launchctl', 'kickstart', '-k'])
+        self.mod.sh.side_effect = RuntimeError('kickstart failed')
+        self.place()
+        res = self.host(services=[service, {**service, 'label': 'second-service'}])
+        self.assertEqual(len(res['actions']), 1)
+        self.assertEqual(res['tiles'], [])
+        self.assertIn('kickstart failed', res['errors'][0])
+        self.mod.sh.side_effect = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, '{"version":"old"}\n200', '')
+        self.assertIn('health/version', self.host(services=[service])['errors'][0])
 
-    def test_exits_1_naming_the_switch_and_calls_neither_herdr_nor_easl(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            record = root / 'calls'
-            (root / '.local' / 'bin').mkdir(parents=True)
-            for name in ('herdr', 'easl'):
-                stub = root / '.local' / 'bin' / name
-                stub.write_text(f'#!/bin/sh\necho "{name} $@" >> {record}\n')
-                stub.chmod(0o755)
-            switch = root / '.config' / 'machine-shepherd' / 'easl.json'
-            switch.parent.mkdir(parents=True)
-            env = {**os.environ, 'HOME': str(root)}
-            for label, text in (('no file', None),
-                                ('disabled', json.dumps({'enabled': False, 'cli': str(root / '.local' / 'bin' / 'easl')}))):
-                with self.subTest(switch=label):
-                    if text is not None:
-                        switch.write_text(text)
-                    r = subprocess.run([sys.executable, str(OMP_UPDATE), 'migrate', 'lead'], env=env,
-                                       capture_output=True, text=True, timeout=60)
-                    self.assertEqual(r.returncode, 1, r.stdout)
-                    self.assertIn(f'migrate: easl is off ({switch})', r.stderr)
-                    self.assertFalse(record.exists(), record.read_text() if record.exists() else '')
 
-
-class EaslCli(Sandbox):
-    """easl() and the tile readers against a real executable: exit codes, stderr and stdout as a process gives them."""
-
+class Rollout(Sandbox):
     def setUp(self):
         super().setUp()
-        self.mod.sh = load_omp_update().sh  # the real sh: this class runs real processes
-        self.state, self.record = self.root / 'easl-state.json', self.root / 'easl-calls.jsonl'
-        self.cli = str(self.root / 'easl-stub')
-        Path(self.cli).write_text(EASL_STUB.replace('@PY@', sys.executable).replace('@CALLS@', str(self.record))
-                                  .replace('@STATE@', str(self.state)))
-        os.chmod(self.cli, 0o755)
+        self.params, self.results = {}, {}
+        self.mod.resolve_target = lambda *args: {'target': '18.8.0', 'eligible': ['18.7.0', '18.8.0'], 'blocked': []}
+        self.mod.run_host = self.run_host
+        self.write_config({'hosts': {'deckbox': {'ssh': 'tim@deckbox'},
+                                     'work': {'ssh': 'twaldin-work', 'hold_below': '18.8.0'}, 'home': {'ssh': None}}})
 
-    def stub_state(self, **state):
-        self.state.write_text(json.dumps(state))
+    def run_host(self, name, hc, params):
+        self.params[name] = params
+        res = {'host': name, 'installed_before': '18.7.0', 'installed_after': params['target'],
+               'actions': [], 'tiles': [], 'errors': [], 'unmanaged': []}
+        res.update(self.results.get(name, {}))
+        return res
 
-    def test_tile_agents_keeps_omp_agents_and_shapes_them_like_herdr_agents_for_the_gate(self):
-        lead = {'tile': 'obj_a', 'board': 'brd_1', 'name': 'lead', 'kind': 'omp', 'pid': 42, 'focused': False,
-                'draft': False, 'protocol': 1, 'model': 'anthropic/claude-opus-5-5',
-                'lifecycle': {'state': 'done', 'seen': True, 'restored': False}}
-        self.stub_state(agents=[lead, {'tile': 'obj_b', 'name': 'shell', 'kind': 'shell'},
-                                {'tile': 'obj_c', 'name': 'bare', 'kind': 'omp'}])
-        tiles, err = self.mod.tile_agents(self.cli)
-        self.assertIsNone(err)
-        self.assertEqual(tiles, [
-            {'tile': True, 'pane_id': 'obj_a', 'name': 'lead', 'board': 'brd_1', 'agent_status': 'done',
-             'lifecycle': lead['lifecycle'], 'focused': False, 'draft': False, 'pid': 42, 'protocol': 1,
-             'model': 'anthropic/claude-opus-5-5', 'thinking': None, 'cli': self.cli},
-            {'tile': True, 'pane_id': 'obj_c', 'name': 'bare', 'board': None, 'agent_status': None,
-             'lifecycle': {}, 'focused': None, 'draft': None, 'pid': None, 'protocol': None, 'model': None, 'thinking': None,
-             'cli': self.cli}])
-        self.assertEqual(self.mod.tile_get(self.cli, 'obj_a')['pid'], 42)
-        self.assertIsNone(self.mod.tile_get(self.cli, 'obj_b'))
+    def run_once(self, hosts=None, dry=False):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.mod.main_run(argparse.Namespace(hosts=hosts, dry_run=dry))
 
-    def test_tile_session_is_the_path_the_tiles_omp_reported_or_none(self):
-        self.stub_state(props={'obj_a': {'agent': {'sessionPath': '/s/x.jsonl'}}, 'obj_c': {}})
-        self.assertEqual(self.mod.tile_session(self.cli, 'obj_a'), '/s/x.jsonl')
-        self.assertIsNone(self.mod.tile_session(self.cli, 'obj_c'))
-        self.assertEqual([json.loads(ln) for ln in self.record.read_text().splitlines()],
-                         [['object.get', '--id', 'obj_a'], ['object.get', '--id', 'obj_c']])
+    def log(self):
+        return [json.loads(line) for line in (Path(self.mod.STATE) / 'actions.jsonl').read_text().splitlines()]
 
-    def test_a_failing_cli_is_an_error_carrying_its_stderr(self):
-        self.stub_state(fail={'agent.list': 'easl: app not running'}, agents=[])
-        self.assertEqual(self.mod.tile_agents(self.cli), (None, 'easl: app not running'))
-        self.assertIsNone(self.mod.tile_get(self.cli, 'obj_a'))
+    def test_canary_order_cannot_be_reversed_and_holds_apply(self):
+        self.assertEqual(self.run_once(hosts='home,work,deckbox'), 0)
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertEqual([p['target'] for p in self.params.values()], ['18.8.0', '18.7.0', '18.8.0'])
+        self.assertEqual(self.log()[0]['kind'], 'run')
 
-    def test_output_that_is_not_json_and_a_missing_binary_are_errors_too(self):
-        self.stub_state()
-        self.assertEqual(self.mod.easl(self.cli, 'noise'), {'error': 'easl: segfault'})
-        self.assertIn('No such file', self.mod.easl(str(self.root / 'no-such-easl'), 'agent.list')['error'])
+    def test_any_host_failure_logs_exits_nonzero_and_stops_later_hosts(self):
+        self.results['deckbox'] = {'errors': ['install failed']}
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        self.assertEqual(self.log()[-1]['error'], 'install failed')
+        self.assertFalse(any(e['kind'] == 'notify' for e in self.log()))
+        record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
+        self.assertEqual(record['results'][0]['errors'], ['install failed'])
+
+    def test_canary_verification_failure_blocks_new_release_without_notifications(self):
+        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{'verification_failure': 'protocol missing'}]}
+        self.assertEqual(self.run_once(), 1)
+        cfg = json.loads(Path(self.mod.CONFIG).read_text())
+        self.assertEqual(cfg['blocked_versions']['18.8.0']['host'], 'deckbox')
+        self.assertEqual(cfg['blocked_versions']['18.8.0']['reason'], 'protocol missing')
+        self.assertFalse(self.mod.sh.called)
+
+    def test_canary_already_on_newer_version_blocks_it_only_when_later_hosts_lack_it(self):
+        for later, blocked in (('18.7.0', True), ('18.8.0', False)):
+            with self.subTest(later=later):
+                self.write_config({'blocked_versions': {}})
+                Path(self.mod.STATE).mkdir(parents=True, exist_ok=True)
+                (Path(self.mod.STATE) / 'last-run.json').write_text(json.dumps({'results': [
+                    {'host': h, 'installed_after': later} for h in ('work', 'home')]}))
+                self.results['deckbox'] = {'installed_before': '18.8.0', 'errors': ['protocol missing'],
+                                          'tiles': [{'verification_failure': 'protocol missing'}]}
+                self.assertEqual(self.run_once(), 1)
+                cfg = json.loads(Path(self.mod.CONFIG).read_text())
+                self.assertEqual('18.8.0' in cfg['blocked_versions'], blocked)
+
+    def test_dry_failure_never_blocks_or_rewrites_configuration(self):
+        before = Path(self.mod.CONFIG).read_text()
+        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{'verification_failure': 'protocol missing'}]}
+        self.assertEqual(self.run_once(dry=True), 1)
+        self.assertEqual(Path(self.mod.CONFIG).read_text(), before)
+
+    def test_release_selection_or_ssh_failure_is_recorded(self):
+        self.mod.resolve_target = mock.Mock(side_effect=RuntimeError('GitHub unavailable'))
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.log()[-1]['error'], 'GitHub unavailable')
+        self.mod.resolve_target = lambda *args: {'target': '18.8.0', 'eligible': ['18.8.0']}
+        self.mod.run_host = mock.Mock(side_effect=subprocess.TimeoutExpired('ssh', 20))
+        self.assertEqual(self.run_once(), 1)
+        self.assertIn('ssh', self.log()[-1]['error'])
+
+    def test_remote_host_runs_identical_script_over_ssh_and_propagates_exit_errors(self):
+        run = self.real_run_host
+        result = {'host': 'work', 'errors': []}
+        with mock.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, 'RESULT ' + json.dumps(result), '')) as call:
+            res = run('work', {'ssh': 'twaldin-work', 'python': '/usr/bin/python3'}, {'host': 'work'})
+        self.assertEqual(call.call_args.args[0][:2], ['ssh', '-o'])
+        self.assertIn('twaldin-work', call.call_args.args[0])
+        self.assertEqual(call.call_args.kwargs['input'], OMP_UPDATE.read_text())
+        self.assertEqual(res['errors'], ['host exited 1'])
 
 
 if __name__ == '__main__':

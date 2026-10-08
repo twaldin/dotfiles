@@ -1,57 +1,26 @@
 #!/usr/bin/env python3
-"""omp-update: keep omp on one vetted release on home, work and deckbox, and rotate idle
-agents onto it so no session runs long and heavy. Runs hourly on twaldin-home from launchd
-net.waldin.omp-update; work and deckbox get this same file over ssh (`python3 - host ...`),
-so there is one copy.
+"""Update omp and resume idle easl leads, without messages or fresh sessions.
 
-Policy (Tim, 2026-10-05, via the meta pane; hourly rotation 2026-10-07):
-- Target = the newest omp release published on BOTH GitHub releases and npm at least
-  min_age_hours (3 h) ago. A tag without a published release (e.g. v18.6.2) never counts,
-  nor a version in config `blocked_versions`. Hosts go in the canary order deckbox -> work ->
-  home; a host with `hold_below` (hosts.<h>.hold_below + hold_note; delete it to lift) takes
-  the newest such release below that version. A host that is ahead is reported, never
-  downgraded.
-- herdr panes and easl tiles: never touch one that is `working` (or `blocked`). An `idle`/`done`
-  one is restarted (pane: /exit, then `herdr agent start <name> --kind omp --pane <id> --
-  --resume=<session>`) when its omp is older than the installed one, its session jsonl is over
-  100 MB, its RSS is over 1.5 GB, or its omp is more than 12 h old. Not when it still has child
-  work running (timers, jobs, servers, test runs, ssh: herdr shows background jobs as idle and
-  /exit would kill them), runs an in-process subagent (a transcript in its session directory
-  it holds open or wrote in the last 3 min), text is waiting in its editor, it runs this job,
-  or its session file is not on disk. A tile restarts only where `zsh -c 'command -v omp'`
-  finds omp in the easl app's environment: easl's resume runs the tile's bare `omp` through
-  zsh, and on 2026-10-07 a zsh without ~/.bun/bin killed three agents that way. The restart
-  is verified: same session file, new pid, and the memory before/after is logged. One whose
-  agent does not come back, or whose tile no longer reports that session (props.agent.
-  sessionPath gone or changed), stops the host's other restarts and names the way back.
-- After every restart the new omp's own log must show no extension that failed to load or
-  bind, and a tile must report easl protocol >= 1 and its model within 60 s. A failure stops
-  the host's other restarts and the rest of the run; when the failing host runs a version a
-  later host lacks (deckbox, the canary), that version goes into `blocked_versions` with the
-  reason, and the agents in config `notify` (canvas, meta) are told through agent-msg.
-- Seats and front doors (config report_only: `lindy-seat`; opt_in overrides it), and every
-  omp outside herdr and easl tiles: the run only reports them. Tim's own tiles (an easl tile
-  with no agent name) are never restarted: "skip: Tim's tile".
-- launchd omp services (home: auth broker + gateway) restart through launchctl
-  kickstart when their omp is older than the installed one.
-- easl tiles (home, behind ~/.config/machine-shepherd/easl.json {"enabled": true, "cli":
-  ".../bin/easl"}, off or missing = herdr panes only; a remote host when its config names
-  its "easl" CLI, e.g. work's Lindy board, only reported while easl can't be reached): omp
-  agents in easl terminal tiles get the same triggers and the same idle_gate, plus two tile
-  rules: a lifecycle easl only restored after an app restart is not trusted, and a `done`
-  Tim hasn't seen is left alone (a restart would clear his needs-you marker). A tile restarts through
-  `easl agent.restart --mode resume` (same tile, name, model, thinking and session).
-  `omp-update migrate <name>` moves a herdr pane's session into a tile of that name.
+The newest release published on both GitHub and npm for at least 3 hours wins,
+excluding blocked_versions; hosts may hold_below a version. Install in canary
+order deckbox -> work -> home, never downgrade, and restart older launchd omp
+services. Remote hosts run this same script over ssh.
 
-Logs: every action -> ~/.local/state/omp-update/actions.jsonl; the last run ->
-last-run.json; real runs also put one summary line in the shepherd checkpoint.
+Named easl omp tiles resume in place only for an older binary or RSS > 1.5 GB.
+Never touch Tim's unnamed tiles or report_only names (including lindy-seat).
+Working/blocked, restored lifecycle, unseen done, focus/draft unknown or present,
+child work and in-process subagents prevent a restart. Recheck immediately before
+acting; easl's non-forced restart also refuses pending prompts/queued messages.
+Require a session on disk and omp on easl's zsh PATH. Within 60 seconds, verify
+the same session, a new pid, protocol >= 1 and the original model. Any failure
+stops the host and rollout, is logged, and exits nonzero; canary verification
+failures block the newly deployed version. No agent messages are sent.
 
-Usage:
-  omp-update run [--dry-run] [--hosts home,work,deckbox] [--only-pane w2:pXX]
-  omp-update roll [--hosts home,deckbox] [--include <name>] [--hours 24] [--dry-run]
-  omp-update migrate <herdr agent> [--board ~/dotfiles] [--model M] [--dry-run]
-  omp-update ext-ack --since <UTC> --note <why>  # an extension change needs no restart
-  omp-update target          # print the release the policy picks right now
+Config: ~/.config/omp-update/config.json; local easl opt-in:
+~/.config/machine-shepherd/easl.json {"enabled": true, "cli": ".../bin/easl"}.
+Logs: ~/.local/state/omp-update/actions.jsonl and last-run.json.
+Usage: omp-update run [--dry-run] [--hosts deckbox,work,home]
+       omp-update target
 """
 import argparse
 import datetime as dt
@@ -72,75 +41,35 @@ NPM_PKG = "@oh-my-pi/pi-coding-agent"
 HOME = os.path.expanduser("~")
 BUN_BIN = os.path.join(HOME, ".bun", "bin")
 OMP = os.path.join(BUN_BIN, "omp")
-HERDR = os.path.join(HOME, ".local", "bin", "herdr")
 STATE = os.path.join(HOME, ".local", "state", "omp-update")
 CONFIG = os.path.join(HOME, ".config", "omp-update", "config.json")
-CHECKPOINT = os.path.join(HOME, ".local", "state", "machine-shepherd", "checkpoint.md")
 EASL_SWITCH = os.path.join(HOME, ".config", "machine-shepherd", "easl.json")
-OMP_LOGS = os.path.join(HOME, ".omp", "logs")
-AGENT_MSG = os.path.join(HOME, ".local", "bin", "agent-msg")
 ENV = dict(os.environ, PATH=os.pathsep.join([
     BUN_BIN, os.path.join(HOME, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin",
     "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
 MAC = platform.system() == "Darwin"
-
+ORDER = ("deckbox", "work", "home")
+MAX_RSS_MB = 1536
+VERIFY_S = 60
 DEFAULT_CONFIG = {
     "hosts": {
         "deckbox": {"ssh": "tim@deckbox", "python": "python3"},
-        # work's herdr is only a client of home's server, so its panes are never managed. Its omp
-        # sessions in easl tiles (the Lindy board) pass the same tile gates as home's: "easl" names
-        # the CLI on that machine. When it can't be reached they are only reported, as before.
-        "work": {"ssh": "twaldin-work", "python": "/usr/bin/python3", "manage_panes": False,
+        "work": {"ssh": "twaldin-work", "python": "/usr/bin/python3",
                  "easl": "/Applications/easl.app/Contents/Resources/bin/easl"},
-        # Its launchd omp services are restarted when they run an older binary (deckbox omp
-        # gets its credentials from this broker; Tim 10-05: work keeps its own local store).
-        # Any host may carry "hold_below": "18.8.0" + "hold_note": it then takes the newest
-        # eligible release below that version (delete the two keys to lift the hold).
-        "home": {"ssh": None,
-                 "services": [
-                     {"label": "com.twaldin.omp-auth-broker", "match": "auth-broker serve",
-                      "health": "http://100.85.222.119:8765/v1/healthz"},
-                     {"label": "com.twaldin.omp-auth-gateway", "match": "auth-gateway serve",
-                      "health": "http://100.85.222.119:4000/healthz"}]},
+        "home": {"ssh": None, "services": [
+            {"label": "com.twaldin.omp-auth-broker", "match": "auth-broker serve",
+             "health": "http://twaldin-home:8765/v1/healthz"},
+            {"label": "com.twaldin.omp-auth-gateway", "match": "auth-gateway serve",
+             "health": "http://twaldin-home:4000/healthz"}]},
     },
-    "order": ["deckbox", "work", "home"],
     "min_age_hours": 3,
-    "max_session_mb": 100,
-    "max_uptime_hours": 12,
-    "max_rss_mb": 1536,
-    # Seats/front doors: the hourly run only reports them (move a name to opt_in to manage it).
-    "report_only": {"names": ["lindy-seat"], "panes": []},
-    "opt_in": [],
-    "skip_panes": [],
-    # Versions kept off every host after a restart onto them failed its extension check:
-    # {version: {"reason", "host", "at"}}. Written by the run; delete an entry to lift it.
+    "report_only": {"names": ["lindy-seat"]},
     "blocked_versions": {},
-    # Told (agent-msg) when a version is blocked.
-    "notify": ["canvas@canvas", "meta@dotfiles"],
-    # Extension changes that need no restart (e.g. a refactor that behaves the same):
-    # {content fingerprint: {"since": epoch of the last change that did need one, "note"}}.
-    # Written by `omp-update ext-ack`; any later, unacknowledged change re-arms the trigger.
-    "extensions_pins": {},
 }
-
-# Descendants of an agent's omp that a restart may end without losing work: omp's own
-# workers and kernels are looked through (their children are checked; the python runner's
-# directory is omp-python-runner-<uid> since omp 18.7.0); browser and language-server
-# subtrees are ignored whole.
+HOST_KEYS = ("ssh", "python", "easl", "services", "hold_below", "hold_note")
 TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner(-\d+)?/")
 SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|pyright|langserver|language-server|languageserver|"
                         r"tsserver|rust-analyzer|gopls|clangd|sourcekit-lsp|lsp-mux|biome lsp|ruff server")
-# A subagent transcript written this recently counts as a running subagent even when its omp
-# does not hold it open.
-SUBAGENT_FRESH_S = 180
-# How long a restarted tile gets to report its easl protocol and model.
-EXT_CHECK_S = 60
-# What omp logs (~/.omp/logs/omp.<date>.<pid>.log, JSON lines) for an extension it could not use.
-EXT_LOAD_FAILED = ("Failed to load extension", "Failed to bind extension")
-
-
-def note(msg):
-    print(msg, file=sys.stderr, flush=True)
 
 
 def sh(cmd, timeout=120, check=False, **kw):
@@ -163,39 +92,31 @@ def parse_ts(s):
     return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
-def stamp(t=None):
-    return (t or utcnow()).strftime("%Y-%m-%dT%H:%MZ")
+def stamp():
+    return utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-
-# ---------------------------------------------------------------- host side
 
 def omp_version(path=OMP):
-    try:
-        out = sh([path, "--version"], timeout=60).stdout
-    except Exception:
-        return None
+    out = sh([path, "--version"], timeout=60, check=True).stdout
     m = re.search(r"omp/(\S+)", out)
-    return m.group(1) if m else None
-
-
-def npm_install():
-    return os.path.realpath(OMP).endswith(".js")
+    if not m:
+        raise RuntimeError(f"{path} --version did not report an omp version")
+    return m.group(1)
 
 
 def install_time():
     real = os.path.realpath(OMP)
-    if real.endswith(".js"):  # bun global install: the installed package's package.json
-        return os.stat(os.path.join(os.path.dirname(os.path.dirname(real)), "package.json")).st_mtime
+    if real.endswith(".js"):
+        real = os.path.join(os.path.dirname(os.path.dirname(real)), "package.json")
     return os.stat(real).st_mtime
 
 
 def stage_binary(target):
-    """Download the release binary for this platform, check SHA256SUMS.txt and that it
-    runs and reports the target version. Returns the staged path (same dir as omp)."""
+    """Download, checksum and execute the release binary before swapping it in."""
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
     asset = f"omp-{platform.system().lower()}-{arch}"
     base = f"https://github.com/{REPO}/releases/download/v{target}/"
-    sums = sh(["curl", "-fsSL", "--retry", "3", base + "SHA256SUMS.txt"], timeout=120, check=True).stdout
+    sums = sh(["curl", "-fsSL", "--retry", "3", base + "SHA256SUMS.txt"], check=True).stdout
     want = next((ln.split()[0] for ln in sums.splitlines()
                  if len(ln.split()) == 2 and ln.split()[1].lstrip("*") == asset), None)
     if not want:
@@ -208,21 +129,20 @@ def stage_binary(target):
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk)
         if h.hexdigest() != want:
-            raise RuntimeError(f"sha256 mismatch for {asset}: {h.hexdigest()[:12]} != {want[:12]}")
+            raise RuntimeError(f"sha256 mismatch for {asset}")
         os.chmod(tmp, 0o755)
         got = omp_version(tmp)
         if got != target:
             raise RuntimeError(f"staged {asset} reports {got}, expected {target}")
+        return tmp
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
-    return tmp
 
 
 def swap_binary(tmp):
-    """Install like omp's own updater: the old binary becomes omp.<ms>.<pid>.0.bak, which
-    running omp processes keep mapping, so they can still be told apart."""
+    """Retain the old mapped binary under omp's own backup naming convention."""
     with open(os.path.join(BUN_BIN, "omp.lock"), "a") as lk:
         deadline = time.time() + 120
         while True:
@@ -230,49 +150,37 @@ def swap_binary(tmp):
                 fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                if time.time() > deadline:
-                    raise RuntimeError("omp.lock held for 2 min (omp self-update running?)")
+                if time.time() >= deadline:
+                    raise RuntimeError("omp.lock held for 2 min")
                 time.sleep(5)
         bak = os.path.join(BUN_BIN, f"omp.{int(time.time() * 1000)}.{os.getpid()}.0.bak")
         os.rename(OMP, bak)
-        os.rename(tmp, OMP)
+        try:
+            os.rename(tmp, OMP)
+        except OSError:
+            os.rename(bak, OMP)
+            raise
     return bak
-
-
-def prune_baks(dry):
-    """Keep the newest omp.*.bak for rollback; delete older ones no process maps."""
-    acts = []
-    baks = sorted(glob.glob(os.path.join(BUN_BIN, "omp.*.bak")), key=os.path.getmtime, reverse=True)
-    for b in baks[1:]:
-        if sh(["lsof", "-t", "--", b], timeout=60).stdout.split():
-            continue
-        acts.append({"kind": "prune-bak", "file": os.path.basename(b), "dry_run": dry})
-        if not dry:
-            os.remove(b)
-    return acts
 
 
 def etime_s(s):
     days, _, rest = s.strip().rpartition("-")
     parts = [int(x) for x in rest.split(":")]
-    while len(parts) < 3:
-        parts.insert(0, 0)
+    parts = [0] * (3 - len(parts)) + parts
     return (int(days) if days else 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
 
 
 def ps_table():
-    """{pid: ppid, age_s, rss_mb (resident set), cmd} for every process."""
     cmd = ["ps", "-axo", "pid=,ppid=,etime=,rss=,command="] if MAC else ["ps", "-eo", "pid=,ppid=,etime=,rss=,args="]
     procs = {}
-    for ln in sh(cmd, timeout=60).stdout.splitlines():
+    for ln in sh(cmd, timeout=60, check=True).stdout.splitlines():
         p = ln.split(None, 4)
         if len(p) == 5:
-            procs[int(p[0])] = {"ppid": int(p[1]), "age_s": etime_s(p[2]), "rss_mb": int(p[3]) // 1024, "cmd": p[4]}
+            procs[int(p[0])] = {"ppid": int(p[1]), "age_s": etime_s(p[2]), "rss_mb": int(p[3]) / 1024, "cmd": p[4]}
     return procs
 
 
 def is_agent_omp(cmd):
-    """An interactive omp session (not a worker/broker) from its command line."""
     argv = cmd.split()
     if not argv:
         return False
@@ -287,44 +195,42 @@ def is_agent_omp(cmd):
 
 
 def mem_mb(pid):
-    """phys_footprint on macOS (top MEM), VmRSS on Linux."""
     try:
         if MAC:
             val = sh(["top", "-l", "1", "-pid", str(pid), "-stats", "mem"], timeout=30).stdout.split()[-1]
             m = re.match(r"([\d.]+)([BKMGT])", val.upper())
-            if not m:
-                return None
-            return round(float(m.group(1)) * {"B": 1 / 1048576, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1048576}[m.group(2)])
+            return round(float(m[1]) * {"B": 1 / 1048576, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1048576}[m[2]]) if m else None
         with open(f"/proc/{pid}/status") as f:
-            kb = next(int(ln.split()[1]) for ln in f if ln.startswith("VmRSS:"))
-        return kb // 1024
-    except Exception:
+            return next(int(ln.split()[1]) for ln in f if ln.startswith("VmRSS:")) // 1024
+    except (OSError, ValueError, IndexError, StopIteration, subprocess.TimeoutExpired):
         return None
 
 
 def exe_path(pid):
-    if not MAC:
+    if MAC:
+        out = sh(["lsof", "-a", "-p", str(pid), "-d", "txt", "-Fn"], timeout=60).stdout
+        return next((ln[1:] for ln in out.splitlines() if ln.startswith("n") and "/.bun/bin/omp" in ln), None)
+    try:
+        path = os.readlink(f"/proc/{pid}/exe").removesuffix(" (deleted)")
+        return path if os.path.basename(path).startswith("omp") else None
+    except OSError:
         return None
-    out = sh(["lsof", "-a", "-p", str(pid), "-d", "txt", "-Fn"], timeout=60).stdout
-    return next((ln[1:] for ln in out.splitlines() if ln.startswith("n") and "/.bun/bin/omp" in ln), None)
 
 
 def running_version(pid, age_s, installed):
-    """(older, version) for a running omp, against the installed one."""
     path = exe_path(pid)
     if path and path != OMP:
         v = omp_version(path)
-        return (v is None or vtuple(v) < vtuple(installed)), v
-    started = time.time() - age_s
-    return started < install_time() - 60, (installed if started >= install_time() - 60 else None)
+        return vtuple(v) < vtuple(installed), v
+    older = time.time() - age_s < install_time() - 60
+    return older, None if older else installed
 
 
 def open_sessions(pid):
-    paths = []
     if MAC:
-        out = sh(["lsof", "-a", "-p", str(pid), "-Fn"], timeout=60).stdout
-        paths = [ln[1:] for ln in out.splitlines() if ln.startswith("n")]
+        paths = [ln[1:] for ln in sh(["lsof", "-a", "-p", str(pid), "-Fn"], timeout=60).stdout.splitlines() if ln.startswith("n")]
     else:
+        paths = []
         fd = f"/proc/{pid}/fd"
         for x in os.listdir(fd) if os.path.isdir(fd) else []:
             try:
@@ -351,62 +257,15 @@ def live_children(pid, procs):
 
 
 def running_subagents(pid, session):
-    """The in-process subagents the omp `pid` runs now: transcripts it holds open in a session
-    directory (<session>/<Name>.jsonl beside <session>.jsonl, nested ones deeper; omp keeps a
-    running subagent's transcript open), or ones in its own session's directory written in the
-    last SUBAGENT_FRESH_S. A restart would end them mid-task."""
-    folder = session[:-len(".jsonl")] + os.sep if session and session.endswith(".jsonl") else None
+    folder = session[:-6] + os.sep
     found = {p for p in open_sessions(pid) if os.path.isfile(os.path.dirname(p) + ".jsonl")}
-    if folder:
-        cutoff = time.time() - SUBAGENT_FRESH_S
-        for p in glob.glob(os.path.join(glob.escape(folder), "**", "*.jsonl"), recursive=True):
-            try:
-                if os.path.getmtime(p) >= cutoff:
-                    found.add(p)
-            except OSError:
-                pass
-    return [f"subagent {p[len(folder):-6] if folder and p.startswith(folder) else os.path.basename(p)[:-6]}"
-            for p in sorted(found)]
-
-
-def extension_load_errors(pid):
-    """'<extension file>: <error>' for each extension the omp `pid` logged it could not load or bind."""
-    out = []
-    for path in sorted(glob.glob(os.path.join(OMP_LOGS, f"omp.*.{pid}.log"))):
+    for p in glob.glob(os.path.join(glob.escape(folder), "**", "*.jsonl"), recursive=True):
         try:
-            with open(path, errors="replace") as f:
-                for line in f:
-                    if "xtension" not in line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(e, dict) and e.get("message") in EXT_LOAD_FAILED:
-                        out.append(f"{os.path.basename(str(e.get('path') or '?'))}: {str(e.get('error'))[:160]}")
+            if os.path.getmtime(p) >= time.time() - 180:
+                found.add(p)
         except OSError:
             pass
-    return out
-
-
-def extension_problem(pid, tile=None, model=None):
-    """None when the omp `pid` that just came up from a restart is healthy, else what is wrong.
-    A tile (the restarted agent's tile row) must report easl protocol >= 1 (easl's omp extension
-    reports it) and the `model` it had before, within EXT_CHECK_S; and the omp's own log must name
-    no extension it could not load or bind (omp-inbox, easl, herdr state on any host)."""
-    if tile:
-        deadline = time.time() + EXT_CHECK_S
-        while True:
-            now = tile_get(tile["cli"], tile["pane_id"]) or {}
-            proto = now.get("protocol")
-            if isinstance(proto, (int, float)) and proto >= 1 and (not model or now.get("model") == model):
-                break
-            if time.time() >= deadline:
-                return (f"easl reports protocol {proto!r}, model {now.get('model')!r} after {EXT_CHECK_S} s "
-                        f"(expected protocol >= 1, model {model!r})")
-            time.sleep(2)
-    errs = extension_load_errors(pid)
-    return "extension failed to load: " + "; ".join(errs[:3]) if errs else None
+    return [f"subagent {p[len(folder):-6] if p.startswith(folder) else os.path.basename(p)[:-6]}" for p in sorted(found)]
 
 
 def ancestors(procs):
@@ -417,128 +276,44 @@ def ancestors(procs):
     return out
 
 
-def herdr(*args, timeout=60):
-    r = sh([HERDR, *args], timeout=timeout)
-    try:
-        return json.loads(r.stdout)
-    except ValueError:
-        return {"error": (r.stderr or r.stdout).strip()[:300]}
-
-
-def pane_omp(pane):
-    """(pid, argv) of the omp in the pane's foreground process group, or (None, None)."""
-    pi = herdr("pane", "process-info", "--pane", pane).get("result", {}).get("process_info", {})
-    pid = pi.get("foreground_process_group_id")
-    for p in pi.get("foreground_processes", []):
-        if p.get("pid") == pid and is_agent_omp(" ".join(p.get("argv") or [])):
-            return pid, p["argv"]
-    return None, None
-
-
-def editor_empty(pane):
-    lines = [ln for ln in sh([HERDR, "pane", "read", pane], timeout=30).stdout.splitlines() if ln.strip()]
-    return bool(lines) and lines[-1].strip() == "╰─"
-
-
-def resume_args(argv):
-    """The pane's original omp flags, minus session selection and positional prompts,
-    plus --resume=<session> added by the caller. Value flags come from `omp --help`."""
-    args = argv[1:]
-    if os.path.basename(argv[0]) in ("bun", "node"):
-        args = argv[2:]
-    helptext = sh([OMP, "--help"], timeout=60).stdout
-    valued = set(re.findall(r"--([\w-]+)=<", helptext)) | set(re.findall(r"\s-(\w), --[\w-]+=<", helptext))
-    drop = {"resume", "r", "continue", "c", "goal", "no-session", "from-claude", "from-codex"}
-    keep, dropped, i = [], [], 0
-    while i < len(args):
-        a = args[i]
-        if a.startswith("-"):
-            name = a.lstrip("-").split("=", 1)[0]
-            takes = name in valued and "=" not in a and i + 1 < len(args) and not args[i + 1].startswith("-")
-            group = [a, args[i + 1]] if takes else [a]
-            (dropped if name in drop else keep).extend(group)
-            i += len(group)
-        else:
-            dropped.append(a)  # a positional prompt would be sent again
-            i += 1
-    return keep, dropped
-
-
-def agent_session(pane):
-    a = herdr("agent", "get", pane).get("result", {}).get("agent", {})
-    return (a.get("agent_session") or {}).get("value"), a.get("agent_status")
-
-
-# ---------------------------------------------------------------- easl tiles
-
 def easl_switch():
-    """The easl switch, or None when it is off, missing or unreadable."""
     try:
         with open(EASL_SWITCH) as f:
             s = json.load(f)
+        return s if isinstance(s, dict) and s.get("enabled") is True and s.get("cli") else None
     except (OSError, ValueError):
         return None
-    return s if isinstance(s, dict) and s.get("enabled") is True and s.get("cli") else None
 
 
 def host_easl(hc):
-    """The easl tile backend for a host, or None: home's switch file; a remote host's config
-    `easl`, its CLI's path on that machine (the host pass runs there)."""
     if not hc.get("ssh"):
         return easl_switch()
-    return {"enabled": True, "cli": hc["easl"]} if hc.get("easl") else None
+    return {"cli": hc["easl"]} if hc.get("easl") else None
 
 
 def easl(cli, *args, timeout=60):
-    """Run the easl CLI (a bun launcher; ENV puts ~/.bun/bin first): its JSON, or {"error"}."""
-    try:
-        r = sh([cli, *args], timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return {"error": str(e)[:300]}
-    try:
-        out = json.loads(r.stdout)
-    except ValueError:
-        return {"error": (r.stderr or r.stdout).strip()[:300] or f"exit {r.returncode}"}
-    if r.returncode != 0 or not isinstance(out, dict):
-        return {"error": ((r.stderr or "").strip() or json.dumps(out))[:300]}
+    r = sh([cli, *args], timeout=timeout, check=True)
+    out = json.loads(r.stdout)
+    if not isinstance(out, dict) or out.get("error"):
+        raise RuntimeError(f"easl {args[0]}: {str(out)[:300]}")
     return out
 
 
-def tile_agents(cli):
-    """(omp agents in easl tiles on every board, open or closed, or None; error). Shaped like
-    herdr agents for idle_gate: pane_id = tile id, agent_status = lifecycle state."""
-    out = easl(cli, "agent.list")
-    if "error" in out:
-        return None, out["error"]
-    tiles = []
-    for t in out.get("agents") or []:
-        if t.get("kind") != "omp":
-            continue
-        lc = t.get("lifecycle") or {}
-        tiles.append({"tile": True, "pane_id": t["tile"], "name": t.get("name"), "board": t.get("board"),
-                      "agent_status": lc.get("state"), "lifecycle": lc, "focused": t.get("focused"),
-                      "draft": t.get("draft"), "pid": t.get("pid"), "protocol": t.get("protocol"),
-                      "model": t.get("model"), "thinking": t.get("thinking"), "cli": cli})
-    return tiles, None
+def tile_agents(cli, timeout=60):
+    return [dict(t, cli=cli) for t in easl(cli, "agent.list", timeout=timeout)["agents"] if t.get("kind") == "omp"]
 
 
-def tile_get(cli, tile):
-    tiles, _err = tile_agents(cli)
-    return next((t for t in tiles or [] if t["pane_id"] == tile), None)
+def tile_get(cli, tile, timeout=60):
+    return next((t for t in tile_agents(cli, timeout=timeout) if t["tile"] == tile), None)
 
 
-def tile_session(cli, tile):
-    """The session file the tile's omp reported (agent.report_session), or None."""
-    o = easl(cli, "object.get", "--id", tile)
+def tile_session(cli, tile, timeout=60):
+    o = easl(cli, "object.get", "--id", tile, timeout=timeout)
     return (((o.get("object") or {}).get("props") or {}).get("agent") or {}).get("sessionPath")
 
 
 def easl_finds_omp(cli, procs):
-    """None when `zsh -c 'command -v omp'` finds omp in the environment the easl app (the one
-    `cli` belongs to) runs tile commands in, else why not. easl's `agent.restart --mode resume`
-    runs a tile's bare `omp ...` through zsh; where that finds no omp, the restart kills the
-    agent and leaves its tile at a shell (2026-10-07). The app's PATH and HOME come from its
-    process; launchd's default PATH stands in when they can't be read."""
+    """Check the app's zsh environment, not this launchd job's augmented PATH."""
     app = cli.split("/Contents/")[0] + "/Contents/MacOS/"
     env = {"HOME": HOME, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
     pid = next((p for p, i in procs.items() if i["cmd"].startswith(app)), None)
@@ -550,520 +325,236 @@ def easl_finds_omp(cli, procs):
     r = sh(["/usr/bin/env", "-i", f"HOME={env['HOME']}", f"PATH={env['PATH']}", "SHELL=/bin/zsh",
             "/bin/zsh", "-c", "command -v omp"], timeout=30)
     found = (r.stdout.strip().splitlines() or [""])[-1]
-    if r.returncode == 0 and found.startswith("/"):
-        return None
-    return f"easl's zsh finds no omp (zsh -c 'command -v omp' with PATH {env['PATH']})"
+    if r.returncode != 0 or not found.startswith("/"):
+        raise RuntimeError("easl's zsh finds no omp; tile restarts held")
 
 
-def restart_pane(row, argv):
-    pane, name, session, old = row["pane"], row["name"], row["session"], row["pid"]
-    keep, dropped = resume_args(argv)
-    row.update(args_kept=keep, args_dropped=dropped, mem_before_mb=mem_mb(old))
-    herdr("agent", "prompt", pane, "/exit")
-    for _ in range(45):
-        try:
-            os.kill(old, 0)
-        except OSError:
-            break
-        time.sleep(1)
-    else:
-        return "failed: omp did not exit after /exit (dialog or running jobs?); left alone"
-    time.sleep(3)
-    resume = f"--resume={session}"
-    mech = None
-    if name:
-        r = sh([HERDR, "agent", "start", name, "--kind", "omp", "--pane", pane, "--timeout", "240000",
-                "--", *keep, resume], timeout=270)
-        if r.returncode == 0:
-            mech = "herdr agent start"
-        else:
-            row["agent_start_error"] = (r.stderr or r.stdout).strip()[:200]
-    if not mech and pane_omp(pane)[0] is None:
-        # Panes without shell integration refuse `agent start`; typing works. Never type
-        # when an omp already came up: the text would land in its editor.
-        cmd = " ".join(shlex.quote(x) for x in ["omp", *keep, resume])
-        if sh([HERDR, "pane", "run", pane, cmd], timeout=60).returncode == 0:
-            mech = "herdr pane run"
-    row["mechanism"] = mech
-    new = None
-    for _ in range(120):
-        new = pane_omp(pane)[0]
-        if new and new != old:
-            break
-        time.sleep(1)
-    if not new or new == old:
-        row["agent_lost"] = True
-        return f"failed: omp did not come back; in the pane run: omp {' '.join(keep)} {resume}"
-    row["new_pid"] = new
-    for _ in range(150):
-        if editor_empty(pane):
-            break
-        time.sleep(2)
-    time.sleep(20)
-    row["mem_after_mb"] = mem_mb(new)
-    now_session = None
-    for _ in range(60):
-        now_session, _status = agent_session(pane)
-        if now_session:
-            break
-        time.sleep(2)
-    row["session_unchanged"] = now_session == session
-    row["memory_dropped"] = (row["mem_after_mb"] or 0) < (row["mem_before_mb"] or 0)
-    row["ext_check"] = extension_problem(new) or "ok"
-    if row["ext_check"] != "ok":
-        return f"restarted, but extension check failed: {row['ext_check']}"
-    if not row["session_unchanged"]:
-        return f"restarted, but herdr reports session {now_session}"
-    return "restarted"
+def idle_gate(a, procs, session):
+    lc = a.get("lifecycle") or {}
+    if lc.get("restored"):
+        return "lifecycle restored after an app restart, unconfirmed"
+    if lc.get("state") not in ("idle", "done"):
+        return str(lc.get("state") or "unknown")
+    if lc["state"] == "done" and lc.get("seen") is False:
+        return "done, answer not seen by Tim"
+    for key in ("focused", "draft"):
+        if a.get(key) is not False:
+            return f"{key} present or unknown"
+    if a["pid"] not in procs or not is_agent_omp(procs[a["pid"]]["cmd"]):
+        return "omp process not confirmed"
+    if a["pid"] in ancestors(procs):
+        return "runs this job"
+    busy = live_children(a["pid"], procs) or running_subagents(a["pid"], session)
+    return "live child work or subagents: " + "; ".join(busy[:4]) if busy else None
 
 
 def restart_tile(row, a):
-    """`easl agent.restart --mode resume`: same tile, name, model, thinking and session; easl
-    refuses (`conflict`) while the tile is working, blocked, focused or has a draft.
-    Verified like a pane restart: a new omp pid and the same session file; then its extension
-    check (protocol and model back in easl, no extension that failed to load)."""
-    cli, tile, old = a["cli"], row["pane"], row["pid"]
-    row.update(mem_before_mb=mem_mb(old), mechanism="easl agent.restart")
-    out = easl(cli, "agent.restart", "--target", tile, "--mode", "resume", timeout=120)
-    if "error" in out:
-        return f"failed: agent.restart: {out['error'][:200]}"
-    new = None
-    for _ in range(120):
-        now = tile_get(cli, tile)
-        new = now.get("pid") if now else None
-        if new and new != old:
-            break
-        time.sleep(1)
-    if not new or new == old:
-        # easl's resume runs the tile's command through zsh; where that finds no omp (2026-10-07)
-        # the agent is gone and its tile sits at a shell: say how to bring it back.
-        row["agent_lost"] = True
-        flags = [f"--model={a['model']}"] * bool(a.get("model")) + [f"--thinking={a['thinking']}"] * bool(a.get("thinking"))
-        cmd = " ".join(shlex.quote(x) for x in [OMP, *flags, f"--resume={row['session']}"])
-        return f"failed: the tile's omp did not come back with a new pid; to resume it, run in the tile: {cmd}"
-    row["new_pid"] = new
-    time.sleep(20)
-    row["mem_after_mb"] = mem_mb(new)
-    now_session = None
-    for _ in range(30):
-        now_session = tile_session(cli, tile)
-        if now_session:
-            break
-        time.sleep(2)
-    row["session_unchanged"] = now_session == row["session"]
-    row["memory_dropped"] = (row["mem_after_mb"] or 0) < (row["mem_before_mb"] or 0)
-    # A tile whose props.agent.sessionPath went missing (easl 0.2.2) or changed may come back on a
-    # fresh session at its next resume: the host's other restarts stop (session_lost).
-    row["session_lost"] = not row["session_unchanged"]
-    row["ext_check"] = extension_problem(new, a, a.get("model")) or "ok"
-    if row["ext_check"] != "ok":
-        return f"restarted, but extension check failed: {row['ext_check']}"
-    if not row["session_unchanged"]:
-        reported = f"session {now_session}" if now_session else "no props.agent.sessionPath"
-        return f"restarted, but easl reports {reported}; its session before the restart: {row['session']}"
-    return "restarted"
+    """Non-forced resume is easl's atomic gate for pending prompts/messages too."""
+    row["mem_before_mb"] = mem_mb(row["pid"])
+    easl(a["cli"], "agent.restart", "--target", a["tile"], "--mode", "resume", timeout=120)
+    deadline = time.time() + VERIFY_S
+    now, session = {}, None
+    problem = None
+    try:
+        while time.time() < deadline:
+            now = tile_get(a["cli"], a["tile"], timeout=deadline - time.time()) or {}
+            if time.time() >= deadline:
+                break
+            session = tile_session(a["cli"], a["tile"], timeout=deadline - time.time())
+            new, proto = now.get("pid"), now.get("protocol")
+            if (time.time() <= deadline and new and new != row["pid"] and session == row["session"]
+                    and isinstance(proto, (int, float)) and proto >= 1 and now.get("model") == a["model"]):
+                row.update(new_pid=new, session_unchanged=True, mem_after_mb=mem_mb(new), action="restarted")
+                return
+            time.sleep(min(2, max(0, deadline - time.time())))
+    except Exception as e:
+        problem = f"resume verification failed: {e}"
+    problem = problem or f"resume not verified within {VERIFY_S} s: pid {now.get('pid')!r}, session {session!r}, protocol {now.get('protocol')!r}, model {now.get('model')!r}"
+    row["verification_failure"] = problem
+    raise RuntimeError(f"{problem}; original session: {row['session']}")
 
 
-def extensions_fingerprint():
-    """sha256 over the names and (resolved) contents of ~/.omp/agent/extensions/*."""
-    h = hashlib.sha256()
-    d = os.path.join(HOME, ".omp", "agent", "extensions")
-    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-        p = os.path.join(d, name)
-        h.update(name.encode() + b"\0")
-        try:
-            with open(p, "rb") as f:
-                h.update(hashlib.sha256(f.read()).digest())
-        except OSError:
-            h.update(b"<unreadable>")
-    return h.hexdigest()
-
-
-def extensions_mtime():
-    """Newest change under ~/.omp/agent/extensions (link or target); omp loads extensions
-    only at start, so a session older than this runs without the change."""
-    newest = 0
-    d = os.path.join(HOME, ".omp", "agent", "extensions")
-    for name in os.listdir(d) if os.path.isdir(d) else []:
-        p = os.path.join(d, name)
-        newest = max(newest, os.lstat(p).st_mtime)
-        if os.path.exists(p):
-            newest = max(newest, os.stat(p).st_mtime)
-    return newest
-
-
-def restart_services(services, installed, dry, blocked, pending, errors):
-    """omp services under launchd (home: auth broker + gateway; deckbox omp in broker mode
-    depends on them) keep running the binary they started with. Restart each through
-    launchd when its omp is older than the installed one (after this job's upgrade or a
-    manual one), then wait for its health URL (and the broker's reported version)."""
-    acts, procs = [], ps_table()
+def restart_services(services, installed, dry, pending, res):
+    procs = ps_table()
     for svc in services:
         pids = [p for p, i in procs.items() if svc["match"] in i["cmd"] and is_agent_omp(i["cmd"])]
-        older = []
-        for p in pids:
-            o, v = running_version(p, procs[p]["age_s"], installed)
-            if o:
-                older.append(f"{p} v{v or 'older'}")
-        act = {"kind": "service", "label": svc["label"], "pids": pids, "older": older, "dry_run": dry}
-        acts.append(act)
-        if not pids:
-            act["action"] = "not running (not started by this job)"
-            errors.append(f"service {svc['label']}: no running omp matches {svc['match']!r}")
-        elif not older and not (dry and pending):
-            act["action"] = "none: current"
-        elif blocked:
-            act["action"] = f"skip: {blocked}"
-        elif dry:
-            act["action"] = "would restart (launchctl kickstart -k)" + (" after the install" if pending else "")
-        else:
-            r = sh(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{svc['label']}"], timeout=60)
-            status, body = 0, ""
-            for _ in range(30):
-                time.sleep(2)
-                h = sh(["curl", "-s", "-m", "5", "-w", "\n%{http_code}", svc["health"]], timeout=15).stdout
-                body, _, code = h.rpartition("\n")
-                status = int(code) if code.isdigit() else 0
-                if status == 200:
-                    break
-            reported = None
-            try:
-                reported = json.loads(body).get("version")
-            except (ValueError, AttributeError):
-                pass
-            ok = r.returncode == 0 and status == 200 and reported in (None, installed)
-            act.update(action="restarted" if ok else "restart failed", health=status, version=reported,
-                       new_pids=[p for p, i in ps_table().items() if svc["match"] in i["cmd"] and is_agent_omp(i["cmd"])])
-            if not ok:
-                errors.append(f"service {svc['label']}: kickstart rc {r.returncode}, health {status}, version {reported}")
-    return acts
-
-
-def idle_gate(a, pid, procs, mine, blocked, recheck=True, session=None):
-    """(skip reason or None, live children or subagents) for restarting the omp `pid` in herdr
-    agent or easl tile `a` (a["tile"]) on `session`. Every restart (hourly run, roll, migrate)
-    passes the same gates: the rollout not stopped, idle/done, not focused by
-    Tim (he may start typing; /exit would race his draft), not running this job, no live child
-    work (timers, jobs, servers, ssh: background jobs show as idle and /exit would kill them),
-    no in-process subagent running, nothing typed in its editor; then the status is read once
-    more right before acting. Tiles also: a lifecycle easl only restored after an app restart is
-    unconfirmed, a `done` Tim hasn't seen keeps its needs-you marker, and an unreported focus or
-    draft counts as present."""
-    pane, status, tile = a["pane_id"], a.get("agent_status"), a.get("tile")
-    lc = a.get("lifecycle") or {}
-    if blocked:
-        return f"skip: {blocked}", None
-    if tile and lc.get("restored"):
-        return "skip: lifecycle restored after an app restart, unconfirmed", None
-    if status not in ("idle", "done"):
-        return f"skip: {status}", None
-    if tile and status == "done" and lc.get("seen") is False:
-        return "skip: done, answer not seen by Tim", None
-    if a.get("focused"):
-        return "skip: focused by Tim", None
-    if tile and a.get("focused") is None:
-        return "skip: focus unknown (easl reports none)", None
-    if pid in mine:
-        return "skip: runs this job", None
-    busy = live_children(pid, procs)
-    if busy:
-        return "skip: live child work", busy[:4]
-    subs = running_subagents(pid, session)
-    if subs:
-        return "skip: subagent running", subs[:4]
-    if tile:
-        if a.get("draft") is None:
-            return "skip: draft unknown (easl reports none)", None
-        if a.get("draft"):
-            return "skip: text waiting in the editor", None
-    elif not editor_empty(pane):
-        return "skip: text waiting in the editor", None
-    if recheck:
-        if tile:
-            now = tile_get(a["cli"], pane)
-            status_now = (now or {}).get("agent_status") or "gone"
-        else:
-            _s, status_now = agent_session(pane)
-        if status_now not in ("idle", "done"):
-            return f"skip: {status_now}", None
-    return None, None
+        act = {"kind": "service", "label": svc["label"], "pids": pids}
+        res["actions"].append(act)
+        try:
+            if not pids:
+                raise RuntimeError("no running omp matches service")
+            if not any(running_version(p, procs[p]["age_s"], installed)[0] for p in pids) and not (dry and pending):
+                act["action"] = "none: current"
+            elif dry:
+                act["action"] = "would restart"
+            else:
+                sh(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{svc['label']}"], timeout=60, check=True)
+                for _ in range(30):
+                    time.sleep(2)
+                    h = sh(["curl", "-s", "-m", "5", "-w", "\n%{http_code}", svc["health"]], timeout=15).stdout
+                    body, _, code = h.rpartition("\n")
+                    try:
+                        reported = json.loads(body).get("version")
+                    except (ValueError, AttributeError):
+                        reported = None
+                    if code == "200" and reported in (None, installed):
+                        act["action"] = "restarted"
+                        break
+                else:
+                    raise RuntimeError("service health/version not verified within 60 s")
+        except Exception as e:
+            act["action"] = f"failed: {e}"
+            res["errors"].append(f"service {svc['label']}: {e}")
+            return
 
 
 def host_main(params):
-    dry, target, pol = params["dry_run"], params["target"], params["policy"]
-    only, blocked = params.get("only_pane"), params.get("blocked")
-    roll = params.get("roll")  # restart-only pass for panes that predate an extension change
-    res = {"host": params["host"], "actions": [], "panes": [], "unmanaged": [], "errors": [], "ext_failures": []}
-    acts = res["actions"]
-    installed = omp_version()
-    res["installed_before"] = installed
-    if not installed:
-        res["errors"].append(f"{OMP} --version failed")
-        print("RESULT " + json.dumps(res))
-        return
-    kind = "npm" if npm_install() else "binary"
-    pending = not roll and vtuple(installed) < vtuple(target)
-    if pending:
-        act = {"kind": "install", "from": installed, "to": target, "via": kind, "dry_run": dry}
-        try:
-            if blocked:
-                act.update(kind="skip-install", reason=blocked)
-            elif kind == "binary":
-                tmp = stage_binary(target)
-                if dry:
-                    os.remove(tmp)
-                    act["staged"] = "downloaded, sha256 ok, --version ok; discarded (dry run)"
-                else:
-                    act["bak"] = os.path.basename(swap_binary(tmp))
-            elif not dry:
-                sh([os.path.join(BUN_BIN, "bun"), "install", "-g", f"{NPM_PKG}@{target}"], timeout=1200, check=True)
-        except Exception as e:
-            act.update(kind="install-failed", error=str(e)[:300])
-            res["errors"].append(f"install {target}: {str(e)[:200]}")
-        acts.append(act)
-    elif not roll and vtuple(installed) > vtuple(target):
-        acts.append({"kind": "ahead", "installed": installed, "target": target, "note": "not downgraded"})
-    res["installed_after"] = omp_version()
-    if not roll:
-        acts.extend(restart_services(params.get("services") or [], res["installed_after"], dry, blocked, pending,
-                                     res["errors"]))
-    if kind == "binary" and not roll:
-        acts.extend(prune_baks(dry))
-    ext_fp = extensions_fingerprint()
-    pin = (pol.get("extensions_pins") or {}).get(ext_fp)
-    # An acknowledged no-restart change counts from the last change that needed one.
-    ext_mtime = pin["since"] if pin else extensions_mtime()
-    res["extensions"] = {"fingerprint": ext_fp[:12], "since": int(ext_mtime), "pinned": bool(pin)}
-    current = target if (dry and pending) else res["installed_after"]
-
-    procs = ps_table()
-    mine = ancestors(procs)
-    managed = set()
-    halt = None  # set when a restart lost its agent or failed its extension check: no more restarts here
-    easl_omp = "unchecked"  # None once zsh in easl's environment is known to find omp, else why not
-    agents = []
-    if params.get("manage_panes", True) and os.path.exists(HERDR):
-        agents = herdr("agent", "list").get("result", {}).get("agents", [])
-    tiles = []
-    if params.get("easl"):  # manage_panes is herdr's: a host can manage tiles and not panes
-        tiles, err = tile_agents(params["easl"]["cli"])
-        if err:
-            res["errors"].append(f"easl agent.list: {err[:200]}")
-            tiles = []
-    for a in agents + tiles:
-        tile = a.get("tile")
-        if not tile and a.get("agent") != "omp":
-            continue
-        pane, name, status = a["pane_id"], a.get("name"), a.get("agent_status")
-        if tile:
-            pid, argv = a.get("pid"), None
-            session = tile_session(a["cli"], pane) if pid else None
-        else:
-            session = (a.get("agent_session") or {}).get("value")
-            pid, argv = pane_omp(pane)
-        row = {"pane": pane, "name": name, "status": status, "session": session, "pid": pid}
-        if tile:
-            row.update(tile=True, board=a.get("board"))
-        res["panes"].append(row)
-        if not pid:
-            row["action"] = "none: easl reports no omp pid" if tile else "none: no omp in the pane's foreground"
-            continue
-        managed.add(pid)
-        age = procs.get(pid, {}).get("age_s", 0)
-        rss = procs.get(pid, {}).get("rss_mb")
-        older, ver = running_version(pid, age, res["installed_after"])
-        older = older or (dry and pending)  # after the pending install, every omp is older
-        smb = round(os.path.getsize(session) / 1048576) if session and os.path.exists(session) else None
-        row.update(version=ver, uptime_h=round(age / 3600, 1), session_mb=smb, rss_mb=rss,
-                   mem_mb=None if roll else mem_mb(pid))
-        triggers = []
-        if older:
-            triggers.append(f"binary {ver or 'older'} < {current}")
-        if smb and smb > pol["max_session_mb"]:
-            triggers.append(f"session {smb} MB")
-        if rss and rss > pol["max_rss_mb"]:
-            triggers.append(f"rss {rss} MB")
-        if age > pol["max_uptime_hours"] * 3600:
-            triggers.append(f"up {row['uptime_h']} h")
-        if ext_mtime and time.time() - age < ext_mtime - 60:
-            triggers.append("extensions changed")
-        if roll:
-            triggers = [t for t in triggers if t == "extensions changed"]
-        row["triggers"] = triggers
-        seat = (pane in pol["report_only"]["panes"] or name in pol["report_only"]["names"]) \
-            and pane not in pol["opt_in"] and name not in pol["opt_in"]
-        if seat:
-            row["action"] = "report: seat/front door (owner decides)"
-        elif tile and not name:
-            # An unnamed tile is Tim's own session: never rotated or restarted here; the binary
-            # upgrade reaches it when Tim restarts omp himself (meta 2026-10-08).
-            row["action"] = "skip: Tim's tile"
-        elif pane in pol["skip_panes"]:
-            row["action"] = "skip: config skip_panes"
-        elif not triggers:
-            row["action"] = "none"
-        elif only and pane != only:
-            row["action"] = "skip: not selected (--only-pane)"
-        elif halt:
-            row["action"] = f"skip: {halt}"
-        elif not session or not os.path.isfile(session):
-            row["action"] = "skip: no session file on disk to resume"
-        else:
-            skip, busy = idle_gate(a, pid, procs, mine, blocked, recheck=not dry, session=session)
-            if busy:
-                row["children"] = busy
-            if tile and not skip:
-                if easl_omp == "unchecked":
-                    easl_omp = easl_finds_omp(a["cli"], procs)
-                    if easl_omp:
-                        res["errors"].append(f"easl tile restarts held: {easl_omp}")
-                if easl_omp:
-                    skip = f"skip: {easl_omp}"
-            if skip:
-                row["action"] = skip
-            elif dry:
-                row["action"] = "would restart"
+    dry, target = params["dry_run"], params["target"]
+    res = {"host": params["host"], "actions": [], "tiles": [], "unmanaged": [], "errors": []}
+    try:
+        installed = res["installed_before"] = omp_version()
+        pending = vtuple(installed) < vtuple(target)
+        if pending:
+            act = {"kind": "install", "from": installed, "to": target, "dry_run": dry}
+            res["actions"].append(act)
+            if os.path.realpath(OMP).endswith(".js"):
+                if not dry:
+                    sh([os.path.join(BUN_BIN, "bun"), "install", "-g", f"{NPM_PKG}@{target}"], timeout=1200, check=True)
             else:
+                tmp = stage_binary(target)
                 try:
-                    row["action"] = restart_tile(row, a) if tile else restart_pane(row, argv)
-                except Exception as e:
-                    row["action"] = f"failed: {str(e)[:200]}"
-                if row.get("agent_lost"):
-                    halt = f"restarting {name or pane} lost its agent on this host"
-                if row.get("session_lost"):
-                    halt = f"restarting {name or pane} lost its session path on this host"
-                if row.get("ext_check", "ok") != "ok":
-                    halt = f"extension check failed after restarting {name or pane} on this host"
-                    res["ext_failures"].append({"pane": pane, "name": name, "version": res["installed_after"],
-                                                "problem": row["ext_check"]})
-                if row["action"].startswith(("failed", "restarted, but")):
-                    res["errors"].append(f"{pane}: {row['action']}")
-        acts.append({"kind": "pane", **{k: v for k, v in row.items() if k != "session"},
-                     "session": os.path.basename(session or "")})
+                    if not dry:
+                        act["bak"] = os.path.basename(swap_binary(tmp))
+                finally:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+            if not dry:
+                installed = omp_version()
+                if installed != target:
+                    raise RuntimeError(f"installed {installed}, expected {target}")
+        elif vtuple(installed) > vtuple(target):
+            res["actions"].append({"kind": "ahead", "installed": installed, "target": target, "note": "not downgraded"})
+        res["installed_after"] = installed
+        restart_services(params.get("services") or [], installed, dry, pending, res)
+        if res["errors"]:
+            return res
+        procs = ps_table()
+        ez = params.get("easl")
+        tiles = tile_agents(ez["cli"]) if ez else []
+        checked_path = False
+        for a in tiles:
+            row = {"tile": a["tile"], "name": a.get("name"), "pid": a.get("pid"), "status": (a.get("lifecycle") or {}).get("state")}
+            res["tiles"].append(row)
+            res["actions"].append({"kind": "tile", **row})
+            act = res["actions"][-1]
+            try:
+                if not row["pid"]:
+                    row["action"] = "none: easl reports no omp pid"
+                    continue
+                info = procs.get(row["pid"])
+                if not info or not is_agent_omp(info["cmd"]):
+                    row["action"] = "skip: omp process not confirmed"
+                    continue
+                older, ver = running_version(row["pid"], info["age_s"], installed)
+                rss = info.get("rss_mb") or 0
+                triggers = ([f"binary {ver or 'older'} < {target if dry and pending else installed}"] if older or dry and pending else [])
+                if rss > MAX_RSS_MB:
+                    triggers.append(f"rss {rss:g} MB")
+                row.update(version=ver, rss_mb=rss, triggers=triggers)
+                if not a.get("name"):
+                    row["action"] = "skip: Tim's tile"
+                elif a["name"] in params["report_only"]["names"]:
+                    row["action"] = "report: seat/front door (owner decides)"
+                elif not triggers:
+                    row["action"] = "none"
+                else:
+                    session = row["session"] = tile_session(a["cli"], a["tile"])
+                    if not session or not session.endswith(".jsonl") or not os.path.isfile(session):
+                        row["action"] = "skip: no session file on disk to resume"
+                        continue
+                    skip = idle_gate(a, procs, session)
+                    if not skip and not a.get("model"):
+                        skip = "model unknown"
+                    if skip:
+                        row["action"] = f"skip: {skip}"
+                        continue
+                    if not checked_path:
+                        easl_finds_omp(a["cli"], procs)
+                        checked_path = True
+                    now = tile_get(a["cli"], a["tile"])
+                    if (not now or now.get("pid") != a["pid"] or now.get("name") != a["name"]
+                            or now.get("model") != a["model"] or tile_session(a["cli"], a["tile"]) != session):
+                        row["action"] = "skip: tile changed since listing"
+                        continue
+                    skip = idle_gate(now, ps_table(), session)
+                    if skip:
+                        row["action"] = f"skip: {skip}"
+                    elif dry:
+                        row["action"] = "would restart"
+                    else:
+                        restart_tile(row, now)
+            except Exception as e:
+                row["action"] = f"failed: {e}"
+                res["errors"].append(f"{a['tile']}: {e}")
+                break
+            finally:
+                act.update(row)
+        managed = {a.get("pid") for a in tiles}
+        res["unmanaged"] = [{"pid": p, "action": "report only (outside easl)"}
+                            for p, i in procs.items() if p not in managed and is_agent_omp(i["cmd"])]
+    except Exception as e:
+        res["errors"].append(str(e))
+    return res
 
-    if roll:  # restart-only pass: omp outside herdr is reported by the daily run
-        print("RESULT " + json.dumps(res))
-        return
-
-    for pid, info in procs.items():
-        if pid in managed or not is_agent_omp(info["cmd"]):
-            continue
-        older, ver = running_version(pid, info["age_s"], res["installed_after"])
-        sess = open_sessions(pid)
-        smb = round(os.path.getsize(sess[0]) / 1048576) if sess else None
-        service = re.search(r"\s(auth-broker|auth-gateway|\S+)\s+serve\b", info["cmd"]) is not None
-        row = {"pid": pid, "cmd": info["cmd"][:90], "version": ver, "older": older or (dry and pending),
-               "uptime_h": round(info["age_s"] / 3600, 1), "session_mb": smb, "mem_mb": mem_mb(pid),
-               "session": os.path.basename(sess[0]) if sess else None, "service": service,
-               "action": "report only (outside herdr)"}
-        res["unmanaged"].append(row)
-        acts.append({"kind": "unmanaged", **row})
-    print("RESULT " + json.dumps(res))
-
-
-# ---------------------------------------------------------------- orchestrator (home)
 
 def curl_json(url):
-    # Many agents share this IP, so unauthenticated GitHub API calls hit the 60/h limit
-    # (403); go through the machine's authenticated gh when it works.
     if url.startswith("https://api.github.com/"):
         r = sh(["gh", "api", url[len("https://api.github.com/"):]], timeout=180)
         if r.returncode == 0:
             return json.loads(r.stdout)
-    hdr = ["-H", "Accept: application/vnd.github+json"] if "api.github.com" in url else []
-    return json.loads(sh(["curl", "-fsSL", "--retry", "3", *hdr, url], timeout=180, check=True).stdout)
+    return json.loads(sh(["curl", "-fsSL", "--retry", "3", url], timeout=180, check=True).stdout)
 
 
 def resolve_target(min_age_h, blocked=()):
-    """The release the policy picks: the newest one published on GitHub (with the binaries) and
-    npm at least min_age_h ago and not in `blocked`; "eligible" lists every such release (a host
-    under a hold takes the newest one below it)."""
-    cutoff = utcnow() - dt.timedelta(hours=min_age_h)
+    cutoff = utcnow() - dt.timedelta(hours=max(3, min_age_h))
     rels = curl_json(f"https://api.github.com/repos/{REPO}/releases?per_page=30")
     npm = curl_json(f"https://registry.npmjs.org/{NPM_PKG}")
-    tags = curl_json(f"https://api.github.com/repos/{REPO}/tags?per_page=15")
-    released = {r["tag_name"].lstrip("v"): r for r in rels if not r["draft"] and not r["prerelease"]}
     need = {"omp-darwin-arm64", "omp-linux-x64", "SHA256SUMS.txt"}
-    cands = [v for v, r in released.items()
-             if v not in blocked and parse_ts(r["published_at"]) <= cutoff and v in npm.get("versions", {})
-             and v in npm.get("time", {}) and parse_ts(npm["time"][v]) <= cutoff
-             and need <= {x["name"] for x in r.get("assets", [])}]
-    if not cands:
-        raise RuntimeError(f"no release outside blocked_versions is on both GitHub and npm and {min_age_h} h old")
-    target = max(cands, key=vtuple)
-    info = {"target": target, "published": released[target]["published_at"],
-            "eligible": sorted(cands, key=vtuple),
-            "too_young": sorted((v for v in released if vtuple(v) > vtuple(target) and v not in blocked), key=vtuple),
-            "blocked": sorted(blocked, key=vtuple),
-            "unpublished_tags": [t["name"] for t in tags
-                                 if vtuple(t["name"]) > vtuple(target) and t["name"].lstrip("v") not in released],
-            "npm_latest": npm.get("dist-tags", {}).get("latest")}
-    return info
+    eligible = [r["tag_name"].lstrip("v") for r in rels
+                if not r["draft"] and not r["prerelease"] and r["tag_name"].lstrip("v") not in blocked
+                and parse_ts(r["published_at"]) <= cutoff and need <= {a["name"] for a in r.get("assets", [])}
+                and r["tag_name"].lstrip("v") in npm.get("versions", {})
+                and r["tag_name"].lstrip("v") in npm.get("time", {})
+                and parse_ts(npm["time"][r["tag_name"].lstrip("v")]) <= cutoff]
+    if not eligible:
+        raise RuntimeError("no unblocked release is on both GitHub and npm and at least 3 h old")
+    return {"target": max(eligible, key=vtuple), "eligible": sorted(eligible, key=vtuple), "blocked": sorted(blocked, key=vtuple)}
 
 
 def host_target(tinfo, hc):
-    """The release this host goes to: the run's target or, while the host's config holds it below
-    a version ("hold_below"), the newest eligible release below that one ("0" when none is)."""
     hold = hc.get("hold_below")
-    if not hold or vtuple(tinfo["target"]) < vtuple(hold):
-        return tinfo["target"]
-    below = [v for v in tinfo.get("eligible", []) if vtuple(v) < vtuple(hold)]
+    below = [v for v in tinfo["eligible"] if not hold or vtuple(v) < vtuple(hold)]
     return max(below, key=vtuple) if below else "0"
 
 
-def update_config(change):
-    """Apply `change` to the config as written (defaults not filled in) and save it atomically."""
-    with open(CONFIG) as f:
-        raw = json.load(f)
-    change(raw)
+def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
     with open(CONFIG + ".tmp", "w") as f:
-        json.dump(raw, f, indent=1)
+        json.dump(cfg, f, indent=1)
     os.replace(CONFIG + ".tmp", CONFIG)
 
 
-def notify(addrs, text):
-    """Tell agents (name@board, name@host) through agent-msg: their omp inbox or easl tile, never
-    typed into a terminal. Each attempt is one actions.jsonl row."""
-    for addr in addrs:
-        try:
-            r = sh([AGENT_MSG, "--from", "shepherd", addr, text], timeout=90)
-            rc, err = r.returncode, (r.stderr or "").strip()[:200]
-        except (OSError, subprocess.TimeoutExpired) as e:
-            rc, err = None, str(e)[:200]
-        with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
-            f.write(json.dumps({"ts": stamp(), "kind": "notify", "to": addr, "rc": rc, "error": err,
-                                "text": text}) + "\n")
-
-
-def last_versions():
-    """{host: the omp version it had at the end of the last run}, from last-run.json."""
+def load_config():
     try:
-        with open(os.path.join(STATE, "last-run.json")) as f:
-            return {r["host"]: r.get("installed_after") for r in json.load(f)["results"]}
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
-
-
-def stop_rollout(cfg, name, r, dry):
-    """A restart on host `name` failed its extension check: why the rest of the run only reports.
-    When `name` runs a version a later host in the order lacks (this run installed it, or a later
-    host had an older one at the last run), it is the canary's finding: the version goes into
-    blocked_versions with the reason (delete the entry to lift it), and the agents in `notify`
-    are told at once, once per block."""
-    v, f = r.get("installed_after"), r["ext_failures"][0]
-    why = f"extension check failed on {name} omp {v} after restarting {f.get('name') or f['pane']}: {f['problem']}"
-    order = cfg["order"]
-    later = order[order.index(name) + 1:] if name in order else []
-    known = last_versions()
-    new = r.get("installed_before") != v or any(vtuple(known.get(h) or "0") < vtuple(v) for h in later)
-    if v and new and not dry and v not in (cfg.get("blocked_versions") or {}):
-        def block(raw):
-            raw.setdefault("blocked_versions", {})[v] = {"reason": why, "host": name, "at": stamp()}
-        update_config(block)
-        notify(cfg.get("notify") or [],
-               f"omp-update: omp {v} is blocked: {why}. The rollout stopped there; the other hosts keep their "
-               f"version and no host takes {v}. To lift: delete blocked_versions[\"{v}\"] in {CONFIG}.")
-    return why
+        with open(CONFIG) as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        raw = {}
+    cfg = {k: raw.get(k, v) for k, v in DEFAULT_CONFIG.items()}
+    cfg["hosts"] = {h: {k: v for k, v in raw.get("hosts", {}).get(h, defaults).items() if k in HOST_KEYS}
+                    for h, defaults in DEFAULT_CONFIG["hosts"].items()}
+    cfg["report_only"] = {"names": sorted(set(cfg["report_only"].get("names", [])) | {"lindy-seat"})}
+    return cfg
 
 
 def run_host(name, hc, params):
@@ -1078,443 +569,103 @@ def run_host(name, hc, params):
                            capture_output=True, text=True, timeout=5400, env=ENV)
     line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("RESULT ")), None)
     if not line:
-        return {"host": name, "actions": [], "panes": [], "unmanaged": [],
-                "errors": [f"host run failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}"]}
-    return json.loads(line[7:])
+        raise RuntimeError(f"host run failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}")
+    res = json.loads(line[7:])
+    if r.returncode and not res["errors"]:
+        res["errors"].append(f"host exited {r.returncode}")
+    return res
 
 
-def short_pane(p):
-    return p.split(":")[-1]
-
-
-def summary_line(when, tinfo, results, stop=None):
-    hosts = []
-    for r in results:
-        b, a = r.get("installed_before"), r.get("installed_after")
-        hosts.append(f"{r['host']} {b}" + (f"->{a}" if a and a != b else " =")
-                     + (f" (held <{r['hold']['below']})" if r.get("hold") else ""))
-    restarted, left = [], {}
-    for r in results:
-        for p in r["panes"]:
-            act = p.get("action", "")
-            if act.startswith("restarted"):
-                restarted.append(f"{short_pane(p['pane'])} {p.get('mem_before_mb')}->{p.get('mem_after_mb')} MB")
-            elif act.startswith("skip:") and p.get("triggers"):
-                left[act[6:]] = left.get(act[6:], 0) + 1
-    seats = [f"{r['host']} {u['pid']} {u['version'] or 'older'} up {u['uptime_h']}h"
-             + (f" {u['session_mb']} MB" if u.get("session_mb") else "")
-             for r in results for u in r["unmanaged"] if not u.get("service")]
-    seats += [f"{r['host']} {short_pane(p['pane'])} {p.get('version') or 'older'}"
-              for r in results for p in r["panes"] if p.get("action", "").startswith("report")]
-    errs = [e for r in results for e in r["errors"]]
-    left_s = ", ".join(f"{k} {v}" for k, v in left.items()) or "none"
-    svc = [f"{a['label'].rsplit('.', 1)[-1]} {a['action']}" for r in results for a in r["actions"]
-           if a.get("kind") == "service" and a.get("action", "").startswith(("restarted", "restart failed"))]
-    skipped = tinfo["unpublished_tags"] + tinfo["too_young"] + [f"{v} blocked" for v in tinfo.get("blocked") or []]
-    return (f"- {when} omp-update: target {tinfo['target']}"
-            + (f" (skipped {', '.join(skipped)})" if skipped else "")
-            + f"; {', '.join(hosts)}; restarted {len(restarted)}"
-            + (f" ({'; '.join(restarted)})" if restarted else "")
-            + f"; due but left: {left_s}; seats/outside herdr: {len(seats)}"
-            + (f" ({'; '.join(seats[:4])})" if seats else "")
-            + (f"; services restarted {', '.join(svc)}" if svc else "")
-            + (f"; ROLLOUT STOPPED ({stop[:160]})" if stop else "")
-            + f"; errors {len(errs)}" + (f" ({'; '.join(e[:80] for e in errs[:2])})" if errs else ""))
-
-
-def checkpoint_line(line, keep=14):
-    head = "## omp update job (hourly, net.waldin.omp-update; log ~/.local/state/omp-update/actions.jsonl)"
-    try:
-        with open(CHECKPOINT) as f:
-            text = f.read()
-    except OSError:
-        return
-    old = head.replace("(hourly,", "(daily,")  # the section's name while the job ran daily
-    lines = [head if ln == old else ln for ln in text.rstrip("\n").split("\n")]
-    if head not in lines:
-        lines += ["", head]
-    i = lines.index(head)
-    j = i + 1
-    while j < len(lines) and not lines[j].startswith("## "):
-        j += 1
-    body = [ln for ln in lines[i + 1:j] if ln.startswith("- ")] + [line]
-    lines[i + 1:j] = body[-keep:]
-    tmp = CHECKPOINT + ".omp-update.tmp"
-    with open(tmp, "w") as f:
-        f.write("\n".join(lines) + "\n")
-    os.replace(tmp, CHECKPOINT)
-
-
-def load_config():
-    if not os.path.exists(CONFIG):
-        os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
-        with open(CONFIG, "w") as f:
-            json.dump(DEFAULT_CONFIG, f, indent=1)
-    with open(CONFIG) as f:
-        cfg = json.load(f)
-    return {**DEFAULT_CONFIG, **cfg}
-
-
-def print_report(tinfo, results, dry, stop=None):
-    print(f"target {tinfo['target']} (GitHub {tinfo['published']}, npm latest {tinfo['npm_latest']}; "
-          f"too young {tinfo['too_young'] or '-'}; tags without release {tinfo['unpublished_tags'] or '-'}; "
-          f"blocked {tinfo.get('blocked') or '-'})" + ("  [DRY RUN]" if dry else ""))
-    for r in results:
-        hold = r.get("hold")
-        print(f"\n== {r['host']}: installed {r.get('installed_before')} -> {r.get('installed_after')} "
-              f"(target {r.get('target')}" + (f"; held below {hold['below']}: {hold.get('note')}" if hold else "") + ")")
-        for a in r["actions"]:
-            if a["kind"] not in ("pane", "unmanaged"):
-                print(f"   {a['kind']}: " + ", ".join(f"{k}={v}" for k, v in a.items() if k != "kind"))
-        for p in r["panes"]:
-            extra = ""
-            if p.get("new_pid"):
-                extra = (f" | pid {p['pid']}->{p['new_pid']} mem {p.get('mem_before_mb')}->{p.get('mem_after_mb')} MB"
-                         f" session_unchanged={p.get('session_unchanged')} via {p.get('mechanism')}"
-                         f" ext_check={p.get('ext_check')}")
-            if p.get("children"):
-                extra += f" | children: {p['children'][:2]}"
-            print(f"   {p['pane']:8} {str(p.get('name') or '-'):13} {str(p.get('status')):8} "
-                  f"v{p.get('version') or '?':8} up {p.get('uptime_h', '?'):>6}h sess {str(p.get('session_mb')):>4} MB "
-                  f"rss {str(p.get('rss_mb')):>5} MB mem {str(p.get('mem_mb')):>5} MB  "
-                  f"triggers {p.get('triggers') or '-'} -> {p.get('action')}{extra}")
-        for u in r["unmanaged"]:
-            print(f"   outside herdr: pid {u['pid']} v{u['version'] or 'older'} up {u['uptime_h']}h "
-                  f"sess {u['session_mb']} MB mem {u['mem_mb']} MB -> {u['action']} | {u['cmd'][:60]}")
-        for e in r["errors"]:
-            print(f"   ERROR {e}")
-    if stop:
-        print(f"\nROLLOUT STOPPED: {stop}")
-
-
-def take_lock(wait_s):
-    """run.lock serializes the hourly run and roll passes, so two never restart one pane."""
+def take_lock():
     os.makedirs(STATE, exist_ok=True)
     lock = open(os.path.join(STATE, "run.lock"), "a")
-    deadline = time.time() + wait_s
+    deadline = time.time() + 1800
     while True:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return lock
         except BlockingIOError:
             if time.time() >= deadline:
-                return None
+                lock.close()
+                raise RuntimeError("run.lock held for 30 min")
             time.sleep(5)
 
 
-def main_roll(args):
-    """Restart every herdr omp pane started before the newest extension change, each at its
-    next idle/done moment (no live child work, empty editor, not focused),
-    one pass per minute until none is left or --hours passes. Session-preserving: same
-    restart as the daily run (/exit, then herdr agent start ... --resume=<session>)."""
-    cfg = load_config()
-    policy = {k: cfg[k] for k in ("max_session_mb", "max_uptime_hours", "max_rss_mb", "report_only", "opt_in",
-                                  "skip_panes", "extensions_pins")}
-    policy["opt_in"] = list(policy["opt_in"]) + (args.include.split(",") if args.include else [])
-    hosts = args.hosts.split(",")
-    deadline, n, left = time.time() + args.hours * 3600, 0, {}
-    log = open(os.path.join(STATE, "roll.log"), "a", buffering=1)
-    log.write(f"{stamp()} roll start: hosts {hosts}, include {args.include or '-'}, until {args.hours} h\n")
-    while time.time() < deadline:
-        lock = take_lock(60)
-        # Re-read each pass: an `ext-ack` made while the roll runs must apply at once.
-        policy["extensions_pins"] = load_config().get("extensions_pins", {})
-        if lock:
-            for name in hosts:
-                if name != "home" and n % 5 and name in left and not left[name]:
-                    continue  # remote with nothing left: re-check every 5th pass only
-                hc = cfg["hosts"][name]
-                r = run_host(name, hc, {"host": name, "target": "0", "dry_run": args.dry_run, "policy": policy,
-                                        "roll": True,
-                                        "manage_panes": hc.get("manage_panes", True),
-                                        "easl": host_easl(hc)})
-                left[name] = []
-                for p in r["panes"]:
-                    act = p.get("action", "")
-                    if not p.get("triggers") or act.startswith("report"):
-                        continue
-                    if act.startswith(("restarted", "failed")) or args.dry_run:
-                        entry = {"ts": stamp(), "host": name, "kind": "roll", "dry_run": args.dry_run,
-                                 **{k: v for k, v in p.items() if k != "session"}}
-                        with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
-                            f.write(json.dumps(entry) + "\n")
-                        log.write(f"{stamp()} {name} {p.get('name')} {p['pane']}: {act}"
-                                  + (f" pid {p.get('pid')}->{p.get('new_pid')} mem {p.get('mem_before_mb')}->"
-                                     f"{p.get('mem_after_mb')} MB session_unchanged={p.get('session_unchanged')}"
-                                     if p.get("new_pid") else "") + "\n")
-                    if not act.startswith("restarted"):
-                        left[name].append(f"{p.get('name') or p['pane']} ({act})")
-                for e in r["errors"]:
-                    log.write(f"{stamp()} {name} ERROR {e}\n")
-            lock.close()
-        n += 1
-        remaining = [x for v in left.values() for x in v]
-        if n == 1 or n % 30 == 0:
-            log.write(f"{stamp()} pass {n}: waiting on {remaining or 'nothing'}\n")
-        if args.dry_run or (lock and not remaining):
-            break
-        time.sleep(60)
-    remaining = [x for v in left.values() for x in v]
-    line = (f"- {stamp()} omp-update roll (extensions changed; hosts {','.join(hosts)}): "
-            + (f"done after {n} pass(es)" if not remaining else f"stopped with {len(remaining)} left: {'; '.join(remaining)}"))
-    log.write(line[2:] + "\n")
-    if not args.dry_run:
-        checkpoint_line(line)
-
-
-def main_ext_ack(args):
-    """Pin each host's CURRENT extension contents to --since, so panes started after --since
-    count as up to date (the change since then needs no restart). Logged to actions.jsonl."""
-    cfg = load_config()
-    since = int(parse_ts(args.since).timestamp())
-    script = open(os.path.abspath(__file__)).read()
-    pins = cfg.setdefault("extensions_pins", {})
-    for name in args.hosts.split(","):
-        hc = cfg["hosts"][name]
-        if hc.get("ssh"):
-            r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", hc["ssh"],
-                                f"{hc.get('python', 'python3')} - ext-fp"], input=script,
-                               capture_output=True, text=True, timeout=120, env=ENV)
-        else:
-            r = subprocess.run([sys.executable, os.path.abspath(__file__), "ext-fp"],
-                               capture_output=True, text=True, timeout=120, env=ENV)
-        line = next((ln for ln in r.stdout.splitlines() if ln.startswith("EXTFP ")), None)
-        if not line:
-            sys.exit(f"ext-ack: no fingerprint from {name}: {(r.stderr or r.stdout).strip()[-200:]}")
-        fp = json.loads(line[6:])
-        if fp["mtime"] < since:
-            print(f"{name}: extensions unchanged since {args.since}; nothing to pin")
-            continue
-        pins[fp["fingerprint"]] = {"since": since, "note": args.note, "host": name, "acked": stamp()}
-        print(f"{name}: pinned {fp['fingerprint'][:12]} (changed {stamp(dt.datetime.fromtimestamp(fp['mtime'], dt.timezone.utc))}) "
-              f"-> counts from {args.since}")
-    with open(CONFIG + ".tmp", "w") as f:
-        json.dump(cfg, f, indent=1)
-    os.replace(CONFIG + ".tmp", CONFIG)
-    with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
-        f.write(json.dumps({"ts": stamp(), "kind": "ext-ack", "since": args.since, "note": args.note,
-                            "hosts": args.hosts}) + "\n")
-
-
-def drop_flags(flags, names):
-    """`flags` without each --name / -x flag in `names` and its value (`--x v` or `--x=v`)."""
-    out, skip = [], False
-    for x in flags:
-        if skip:
-            skip = False
-        elif x in names:
-            skip = True
-        elif not any(x.startswith(n + "=") for n in names if n.startswith("--")):
-            out.append(x)
-    return out
-
-
-def session_model(path):
-    """(model, thinking level) the session last recorded (its last model_change and
-    thinking_level_change entries), each None when absent or unreadable. omp writes them at
-    start and on every switch, so they name what the agent runs now, not the default role. The
-    thinking setting is the configured one when recorded (`auto` resolves per turn), else the level."""
-    model = thinking = None
-    try:
-        with open(path, errors="replace") as f:
-            for line in f:
-                if '"model_change"' not in line and '"thinking_level_change"' not in line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except ValueError:
-                    continue
-                if e.get("type") == "model_change" and e.get("model"):
-                    model = e["model"]
-                elif e.get("type") == "thinking_level_change" and (e.get("configured") or e.get("thinkingLevel")):
-                    thinking = e.get("configured") or e["thinkingLevel"]
-    except OSError:
-        pass
-    return model, thinking
-
-
-def main_migrate(args):
-    """`omp-update migrate <herdr agent>`: move that pane's omp session into an easl tile of
-    the same name on the board for --board, through idle_gate like any restart. /exit the
-    pane's omp, create a terminal tile running `omp <its flags> --resume=<session>` in the
-    pane's own cwd (the board root only when herdr reports none: project discovery must not
-    change), with the model and thinking level the session last recorded (--model overrides;
-    never the default role), and verify the tile's omp pid, lifecycle and session; then close
-    the empty herdr pane, so the name lives only in easl. If the tile never gets an omp, the
-    tile is deleted and the session resumes in the herdr pane again. Never two omp on one session."""
-    ez = easl_switch()
-    if not ez:
-        sys.exit(f"migrate: easl is off ({EASL_SWITCH})")
-    cli, name, dry = ez["cli"], args.name, args.dry_run
-    lock = take_lock(60)
-    if not lock:
-        sys.exit("migrate: run.lock held (daily run or roll pass)")
-    a = herdr("agent", "get", name).get("result", {}).get("agent")
-    if not a or a.get("agent") != "omp":
-        sys.exit(f"migrate: no herdr omp agent named {name}")
-    pane, session = a["pane_id"], (a.get("agent_session") or {}).get("value")
-    pid, argv = pane_omp(pane)
-    if not pid or not session:
-        sys.exit(f"migrate: {name} has no omp ({pid}) or no session ({session}) in pane {pane}")
-    tiles, err = tile_agents(cli)
-    if err:
-        sys.exit(f"migrate: easl agent.list: {err}")
-    if any(t.get("name") == name for t in tiles):
-        sys.exit(f"migrate: a tile named {name} already exists")
-    procs = ps_table()
-    skip, busy = idle_gate(a, pid, procs, ancestors(procs), None, recheck=not dry, session=session)
-    if skip:
-        sys.exit(f"migrate: {name}: {skip}" + (f" {busy}" if busy else ""))
-    keep, dropped = resume_args(argv)
-    model, thinking = session_model(session)
-    model = args.model or model
-    if model:
-        keep = drop_flags(keep, ("--model", "-m")) + ["--model", model]
-    if thinking and not args.model:
-        keep = drop_flags(keep, ("--thinking",)) + ["--thinking", thinking]
-    root = os.path.expanduser(args.board)
-    cwd = a.get("foreground_cwd") or a.get("cwd") or root
-    command = ["/bin/zsh", "-l", "-c", " ".join(shlex.quote(x) for x in [OMP, *keep, f"--resume={session}"])]
-    res = {"name": name, "pane": pane, "pid": pid, "session": session, "root": root, "cwd": cwd,
-           "model": model, "thinking": thinking, "command": command, "args_dropped": dropped, "dry_run": dry}
-
-    def done(action, **kw):
-        res.update(action=action, **kw)
-        with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
-            f.write(json.dumps({"ts": stamp(), "host": "home", "kind": "migrate", **res}) + "\n")
-        print("MIGRATE " + json.dumps(res))
-        if action.startswith("failed"):
-            sys.exit(1)
-
-    if dry:
-        return done("would migrate")
-    b = easl(cli, "board.open", "--root", root)
-    if "error" in b:
-        return done(f"failed: board.open {root}: {b['error'][:200]}")
-    res["board"] = b.get("board")
-    herdr("agent", "prompt", pane, "/exit")
-    for _ in range(45):
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            break
-        time.sleep(1)
-    else:
-        return done("failed: the pane's omp did not exit after /exit; left alone")
-    time.sleep(3)
-    out = easl(cli, "object.create", "--json", json.dumps(
-        {"board": res["board"], "type": "terminal", "props": {"name": name, "cwd": cwd, "command": command}}))
-    tile = (out.get("object") or {}).get("id") or out.get("id")
-    res["tile"] = tile
-    t = None
-    for _ in range(120 if tile else 0):
-        t = tile_get(cli, tile)
-        if t and t.get("pid") and t.get("agent_status") not in (None, "unknown"):
-            break
-        time.sleep(1)
-    now_session = tile_session(cli, tile) if t and t.get("pid") else None
-    if t and t.get("pid") and now_session == session:
-        herdr("pane", "close", pane)
-        return done("migrated", new_pid=t["pid"], status=t.get("agent_status"))
-    if t and t.get("pid"):
-        return done(f"failed: tile {tile} runs omp {t['pid']} (status {t.get('agent_status')}, session "
-                    f"{now_session}); herdr pane {pane} left empty, check by hand")
-    if tile:
-        easl(cli, "object.delete", "--id", tile)
-    r = sh([HERDR, "agent", "start", name, "--kind", "omp", "--pane", pane, "--timeout", "240000",
-            "--", *keep, f"--resume={session}"], timeout=270)
-    return done(f"failed: no omp came up in the tile ({(out.get('error') or 'no lifecycle')[:120]}); "
-                f"resumed in herdr pane {pane} again (rc {r.returncode})")
-
-
 def main_run(args):
-    lock = take_lock(1800)
-    if not lock:
-        sys.exit("omp-update: run.lock held for 30 min")
-    cfg = load_config()
-    started = utcnow()
-    tinfo = resolve_target(cfg["min_age_hours"], cfg["blocked_versions"] or {})
-    policy = {k: cfg[k] for k in ("max_session_mb", "max_uptime_hours", "max_rss_mb", "report_only", "opt_in",
-                                  "skip_panes", "extensions_pins")}
-    hosts = args.hosts.split(",") if args.hosts else cfg["order"]
-    results, stop = [], None  # stop: why the rest of the run only reports (an extension check failed)
-    for name in hosts:
-        hc = cfg["hosts"][name]
-        target = host_target(tinfo, hc)
-        blocked = f"rollout stopped: {stop}" if stop else None
-        params = {"host": name, "target": target, "dry_run": args.dry_run, "policy": policy,
-                  "only_pane": args.only_pane, "blocked": blocked, "manage_panes": hc.get("manage_panes", True),
-                  "services": hc.get("services", []), "easl": host_easl(hc)}
-        note(f"{name}: running")
-        r = run_host(name, hc, params)
-        r["target"] = target
-        if hc.get("hold_below"):
-            r["hold"] = {"below": hc["hold_below"], "note": hc.get("hold_note")}
-        results.append(r)
-        if r.get("ext_failures") and not stop:
-            stop = stop_rollout(cfg, name, r, args.dry_run)
-    ended = utcnow()
-    with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
-        f.write(json.dumps({"ts": stamp(started), "kind": "run", "dry_run": args.dry_run, **tinfo}) + "\n")
-        for r in results:
-            for a in r["actions"]:
-                f.write(json.dumps({"ts": stamp(ended), "host": r["host"], "dry_run": args.dry_run, **a}) + "\n")
-            for e in r["errors"]:
-                f.write(json.dumps({"ts": stamp(ended), "host": r["host"], "kind": "error", "error": e}) + "\n")
-        if stop:
-            f.write(json.dumps({"ts": stamp(ended), "kind": "rollout-stopped", "reason": stop}) + "\n")
-    with open(os.path.join(STATE, "last-run.json"), "w") as f:
-        json.dump({"started": stamp(started), "ended": stamp(ended), "dry_run": args.dry_run,
-                   "target": tinfo, "stopped": stop, "results": results}, f, indent=1)
-    print_report(tinfo, results, args.dry_run, stop)
-    line = summary_line(stamp(ended), tinfo, results, stop)
-    print("\n" + line)
-    if not args.dry_run and not args.only_pane:
-        checkpoint_line(line)
+    record = {"started": stamp(), "dry_run": args.dry_run, "results": [], "errors": []}
+    lock = None
+    try:
+        lock = take_lock()
+        cfg = load_config()
+        try:
+            with open(os.path.join(STATE, "last-run.json")) as f:
+                known = {r["host"]: r.get("installed_after") for r in json.load(f)["results"]}
+        except (OSError, ValueError, KeyError, TypeError):
+            known = {}
+        if not args.dry_run:
+            save_config(cfg)  # Clean cutover: only supported configuration keys survive.
+        tinfo = record["target"] = resolve_target(cfg["min_age_hours"], cfg["blocked_versions"] or {})
+        selected = args.hosts.split(",") if args.hosts else ORDER
+        if set(selected) - set(ORDER):
+            raise RuntimeError("--hosts must name deckbox, work or home")
+        for name in (h for h in ORDER if h in selected):
+            hc = cfg["hosts"][name]
+            params = {"host": name, "target": host_target(tinfo, hc), "dry_run": args.dry_run,
+                      "report_only": cfg["report_only"], "services": hc.get("services", []), "easl": host_easl(hc)}
+            res = run_host(name, hc, params)
+            res.update(target=params["target"], hold_below=hc.get("hold_below"))
+            record["results"].append(res)
+            if res["errors"]:
+                version = res.get("installed_after")
+                later = ORDER[ORDER.index(name) + 1:]
+                new = version != res.get("installed_before") or any(vtuple(known.get(h) or "0") < vtuple(version) for h in later)
+                if (not args.dry_run and version and new
+                        and any(t.get("verification_failure") for t in res["tiles"])):
+                    cfg["blocked_versions"][version] = {"reason": res["errors"][0], "host": name, "at": stamp()}
+                    save_config(cfg)
+                break
+    except Exception as e:
+        record["errors"].append(str(e))
+    finally:
+        record["ended"] = stamp()
+        os.makedirs(STATE, exist_ok=True)
+        with open(os.path.join(STATE, "actions.jsonl"), "a") as f:
+            f.write(json.dumps({"ts": record["started"], "kind": "run", "dry_run": args.dry_run, "target": record.get("target")}) + "\n")
+            for res in record["results"]:
+                for act in res["actions"]:
+                    f.write(json.dumps({"ts": record["ended"], "host": res["host"], "dry_run": args.dry_run, **act}) + "\n")
+                for error in res["errors"]:
+                    f.write(json.dumps({"ts": record["ended"], "host": res["host"], "kind": "error", "error": error}) + "\n")
+            for error in record["errors"]:
+                f.write(json.dumps({"ts": record["ended"], "kind": "error", "error": error}) + "\n")
+        with open(os.path.join(STATE, "last-run.json"), "w") as f:
+            json.dump(record, f, indent=1)
+        if lock:
+            lock.close()
+    print(json.dumps(record, indent=1))
+    return int(bool(record["errors"] or any(r["errors"] for r in record["results"])))
 
 
 def main():
-    ap = argparse.ArgumentParser(description="hourly omp update + idle agent rotation")
+    ap = argparse.ArgumentParser(description="update omp and resume idle easl leads")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
     r.add_argument("--dry-run", action="store_true")
     r.add_argument("--hosts")
-    r.add_argument("--only-pane")
     sub.add_parser("target")
-    sub.add_parser("ext-fp")
-    ea = sub.add_parser("ext-ack", help="mark the current extension contents as needing no restart")
-    ea.add_argument("--since", required=True, help="UTC time of the last change that DID need a restart, e.g. 2026-10-05T21:35:48Z")
-    ea.add_argument("--note", required=True)
-    ea.add_argument("--hosts", default="home,deckbox")
-    mp = sub.add_parser("migrate", help="move a herdr pane's omp session into an easl tile of the same name")
-    mp.add_argument("name")
-    mp.add_argument("--board", default="~/dotfiles", help="a directory; inside a git repo it opens the repo's board")
-    mp.add_argument("--model")
-    mp.add_argument("--dry-run", action="store_true")
-    rp = sub.add_parser("roll")
-    rp.add_argument("--hosts", default="home,deckbox")
-    rp.add_argument("--include", help="report-only names to restart anyway, comma-separated")
-    rp.add_argument("--hours", type=float, default=24)
-    rp.add_argument("--dry-run", action="store_true")
     h = sub.add_parser("host")
     h.add_argument("params")
     a = ap.parse_args()
     if a.cmd == "host":
-        host_main(json.loads(a.params))
-    elif a.cmd == "migrate":
-        main_migrate(a)
-    elif a.cmd == "roll":
-        main_roll(a)
-    elif a.cmd == "ext-fp":
-        print("EXTFP " + json.dumps({"fingerprint": extensions_fingerprint(), "mtime": int(extensions_mtime())}))
-    elif a.cmd == "ext-ack":
-        main_ext_ack(a)
-    elif a.cmd == "target":
+        res = host_main(json.loads(a.params))
+        print("RESULT " + json.dumps(res))
+        return int(bool(res["errors"]))
+    if a.cmd == "target":
         cfg = load_config()
         print(json.dumps(resolve_target(cfg["min_age_hours"], cfg["blocked_versions"] or {}), indent=1))
-    else:
-        main_run(a)
+        return 0
+    return main_run(a)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
