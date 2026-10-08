@@ -21,7 +21,7 @@ You own the board's program, never its code. Turn Tim's intent into briefs, run 
 
 ## Where work runs
 
-- **One tile per board: you.** Run the work as your subagents, 10–20+ at a time, as work's lindy-seat does: `opus` for anything a tile would have done (the same model), `task` for mechanical work, `reviewer` (another family) for every verdict that needs independence, `scout` for research. Use `isolated: true` for edits in this repo. Record completions on the brief.
+- **One tile per board: you.** Run the work as your subagents, 10–20+ at a time, as work's lindy-seat does: `task` (GPT-6.1 Sol) for implementation and mechanical work, `opus` only for hard judgment and integration (Anthropic quota is the scarce one; Tim, 2026-10-08), `reviewer` (another family) for every verdict that needs independence, `scout` for research. Use `isolated: true` for edits in this repo. Record completions on the brief.
 - **A long run** (acceptance, measured or armed) is a background job you own (`bash` async, `timeout: 0`).
 - **A second tile needs a reason on its brief:** a long persistent task that itself runs long subagents, or work Tim steers himself. Without one, fold it (below).
   - Before starting one, run `machine-ok --memory`. For tile starts this overrides the global `--wait` rule, because you must not block.

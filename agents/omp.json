@@ -1,7 +1,7 @@
 {
   "modelRoles": {
     "default": "anthropic/claude-opus-5-5:xhigh",
-    "task": "anthropic/claude-sonnet-5-5:xhigh",
+    "task": "openai-codex/gpt-6.1-sol:xhigh",
     "opus": "anthropic/claude-opus-5-5:xhigh",
     "grok": "xai-oauth/grok-4.7:xhigh",
     "slow": "openai-codex/gpt-6.1-sol:xhigh",
@@ -19,9 +19,11 @@
     "slow"
   ],
   "retry": {
+    "usageAwareFallback": true,
+    "usageReservePolicy": "auto",
     "fallbackChains": {
       "default": ["openai-codex/gpt-6.1-sol"],
-      "task": ["openai-codex/gpt-6.1-sol"],
+      "task": ["anthropic/claude-sonnet-5-5"],
       "sol": ["anthropic/claude-sonnet-5-5"],
       "review": ["xai-oauth/grok-4.7"],
       "tiny": ["openai-codex/gpt-6-luna"],

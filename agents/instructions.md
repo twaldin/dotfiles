@@ -6,9 +6,9 @@
 - Personal-project PRs merge once required checks and reviews pass, unless Tim set a hold. For Lindy, the agent that opens a PR against `main` arms auto-merge when it opens it, unless Tim holds it or it waits on another open PR. Prefer one PR per effort, keep branch protections, and verify the landed result.
 - On personal projects, CodeRabbit reviews are supplemental. A CodeRabbit review-limit notice counts as its approval: review the PR locally with the code-review skill instead, then merge once CI and that review pass, with `gh pr merge --admin` where a required approval is all that remains.
 - In omp, the chief of staff and each effort session run on the default role (Opus 5.5). Inside an effort, the subagent type is the model choice:
-  - `task` (Sonnet 5.5) by default.
-  - `opus` (Opus 5.5) for hard judgment and integration.
-  - `scout` (GPT-6.1 Sol) for research, or to move work off Anthropic quota.
+  - `task` (GPT-6.1 Sol) by default, for implementation as well as mechanical work.
+  - `opus` (Opus 5.5) only for hard judgment and integration: Anthropic quota is the scarce one.
+  - `scout` (GPT-6.1 Sol) for research and broad reading.
   - `reviewer` (GPT-6 Astra) for reviews, chosen through the code-review skill.
   - Niche types: `grok` (Grok 4.7) for small reviews and second opinions; `sonic` (GLM 5.3 Flash) for mechanical fan-outs over ~10 agents.
   - Subagents never see this file, so brief them on any rule here that their task touches.
