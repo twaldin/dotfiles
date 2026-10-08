@@ -134,11 +134,17 @@
 //     unknown; it stays unplaced) only if WindowServer shows it gone. A tree window still off --space after its
 //     move is a problem (window-off-target; GR2, addendum 1).
 //     Each sweep also reads all CGWindowList windows (including hidden Spaces) and enrolls omitted windows whose
-//     native owner pid/start identity belongs to the tree. window-native-located records id, pid, bounds and on-screen
-//     state in nativeWindows. If an id query definitively exits 1 (untracked), CG ownership/bounds and a complete
-//     SkyLight membership sample may prove it already on the assigned agent Space and on no Tim/Tim-visible Space:
-//     that is placed-native (untracked by yabai), recorded in nativePlacements, with no move. Unknown/unmapped Spaces,
-//     Tim memberships, actual query timeouts and all earlier counted exposure still fail closed; no native move is made.
+//     native owner pid/start identity belongs to the tree (window-native-located, nativeWindows: id, pid, bounds and
+//     on-screen state; a read that fails is one problem per run: a tree window yabai omits could go unseen).
+//     Each is sampled directly first: an exempt one (below) is recorded and never asked about, so a sweep makes no
+//     yabai query for a helper. Others are parked on a separate serial native lane, so a hung discovery/retry never
+//     blocks AX/shown parks; a per-id gate prevents duplicate queries/mutations across lanes. Where yabai says it never tracked
+//     a window (an id query that says it could not locate it), CG ownership/bounds and a complete SkyLight
+//     membership sample may prove it already on the assigned agent Space and on no Tim/Tim-visible Space: that is
+//     placed-native (untracked by yabai), recorded in nativePlacements, with no move and no yabai row. A membership
+//     yabai's map cannot name, or Tim's visible assigned Space, is unplaced like any other reason (asked again every
+//     50 ms for 3 s, then window-unknown) and fails closed at the end if nothing places it, whatever else excuses a
+//     window; query timeouts and all earlier counted exposure fail closed too; no native move is made.
 //     Helper windows (GR2, bench's ruling, GR1 addendum 4 note 3; every easl launch has a 1×1 window on screen for
 //     ~1 s that yabai never lists, and 500×500 ones ordered out): "on Tim's screen" means ordered in on one of his
 //     Spaces (SkyLight) with WindowServer bounds larger than 2×2 px. Each park samples the window so, directly, no
@@ -198,11 +204,13 @@
 // that group: whatever it started is killed, and the leader reaped only once a whole listing of the group, every
 // member of it read (one that cannot be read may be alive), shows it alone; the leader is reaped and released in
 // the one locked turn in which the guard's end may signal it, so no released pid is ever signalled.
-// Every yabai query gets up to two attempts with 50 ms backoff inside one 4 s deadline including cleanup (at most
-// 2 s per reply); the restore-owner query instead retains its caller's 1 s absolute deadline. Mutation commands are
-// never retried. An answer recovered by retry is no problem; exhausted reads remain a problem, subject only to the
-// existing owner-timeout and native off-Tim/exemption adjudications. yabai-query / yabaiQueries records each logical
-// query's args, attempts, per-attempt error/latency, total latency and deadline. The final list also keeps finalWindowList.
+// Transient yabai reads get up to two attempts with 50 ms backoff inside one 4 s deadline including cleanup (at most
+// 2 s per reply); definitive id misses are single-try. Restore-owner replies share the caller's 1 s deadline, with
+// bounded cleanup outside it. Mutations are never retried. Recovered reads are no problem; exhausted reads remain
+// fail-closed under the existing owner and window adjudications. Every yabai-query event carries its logical query's
+// args, attempts, per-attempt error/latency, total latency and deadline. yabaiQueries retains the first 128 records;
+// yabaiQueryStats preserves total/failed/retried/retained/dropped counts and total/max latency after that cap.
+// The final list also keeps finalWindowList.
 //
 // usage: gui-launch-guard --space N --guard-seconds S --yabai PATH --summary PATH [--parent-pid P]
 //            [--adopt-timeout S] [--allow-caller-placement] [--attach-exe E --attach-argv N]
@@ -1417,11 +1425,17 @@ final class Helpers {
         cap = deadline
     }
 
+    /// Effective query reply allowance under the current end-stage cap; no retry starts after the cap closes it.
+    func queryAllowance(until deadline: Double) -> Double {
+        lock.lock(); defer { lock.unlock() }
+        return closed ? 0 : max(0, min(deadline, cap) - uptime() - Child.cleanupAllowance)
+    }
+
     /// `ownsTimeout`: the caller records a timeout itself (the owner query before a revert's focus).
     /// `until`: one operation's absolute deadline, including helper cleanup; reserve cleanupAllowance before replying.
     /// `released` (tests): called once the call's group is ended, with whether its pid is still registered.
     func run(_ path: String, _ args: [String], timeout: Double, ownsTimeout: Bool = false, until: Double? = nil,
-             released: ((Bool) -> Void)? = nil) -> Reply {
+             captureError: Bool = false, released: ((Bool) -> Void)? = nil) -> Reply {
         let what = "yabai -m " + args.joined(separator: " ")
         if onMain() {
             let message = "\(what) was asked for on the main thread, which never waits on a child process: refused"
@@ -1434,7 +1448,8 @@ final class Helpers {
         posix_spawn_file_actions_init(&actions)
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_adddup2(&actions, fds[1], 1)
-        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
+        if captureError { posix_spawn_file_actions_adddup2(&actions, fds[1], 2) }
+        else { posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0) }
         var attributes = childAttributes(onlyListedFds: true)
         let argv = ([path, "-m"] + args).map { strdup($0) } + [nil]
         var pid: pid_t = 0
@@ -2389,6 +2404,7 @@ var scanTimer: DispatchSourceTimer?
 var spawnedPid: pid_t = 0
 
 let yabaiQueue = DispatchQueue(label: "gui-launch.yabai")
+let nativeParkQueue = DispatchQueue(label: "gui-launch.native-parks")
 let axQueue = DispatchQueue(label: "gui-launch.ax")
 let timQueue = DispatchQueue(label: "gui-launch.tim")
 let scanQueue = DispatchQueue(label: "gui-launch.scan")
@@ -2414,12 +2430,30 @@ func lastInput() -> Double? {
 // MARK: - yabai (off the main thread, every call bounded)
 
 let queryTimeout = 2.0
-/// All query retries share the final list's existing 4 s budget, including backoff and helper teardown.
-/// Restore-owner queries keep their caller's absolute 1 s deadline; mutation commands are never retried.
+/// Ordinary reads share the final list's 4 s budget, including cleanup. Owner replies retain their 1 s budget,
+/// split across two attempts; each helper's cleanup is bounded separately. Mutations are never retried.
 let queryLimit = 4.0
 let queryTries = 2
 let queryBackoff = 0.05
-let yabaiQueries = Locked([[String: Any]]())
+struct QueryHistory {
+    static let capacity = 128
+    var rows: [[String: Any]] = []
+    var total = 0, failed = 0, retried = 0
+    var latency = 0.0, longest = 0.0
+    mutating func append(_ row: [String: Any], ok: Bool, retry: Bool, seconds: Double) {
+        total += 1
+        if !ok { failed += 1 }
+        if retry { retried += 1 }
+        latency += seconds
+        longest = max(longest, seconds)
+        if rows.count < Self.capacity { rows.append(row) }
+    }
+    var stats: [String: Any] {
+        ["total": total, "failed": failed, "retried": retried, "retained": rows.count, "dropped": total - rows.count,
+         "capacity": Self.capacity, "totalMs": ms(latency), "maxMs": ms(longest)]
+    }
+}
+let yabaiQueries = Locked(QueryHistory())
 /// A focus on the restore path. While Studio launched, yabai let window queries run past 0.5 s and a query plus
 /// a focus took 258 ms (counter-ball receipt 20261006T040054Z): twice the deadline that failed. A focus that
 /// misses it falls back to re-activating the app (580 ms there).
@@ -2427,59 +2461,77 @@ let focusTimeout = 1.0
 
 /// A logical read, with each attempt and its latency. A transient timeout is not a problem; exhaustion still is.
 /// The caller may own timeout adjudication (restore-owner checks and the final list). No native fallback can turn
-/// a query that never answers into a successful query. Unreadable JSON and failed exits also get the bounded retry.
+/// a query that never answers into a successful query. Definitive id misses are single-try; transient reads retry.
+/// `replyUntil`: an owner reply deadline, with bounded cleanup outside it as before; `until` includes cleanup.
 @Sendable func queryReply(_ args: [String], timeout: Double = queryTimeout, ownsTimeout: Bool = false,
-                         until: Double? = nil) -> (reply: Helpers.Reply, value: Any?, record: [String: Any]) {
+                         until: Double? = nil, replyUntil: Double? = nil) -> (reply: Helpers.Reply, value: Any?, record: [String: Any]) {
     let began = uptime()
-    let limit = until.map { max(0, $0 - began) } ?? queryLimit
-    let deadline = until ?? began + limit
+    let replyDeadline = replyUntil ?? until ?? began + queryLimit
+    let cleanupDeadline = replyUntil.map { $0 + Child.cleanupAllowance } ?? replyDeadline
+    let limit = max(0, replyDeadline - began)
     let what = "yabai -m " + args.joined(separator: " ")
     var reply: Helpers.Reply = .refused("\(what) has no time left")
     var tries: [[String: Any]] = []
     var ok = false
     var value: Any?
+    var timedOut = false
+    var connectionFailure: String?
     for n in 1...queryTries {
         let at = uptime()
-        let available = deadline - at - Child.cleanupAllowance
+        let available = min(replyDeadline - at, helpers.queryAllowance(until: cleanupDeadline))
         guard available > 0 else { break }
-        // Short owner-query budgets must leave an actual second attempt, not consume the whole budget on the first.
-        let allowed = n == 1 && available < timeout
-            ? max(0.001, (available - queryBackoff) / 2) : min(timeout, available)
-        reply = helpers.run(yabaiPath, args, timeout: allowed, ownsTimeout: true, until: deadline)
+        // Reserve backoff and scheduling slack, not the helper's entire cleanup allowance, from owner replies.
+        let allowed = replyUntil != nil && n == 1
+            ? min(timeout, max(0.001, (available - queryBackoff - 0.05) / 2)) : min(timeout, available)
+        reply = helpers.run(yabaiPath, args, timeout: allowed, ownsTimeout: true, until: cleanupDeadline, captureError: true)
         var why: String?
         var retry = true
         switch reply {
         case .exited(0, let data):
-            value = json(data)
+            value = data.isEmpty ? nil : json(data)
             if value != nil { ok = true }
             else { why = "\(what) answered unreadably" }
-        case .exited(let code, _): why = "\(what) exited \(code)"
-        case .timedOut(let seconds): why = "\(what) did not answer within \(String(format: "%.1f", seconds)) s"
+        case .exited(let code, let data):
+            why = "\(what) exited \(code)"
+            if code == 1 {
+                let message = String(decoding: data, as: UTF8.self)
+                if message.contains("failed to connect to socket") {
+                    connectionFailure = "\(what) could not connect to yabai"
+                    why = connectionFailure
+                    retry = false
+                } else if args.count == 4, args[1] == "--windows", args[2] == "--window",
+                          message.contains("could not locate window with the specified id") {
+                    retry = false
+                }
+            }
+        case .timedOut(let seconds):
+            timedOut = true
+            why = "\(what) did not answer within \(String(format: "%.1f", seconds)) s"
         case .refused(let reason):
             why = reason
             retry = false  // lifecycle, output-cap and spawn refusals are not transient query answers
         }
         tries.append(["try": n, "ms": ms(uptime() - at), "error": why ?? NSNull()])
         if ok || !retry || n == queryTries { break }
-        let left = deadline - uptime() - Child.cleanupAllowance
+        let left = min(replyDeadline - uptime(), helpers.queryAllowance(until: cleanupDeadline))
         guard left > queryBackoff else { break }
         usleep(UInt32(queryBackoff * 1_000_000))
     }
+    if !ok && timedOut { reply = .timedOut(limit) }  // a later refusal must never erase an unanswered attempt
+    let elapsed = uptime() - began
     let record: [String: Any] = ["event": "yabai-query", "args": args, "ok": ok, "tries": tries,
-                                 "retried": tries.count > 1, "limitS": decimal(limit, 3), "ms": ms(uptime() - began)]
-    yabaiQueries.update { $0.append(record) }
-    emit(record)
-    if !ok, case .timedOut = reply, !ownsTimeout {
-        let reason = "\(what) did not answer within \(String(format: "%.1f", limit)) s (bounded query retries exhausted)"
-        problem(reason)
+                                 "retried": tries.count > 1, "limitS": decimal(limit, 3), "ms": ms(elapsed)]
+    yabaiQueries.update { $0.append(record, ok: ok, retry: tries.count > 1, seconds: elapsed) }
+    emit(record)  // the stream retains each attempt even after the bounded summary is full
+    if !ok && timedOut && !ownsTimeout {
+        problems.update { $0.append("\(what) did not answer within \(String(format: "%.1f", limit)) s (bounded query retries exhausted)") }
         emit(["event": "yabai-timeout", "args": args, "timeoutS": decimal(limit, 3)])
-    }
+    } else if !ok, let connectionFailure { problem(connectionFailure) }
     return (reply, value, record)
 }
 
 @Sendable func yabaiReply(_ args: [String], timeout: Double = queryTimeout, ownsTimeout: Bool = false,
                          until: Double? = nil) -> Helpers.Reply {
-    if args.first == "query" { return queryReply(args, timeout: timeout, ownsTimeout: ownsTimeout, until: until).reply }
     return helpers.run(yabaiPath, args, timeout: timeout, ownsTimeout: ownsTimeout, until: until)
 }
 
@@ -2495,14 +2547,13 @@ let focusTimeout = 1.0
 @Sendable func windowQuery(_ id: Int) -> (info: [String: Any]?, why: String?, untracked: Bool) {
     let what = "yabai -m query --windows --window \(id)"
     let read = queryReply(["query", "--windows", "--window", String(id)])
-    if case .exited(let code, _) = read.reply, code != 0, let native = windowServerState(id)?.window {
-        locateNative(native, via: "window-query")
-    }
     switch read.reply {
     case .exited(0, _):
         if let w = read.value as? [String: Any] { return (w, nil, false) }
         return (nil, "\(what) answered unreadably", false)
-    case .exited(let code, _): return (nil, "\(what) exited \(code)", code == 1)
+    case .exited(let code, let data):
+        let untracked = code == 1 && String(decoding: data, as: UTF8.self).contains("could not locate window with the specified id")
+        return (nil, "\(what) exited \(code)", untracked)
     case .timedOut(let allowed): return (nil, "\(what) did not answer within \(String(format: "%.1f", allowed)) s", false)
     case .refused(let why): return (nil, why, false)
     }
@@ -2606,29 +2657,45 @@ struct ServerWindow {
 let nativeWindows = Locked([Int: [String: Any]]())
 let nativePlacements = Locked([Int: [String: Any]]())
 
-/// All WindowServer windows, including ones on hidden Spaces that the on-screen discovery cannot see.
-/// A native owner is vouched for against the tree's current pid/start identity before its window is enrolled.
-@Sendable func allServerWindows() -> [ServerWindow]? {
+/// WindowServer's windows: every one, on hidden Spaces too, or only the ones on screen now (every display's current
+/// Space); nil: unreadable. The rig reads its stand-in (rigServerWindows; the on-screen ones are the rows not marked
+/// off screen), and without one has none.
+@Sendable func serverWindows(onScreenOnly: Bool) -> [ServerWindow]? {
     if rigTest {
         guard onscreenPath != nil else { return [] }
-        return rigServerWindows()
+        return rigServerWindows()?.filter { !onScreenOnly || $0.onScreen != false }
     }
-    guard let rows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
-    return rows.compactMap(serverWindow)
+    let options: CGWindowListOption = onScreenOnly ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionAll, .excludeDesktopElements]
+    guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
+    return list.compactMap(serverWindow)
 }
 
-@Sendable func locateNative(_ w: ServerWindow, via: String) {
-    guard let pid = w.pid, tree.contains(pid) else { return }
-    let bounds: Any = w.bounds.map { [Double($0.origin.x), Double($0.origin.y), Double($0.width), Double($0.height)] } ?? NSNull()
-    let row: [String: Any] = ["event": "window-native-located", "source": "CGWindowList", "window": w.id,
-                             "pid": Int(pid), "app": w.owner ?? "", "bounds": bounds,
-                             "onScreen": w.onScreen ?? NSNull(), "via": via]
-    let first = nativeWindows.update { (rows: inout [Int: [String: Any]]) -> Bool in
-        let first = (rows[w.id]?["pid"] as? Int) != Int(pid)
-        rows[w.id] = row
+/// A per-window record map, as the summary's list in window order.
+func byWindow(_ rows: [Int: [String: Any]]) -> [[String: Any]] {
+    rows.sorted { $0.key < $1.key }.map { $0.value }
+}
+
+@Sendable func boundsField(_ bounds: CGRect?) -> Any {
+    bounds.map { [Double($0.origin.x), Double($0.origin.y), Double($0.width), Double($0.height)] } ?? NSNull()
+}
+
+/// Keeps the latest native proof and emits the first record for each window/owner pair.
+@Sendable func recordNative(_ row: [String: Any], id: Int, pid: pid_t, in records: Locked<[Int: [String: Any]]>) {
+    let first = records.update { (rows: inout [Int: [String: Any]]) -> Bool in
+        let first = (rows[id]?["pid"] as? Int) != Int(pid)
+        rows[id] = row
         return first
     }
     if first { emit(row) }
+}
+
+/// A native owner is vouched for against the tree's current pid/start identity (the caller's) before its window is
+/// enrolled here: the first record of each (window, pid) is emitted.
+@Sendable func locateNative(_ w: ServerWindow, pid: pid_t, via: String) {
+    let row: [String: Any] = ["event": "window-native-located", "source": "CGWindowList", "window": w.id,
+                             "pid": Int(pid), "app": w.owner ?? "", "bounds": boundsField(w.bounds),
+                             "onScreen": w.onScreen ?? NSNull(), "via": via]
+    recordNative(row, id: w.id, pid: pid, in: nativeWindows)
 }
 
 /// GR2 (bench's ruling, GR1 addendum 4 note 3): one sample of a tree window, read directly, no yabai: WindowServer's
@@ -2680,8 +2747,7 @@ struct WindowLook {
     /// spaceIds, SkyLight's) and display. null: unreadable.
     var fields: [String: Any] {
         let w = server?.window
-        let rect: Any = w?.bounds.map { [$0.origin.x, $0.origin.y, $0.width, $0.height].map { Double($0) } } ?? NSNull()
-        var record: [String: Any] = ["pid": NSNull(), "bounds": rect, "onScreen": w?.onScreen ?? NSNull(), "ordered": NSNull(),
+        var record: [String: Any] = ["pid": NSNull(), "bounds": boundsField(w?.bounds), "onScreen": w?.onScreen ?? NSNull(), "ordered": NSNull(),
                                      "spaces": NSNull(), "spaceIds": NSNull(), "display": place?.display ?? NSNull()]
         if let pid = w?.pid { record["pid"] = Int(pid) }
         if let place {
@@ -2830,10 +2896,12 @@ let endReported = Locked(Set<Int>())
 /// one never placed, even if the guard ended within the 3 s it is asked about), from the event that reported it
 /// (`seen`, `via`); `reported` once window-unknown records it. Off Tim's screen only while its first sighting, every
 /// counted sample since (the stretch it counts in, countingSince: a sample that found it counting on his screen after
-/// an exempt one stays evidence after it closes) and this sample showed it off.
-@Sendable func unplacedAt(_ id: Int, _ look: WindowLook, seen: Double, via: String, why: String, reported: Bool) {
+/// an exempt one stays evidence after it closes) and this sample showed it off. `excusable` false: the reason is a
+/// native state no off-Tim sample excuses (an unmapped membership, the assigned Space on Tim's display): the end
+/// reports the window unless it is placed, however it was sampled.
+@Sendable func unplacedAt(_ id: Int, _ look: WindowLook, seen: Double, via: String, why: String, reported: Bool, excusable: Bool = true) {
     let countedOnTims = countingSince.value[id]?.onTims == true
-    let off = firstSightings.value[id]?.onTims == false && !countedOnTims && (look.gone || !look.onTims)
+    let off = excusable && firstSightings.value[id]?.onTims == false && !countedOnTims && (look.gone || !look.onTims)
     unresolved.update { (list: inout [Int: Unresolved]) -> Void in
         let known = list[id]
         list[id] = (seen: known?.seen ?? seen, via: known?.via ?? via, why: why, offTims: (known?.offTims ?? true) && off,
@@ -2844,11 +2912,11 @@ let endReported = Locked(Set<Int>())
 /// yabai would not place tree window `id` (`why`) for unplacedLimit since the event that reported it (`seen`), or at
 /// the final sweep: window-unknown, with what WindowServer and SkyLight show of it now. It is unresolved until yabai
 /// places it (window-located); unless WindowServer shows it gone it stays unknown, which the end reports.
-@Sendable func windowUnknown(_ id: Int, seen: Double, via: String, why: String) {
+@Sendable func windowUnknown(_ id: Int, seen: Double, via: String, why: String, excusable: Bool = true) {
     let look = WindowLook(id)
     let now = look.place
     windowsUnknown.update { $0[id] = look.gone ? nil : why }
-    unplacedAt(id, look, seen: seen, via: via, why: why, reported: true)
+    unplacedAt(id, look, seen: seen, via: via, why: why, reported: true, excusable: excusable)
     let shown: Any = look.server.map { (state: (exists: Bool, window: ServerWindow?)) -> String in
         guard state.exists else { return "gone" }
         switch state.window?.onScreen {
@@ -2907,11 +2975,16 @@ let endReported = Locked(Set<Int>())
     recordWindowFault(["event": "window-list-failed", "via": via, "reason": why])
 }
 
+/// Shared Tim-Space facts; callers decide whether the assigned Space is exempt and which display facts apply.
+@Sendable func timMembership(_ index: Int, shown: @autoclosure () -> Bool, expected: @autoclosure () -> Bool = false) -> Bool {
+    timSpaces.contains(index) || shown() || expected()
+}
+
 /// GR2: whether a tree window on Space `s` is on Tim's screen: on one of his Spaces (1-4), or on the Space his display
 /// shows (as last read) or should show, unless that is --space itself (he went there himself). Any thread.
 @Sendable func onTimsScreen(_ s: Int) -> Bool {
     guard s != space else { return false }
-    return timSpaces.contains(s) || s == spaceWatch.shownIndex || s == spacePolicy.value.expected
+    return timMembership(s, shown: s == spaceWatch.shownIndex, expected: s == spacePolicy.value.expected)
 }
 
 /// Tree window `w` (`id`) is on Space `at`, not --space, and was not moved there: a problem (GR2, addendum 1), unless
@@ -2929,6 +3002,44 @@ let endReported = Locked(Set<Int>())
     }
 }
 
+/// Tree window `id` (`window`, owned by tree process `pid`) is untracked by yabai, and `look` shows it on the assigned
+/// Space and on no Tim Space or Tim-visible Space: placed-native (CGWindowList ownership and bounds, SkyLight
+/// membership), a current proof and no move, no yabai row and no yabai answer. It clears the window's unknown state
+/// and unresolved entry, and counts as its placement for the end; the exposure it counted on Tim's screen before this
+/// first placement is judged as a yabai placement's is (slowPlacement), unless `quiet` (already reported). It excuses
+/// no query timeout: park only calls it for an untracked answer.
+@Sendable func placedNative(_ id: Int, _ window: ServerWindow, pid: pid_t, look: WindowLook, stretch: (at: Double, onTims: Bool),
+                            queried: Double, via: String, quiet: Bool) {
+    let app = window.owner ?? "?"
+    windowsUnknown.update { $0[id] = nil }
+    let before = windowSpaces.update { (spaces: inout [Int: Int]) -> Int? in
+        defer { spaces[id] = space }
+        return spaces[id]
+    }
+    windowOnTims.update { $0[id] = false }
+    let resolved = unresolved.update { $0.removeValue(forKey: id) }
+    let exposed = before == nil && stretch.onTims ? queried - stretch.at : nil
+    if let exposed, !quiet { slowPlacement(id, app: app, pid: pid, seconds: exposed) }
+    var placed = firstFields(id).merging(look.fields) { $1 }
+    placed.merge(["event": "placed-native", "window": id, "pid": Int(pid), "app": app, "space": space,
+                  "source": "CGWindowList+SkyLight", "placement": "placed-native (untracked by yabai)",
+                  "via": via, "at": decimal(queried - t0, 3)]) { $1 }
+    if let resolved { placed["unknownMs"] = ms(queried - resolved.seen) }
+    if let exposed { placed["onTimSpaceMs"] = ms(exposed) }
+    recordNative(placed, id: id, pid: pid, in: nativePlacements)
+}
+
+/// Tree window `id` counted on Tim's screen for `seconds` before its first placement (or, if it is elsewhere now,
+/// until the sample that found it so): a problem past onTimsScreenLimit.
+@Sendable func slowPlacement(_ id: Int, app: String, pid: pid_t, seconds: Double) {
+    guard seconds > onTimsScreenLimit else { return }
+    problem(String(format: "window %ld of the tree (%@, pid %d) was on Tim's screen for %.1f ms before the guard placed it (more than %.0f ms)",
+                   id, app, pid, seconds * 1000, onTimsScreenLimit * 1000))
+}
+
+/// Native discovery cannot hold up AX/shown parks; both lanes share one in-flight owner of each window id.
+let parkingWindows = Locked(Set<Int>())
+
 /// Moves one tree window to the target Space by id, after checking yabai knows it and that it is the tree's (its
 /// pid, with the start time the tree recorded). `seen` is when the event that reported it arrived; yabai may
 /// learn of a brand-new window some time after Accessibility does, so a window yabai will not place is asked about
@@ -2945,14 +3056,18 @@ let endReported = Locked(Set<Int>())
 /// first placement on his screen is a move whose onTimSpaceMs counts from the start of the stretch it has counted in
 /// (its first sighting, the sample that found it counting after an exempt one, or the event that reported it) to the
 /// move: a problem past onTimsScreenLimit; so is a window that stretch began on his screen (SkyLight) that yabai places
-/// elsewhere later than that. `latched`: the sweep already reported this window's sample on his screen (omittedSample),
-/// so this park reports nothing more of that exposure.
-func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bool = false) {
+/// elsewhere later than that. An id yabai says it never tracked is placed-native (placedNative) only when WindowServer
+/// and SkyLight prove it on the assigned Space and on no Tim Space; an unmapped membership or the assigned Space on
+/// Tim's display is unplaced (retried, and reported at the end unless placed). `latched`: the sweep already reported
+/// this window's sample on his screen (omittedSample), so this park reports nothing more of that exposure.
+/// `native`: discoveries and their retries stay off the foreground AX/shown queue.
+func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bool = false, native: Bool = false) {
     tracked("park of window \(id) (\(via))", final: final) {
+        guard parkingWindows.update({ $0.insert(id).inserted }) else { return }
+        defer { _ = parkingWindows.update { $0.remove(id) } }
         let query = windowQuery(id)
-        var found = query.info
+        let found = query.info
         let why = query.why
-        var nativePlaced = false
         let queried = uptime()
         if let owner = (found?["pid"] as? NSNumber)?.int32Value, !tree.contains(owner) {
             windowsUnknown.update { $0[id] = nil }
@@ -2965,31 +3080,34 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
             return exempted(id, look, at: queried, reason: reason, via: via, found: found, why: why, final: final)
         }
         let stretch = counting(id, at: queried, seen: seen)
-        func unplaced(_ why: String) {
+        let quiet = latched || (final && endReported.value.contains(id))  // reported already (review 4: the end's last read)
+        func unplaced(_ why: String, excusable: Bool = true) {
             windowsUnknown.update { $0[id] = why }
             if !final && uptime() - seen < unplacedLimit {
-                unplacedAt(id, look, seen: seen, via: via, why: why, reported: false)
-                yabaiQueue.asyncAfter(deadline: .now() + unplacedInterval) { park(id, seen: seen, via: via) }
+                unplacedAt(id, look, seen: seen, via: via, why: why, reported: false, excusable: excusable)
+                let queue = native ? nativeParkQueue : yabaiQueue
+                queue.asyncAfter(deadline: .now() + unplacedInterval) { park(id, seen: seen, via: via, native: native) }
             } else {
-                windowUnknown(id, seen: seen, via: via, why: why)
+                windowUnknown(id, seen: seen, via: via, why: why, excusable: excusable)
             }
         }
-        if query.untracked, let owner = look.server?.window?.pid, tree.contains(owner) {
+        // yabai says it never tracked the window: WindowServer and SkyLight may still place it. Only a window proven on
+        // the assigned Space and on no Tim Space is placed; a membership yabai's map cannot name (asked again: its map
+        // is read afresh) or the assigned Space on Tim's display is unplaced like any other reason, and the end reports
+        // it unless a later sample places it, whatever a sample of it showed off Tim's screen.
+        if query.untracked, let window = look.server?.window, let owner = window.pid, tree.contains(owner) {
+            locateNative(window, pid: owner, via: via)
             let placement = look.place.map { spaceWatch.placementOnAgent($0.spaces) } ?? .unknown
-            if placement == .unknown, let memberships = look.place?.spaces, !memberships.isEmpty {
-                let reason = "window \(id) of the tree has native Space membership yabai cannot map: placement is unknown"
-                if windowsUnknown.value[id] != reason { problem(reason) }
-                return unplaced(reason)
-            }
-            if placement == .onTims && !look.onTims {
-                let reason = "window \(id) of the tree is untracked by yabai and on Tim's currently visible assigned Space: not placed-native"
-                if windowsUnknown.value[id] != reason { problem(reason) }
-                return unplaced(reason)
-            }
-            if placement == .assigned, !look.onTims, tree.contains(owner) {
-                // This is a current placement proof, not a successful move or a successful yabai query.
-                found = ["id": id, "pid": Int(owner), "app": look.server?.window?.owner ?? "?", "space": space]
-                nativePlaced = true
+            switch placement {
+            case .assigned where !look.onTims:
+                return placedNative(id, window, pid: owner, look: look, stretch: stretch, queried: queried, via: via, quiet: quiet)
+            case .unknown where look.place?.spaces.isEmpty == false:
+                spaceWatch.mapMissed()
+                return unplaced("window \(id) of the tree has native Space membership yabai cannot map: placement is unknown", excusable: false)
+            case .onTims where !look.onTims:
+                return unplaced("window \(id) of the tree is untracked by yabai and on Tim's currently visible assigned Space: not placed-native", excusable: false)
+            default:
+                break
             }
         }
         guard let w = found else { return unplaced(why ?? "yabai said nothing about window \(id)") }
@@ -3011,7 +3129,6 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
             return samples[id]
         }
         let back = onTims && wasOnTims == false
-        let quiet = latched || (final && endReported.value.contains(id))  // reported already (review 4: the end's last read)
         let flagged = quiet || back || (onTims && final)
         if flagged && !quiet {
             problem(back ? "window \(id) of the tree (\(app), pid \(pid)) was on \(look.timLocation) (found by \(via)) after the guard had seen it on Space \(before.map { String($0) } ?? "?"): macOS showed it to him again"
@@ -3019,14 +3136,13 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
         }
         // On Tim's screen before this first placement, for how long (until the move, or, if it is elsewhere now, until now).
         func slow(_ seconds: Double) {
-            guard !flagged, seconds > onTimsScreenLimit else { return }
-            problem(String(format: "window %ld of the tree (%@, pid %d) was on Tim's screen for %.1f ms before the guard placed it (more than %.0f ms)",
-                           id, app, pid, seconds * 1000, onTimsScreenLimit * 1000))
+            guard !flagged else { return }
+            slowPlacement(id, app: app, pid: pid, seconds: seconds)
         }
         let start = stretch.at
         let leftUnseen = before == nil && !onTims && stretch.onTims ? queried - start : nil
         let resolved = unresolved.update { $0.removeValue(forKey: id) }
-        if let resolved, resolved.reported, !nativePlaced {
+        if let resolved, resolved.reported {
             var located: [String: Any] = firstFields(id).merging([
                 "event": "window-located", "window": id, "pid": Int(pid), "app": app, "space": from, "via": via,
                 "unknownMs": ms(queried - resolved.seen),
@@ -3035,23 +3151,7 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
             emit(located)
         }
         if let leftUnseen { slow(leftUnseen) }
-        if from == space && !onTims {
-            if nativePlaced {
-                var placed = firstFields(id).merging(look.fields) { $1 }
-                placed.merge(["event": "placed-native", "window": id, "pid": Int(pid), "app": app, "space": space,
-                              "source": "CGWindowList+SkyLight", "placement": "placed-native (untracked by yabai)",
-                              "via": via, "at": decimal(queried - t0, 3)]) { $1 }
-                if let resolved { placed["unknownMs"] = ms(queried - resolved.seen) }
-                if let leftUnseen { placed["onTimSpaceMs"] = ms(leftUnseen) }
-                let first = nativePlacements.update { (rows: inout [Int: [String: Any]]) -> Bool in
-                    let first = (rows[id]?["pid"] as? Int) != Int(pid)
-                    rows[id] = placed
-                    return first
-                }
-                if first { emit(placed) }
-            }
-            return
-        }
+        if from == space && !onTims { return }
         if from == 0 {
             windowOffTarget(id, w, at: 0, look: look, via: via, why: "yabai places it on no Space, where a move by Space cannot reach it")
             return
@@ -3098,18 +3198,15 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
     }
 }
 
-/// GR2 (item 5): one absolute 4.0 s deadline for the final list's two tries, including helper termination and reaping.
-/// Each reply gets at most queryTimeout; cleanup time in the first try shortens the next one's reply allowance.
-/// A list neither try reads fails the check: the tree's windows cannot be vouched for.
-/// The final sweep's tries (finalWindowList in the summary and the check): each one's latency and why it failed.
+/// The final sweep's logical query record: attempts include their cleanup and share the ordinary 4 s bound.
 let finalWindowList = Locked([String: Any]())
 
 /// One read of yabai's window list: each window's id, pid and Space; or why it could not be read (a list that
-/// fails, runs out of time, or has a row without an id or pid). The sweep owns exhausted timeout adjudication.
-@Sendable func windowList(until: Double? = nil) -> (windows: [(id: Int, pid: pid_t, space: Int?)]?, why: String?, record: [String: Any]) {
+/// fails, runs out of time, or has a row without an id or pid). Only the final sweep owns timeout adjudication.
+@Sendable func windowList(ownsTimeout: Bool = false, until: Double? = nil) -> (windows: [(id: Int, pid: pid_t, space: Int?)]?, why: String?, record: [String: Any]) {
     let what = "yabai -m query --windows"
     let list: [[String: Any]]
-    let query = queryReply(["query", "--windows"], ownsTimeout: true, until: until)
+    let query = queryReply(["query", "--windows"], ownsTimeout: ownsTimeout, until: until)
     switch query.reply {
     case .exited(0, _):
         guard let rows = query.value as? [[String: Any]] else { return (nil, "\(what) answered unreadably", query.record) }
@@ -3129,19 +3226,21 @@ let finalWindowList = Locked([String: Any]())
 }
 
 /// A known tree window yabai's list omits, sampled directly by a sweep (`look`, taken at `sampled`): judged now, before
-/// its own yabai query (park), which may be slow while the window closes or moves. Counting on Tim's screen after a
-/// placement left it off (windowOnTims false), or at the final sweep, is a problem now (returns true: the park that
-/// follows reports no more of it). An existing unresolved entry takes every sample; a window yabai never placed found
-/// counting on his screen becomes unresolved here (unplacedAt) if it was not, so its closing during the query cannot
-/// clear it. A placed window's measured Tim state is kept (windowOnTims). Review 3: an exempt sample ends the stretch
-/// the window counted in now, at `sampled` (exempted), not at the reply of the query that follows.
-@Sendable func omittedSample(_ id: Int, _ look: WindowLook, at sampled: Double, seen: Double, via: String, final: Bool) -> Bool {
+/// its own yabai query (park), which may be slow while the window closes or moves. An exempt one is recorded
+/// (exempted, with its final record at the final sweep, which the wrapper's fresh read starts from) and needs no
+/// query: nil. Counting on Tim's screen after a placement left it off (windowOnTims false), or
+/// at the final sweep, is a problem now (true: the park that follows reports no more of it; false: it does not). An
+/// existing unresolved entry takes every sample; a window yabai never placed found counting on his screen becomes
+/// unresolved here (unplacedAt) if it was not, so its closing during the query cannot clear it. A placed window's
+/// measured Tim state is kept (windowOnTims). Review 3: an exempt sample ends the stretch the window counted in now, at
+/// `sampled` (exempted), not at the reply of the query that follows.
+@Sendable func omittedSample(_ id: Int, _ look: WindowLook, at sampled: Double, seen: Double, via: String, final: Bool) -> Bool? {
     if let open = unresolved.value[id] {
         unplacedAt(id, look, seen: open.seen, via: open.via, why: open.why, reported: open.reported)
     }
     if let reason = look.exempt {
-        exempted(id, look, at: sampled, reason: reason, via: via, found: nil, why: "yabai's window list omits it; not queried before this sample", final: false)
-        return false
+        exempted(id, look, at: sampled, reason: reason, via: via, found: nil, why: "yabai's window list omits it; not queried before this sample", final: final)
+        return nil
     }
     let onTims = look.onTims
     let was = windowOnTims.update { (samples: inout [Int: Bool]) -> Bool? in
@@ -3162,16 +3261,52 @@ let finalWindowList = Locked([String: Any]())
     return false
 }
 
+/// The WindowServer list could not be read by any sweep so far: that is a problem once per run.
+let nativeListFailed = Locked(false)
+
+typealias OmittedPark = (id: Int, seen: Double, via: String, latched: Bool)
+/// The known tree windows a non-final sweep sampled counting that yabai's list omits, waiting for their park.
+let omittedParks = Locked([OmittedPark]())
+
+/// Queues omitted parks on their own serial lane: a slow native query never holds up AX/shown parks on yabaiQueue.
+/// A window already waiting is not queued twice (its latched exposure report is kept).
+func queueOmittedParks(_ parks: [OmittedPark]) {
+    let begin = omittedParks.update { (waiting: inout [OmittedPark]) -> Bool in
+        let idle = waiting.isEmpty
+        for park in parks {
+            if let at = waiting.firstIndex(where: { $0.id == park.id }) {
+                waiting[at].latched = waiting[at].latched || park.latched
+            } else {
+                waiting.append(park)
+            }
+        }
+        return idle && !waiting.isEmpty
+    }
+    if begin { nativeParkQueue.async { parkNextOmitted() } }
+}
+
+func parkNextOmitted() {
+    guard let next = omittedParks.update({ (waiting: inout [OmittedPark]) -> OmittedPark? in
+        waiting.isEmpty ? nil : waiting.removeFirst()
+    }) else { return }
+    park(next.id, seen: next.seen, via: next.via, latched: next.latched, native: true)
+    if !omittedParks.value.isEmpty { nativeParkQueue.async { parkNextOmitted() } }
+}
+
 /// Samples and parks the union of listed and known tree windows, including on-target rows: a sticky window's Tim
-/// membership need not match yabai's index. Known omitted IDs are sampled directly and re-queried unless WindowServer
-/// proves them gone or owned outside the tree; each sample is judged before that query (omittedSample) and accumulates
-/// unplaced evidence, after the 3 s retries too. A failed/unreadable list is window-list-failed but does not suppress
-/// the known-window checks.
+/// membership need not match yabai's index. Known windows yabai's list omits (Accessibility's, the windows on screen's,
+/// and every owned window of WindowServer's all-window list, which sees ones on hidden Spaces) are sampled directly
+/// first, before any window is asked about (omittedSample), unless WindowServer proves them gone or owned outside the
+/// tree: an exempt one is recorded and never asked about; one that counts is parked after the listed windows, and
+/// accumulates unplaced evidence after the 3 s retries too. A non-final sweep parks those on nativeParkQueue
+/// (queueOmittedParks), never the AX/shown lane; the final sweep parks them itself. A failed list is window-list-failed
+/// and does not suppress the known-window checks; its exhausted timeout is a problem (queryReply), except the final
+/// sweep's, which it owns. A WindowServer list that cannot be read is a problem, once per run.
 /// The final sweep's two tries share one absolute deadline, own their timeouts and record final-window-list.
 func sweep(_ via: String, final: Bool = false) {
     tracked("sweep (\(via))", final: final) {
         let seen = uptime()
-        let read = windowList(until: seen + queryLimit)
+        let read = windowList(ownsTimeout: final, until: seen + queryLimit)
         if final {
             var record = read.record
             record["event"] = "final-window-list"
@@ -3182,14 +3317,50 @@ func sweep(_ via: String, final: Bool = false) {
         let windows = read.windows ?? []
         if let why = read.why {
             windowListFailed(via: via, why: why)
-            if !final { problem("the tree's windows could not be located (\(via)): \(why)") }
         } else {
             windowListFailure.update { $0 = nil }
         }
         var member: [pid_t: Bool] = [:]
+        func inTree(_ pid: pid_t) -> Bool {
+            if let known = member[pid] { return known }
+            let owned = tree.contains(pid)
+            member[pid] = owned
+            return owned
+        }
+        let listed = Set(windows.map { $0.id })
+        // A list that answered may still be stale or incomplete, and one that did not names nothing: every window of the
+        // tree that WindowServer has, on hidden Spaces too, joins the known set.
+        var native: [Int: (look: WindowLook, at: Double)] = [:]
+        if let all = serverWindows(onScreenOnly: false) {
+            for w in all where !listed.contains(w.id) {
+                guard let pid = w.pid, inTree(pid) else { continue }
+                let look = WindowLook(w.id, server: w)
+                let sampled = uptime()
+                native[w.id] = (look, sampled)
+                locateNative(w, pid: pid, via: via)
+                sighted(w.id, at: sampled, via: "CGWindowList", look: look)
+            }
+        } else if nativeListFailed.update({ (failed: inout Bool) -> Bool in defer { failed = true }; return !failed }) {
+            problem("the guard's all-window list could not be read (\(via)): a tree window yabai's list omits could go unseen")
+        }
+        // Every AX, listed and newly shown window is sighted before its first park: this is the complete known set. Each
+        // one yabai's list omits is judged by its own sample before any window is asked about.
+        var omitted: [OmittedPark] = []
+        for id in firstSightings.value.keys.sorted() where !listed.contains(id) {
+            let look = native[id]?.look ?? WindowLook(id)
+            let sampled = native[id]?.at ?? uptime()
+            if look.gone {
+                windowsUnknown.update { $0[id] = nil }
+            } else if let pid = look.server?.window?.pid, !inTree(pid) {
+                windowsUnknown.update { $0[id] = nil }
+                unresolved.update { $0[id] = nil }
+                countingSince.update { $0[id] = nil }
+            } else if let latched = omittedSample(id, look, at: sampled, seen: seen, via: via, final: final) {
+                omitted.append((id: id, seen: unresolved.value[id]?.seen ?? seen, via: via, latched: latched))
+            }
+        }
         for w in windows {
-            if member[w.pid] == nil { member[w.pid] = tree.contains(w.pid) }
-            guard member[w.pid] == true else {
+            guard inTree(w.pid) else {
                 windowsUnknown.update { $0[w.id] = nil }
                 unresolved.update { $0[w.id] = nil }
                 countingSince.update { $0[w.id] = nil }
@@ -3198,34 +3369,10 @@ func sweep(_ via: String, final: Bool = false) {
             sighted(w.id, at: seen, via: via)
             park(w.id, seen: seen, via: via, final: final)
         }
-        let listed = Set(windows.map { $0.id })
-        var nativeLooks: [Int: (look: WindowLook, at: Double)] = [:]
-        // A successful yabai list may still be stale/incomplete. Locate omitted owned windows by native pid,
-        // including off-screen windows; keep the original list's failure if it never answered.
-        if let native = allServerWindows() {
-            for w in native where !listed.contains(w.id) {
-                guard let pid = w.pid, tree.contains(pid) else { continue }
-                locateNative(w, via: via)
-                let look = WindowLook(w.id, server: w)
-                let sampled = uptime()
-                nativeLooks[w.id] = (look, sampled)
-                sighted(w.id, at: sampled, via: "CGWindowList", look: look)
-            }
-        }
-        // Every AX, listed and newly shown window is sighted before its first park: this is the complete known set.
-        for id in firstSightings.value.keys.sorted() where !listed.contains(id) {
-            let look = nativeLooks[id]?.look ?? WindowLook(id)
-            let sampled = nativeLooks[id]?.at ?? uptime()
-            if look.gone {
-                windowsUnknown.update { $0[id] = nil }
-            } else if let pid = look.server?.window?.pid, !tree.contains(pid) {
-                windowsUnknown.update { $0[id] = nil }
-                unresolved.update { $0[id] = nil }
-                countingSince.update { $0[id] = nil }
-            } else {
-                let latched = omittedSample(id, look, at: sampled, seen: seen, via: via, final: final)
-                park(id, seen: unresolved.value[id]?.seen ?? seen, via: via, final: final, latched: latched)
-            }
+        if final {
+            for window in omitted { park(window.id, seen: window.seen, via: window.via, final: true, latched: window.latched) }
+        } else {
+            queueOmittedParks(omitted)
         }
     }
 }
@@ -3286,18 +3433,8 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
 
 // MARK: - Windows on screen (GR2; shownQueue)
 
-/// The windows on screen now (WindowServer's list, every display's current Space); nil: unreadable. The rig reads its
-/// stand-in (rigServerWindows: the rows not marked off screen), and without one has none on screen.
-@Sendable func shownWindows() -> [ServerWindow]? {
-    if rigTest {
-        guard onscreenPath != nil else { return [] }
-        return rigServerWindows()?.filter { $0.onScreen != false }
-    }
-    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-        return nil
-    }
-    return list.compactMap(serverWindow)
-}
+/// The windows on screen now (WindowServer's list, every display's current Space); nil: unreadable (serverWindows).
+@Sendable func shownWindows() -> [ServerWindow]? { serverWindows(onScreenOnly: true) }
 
 /// --rig only: while the file `<name>-hold` exists in the directory of --onscreen's file, waits there (creating
 /// `<name>-held` first), for at most 3 s, so a test can change what the guard reads between two of its reads. Outside
@@ -3603,12 +3740,13 @@ let modalUnknown = "the windows on screen could not be read, so a system modal c
 @Sendable func confirmWindow(_ id: Int, until deadline: Double, pending: () -> String?,
                              ownsTimeout: Bool = false) -> (vouch: Vouch, timedOut: Double?) {
     var timedOut: Double?
+    let callerBudget = max(0, deadline - uptime())
     let found = vouch(id, pending: pending) {
         let left = deadline - uptime()
         guard left > 0.01 else { return nil }
         let began = (epoch: timEpoch.value, target: restoreTarget.value)
         let fact: WindowFact
-        let query = queryReply(["query", "--windows", "--window", String(id)], timeout: left, ownsTimeout: ownsTimeout, until: deadline)
+        let query = queryReply(["query", "--windows", "--window", String(id)], timeout: left, ownsTimeout: ownsTimeout, replyUntil: deadline)
         switch query.reply {
         case .exited(0, _):
             if let w = query.value as? [String: Any], let owner = (w["pid"] as? NSNumber)?.int32Value {
@@ -3618,8 +3756,8 @@ let modalUnknown = "the windows on screen could not be read, so a system modal c
                 fact = .unknown("yabai's answer about window \(id) is unreadable")
             }
         case .exited: fact = .unknown(unknownWindow(id))
-        case .timedOut(let allowed):
-            timedOut = allowed
+        case .timedOut:
+            timedOut = callerBudget
             fact = .unknown(unanswered(id))
         case .refused(let why): fact = .unknown(why)
         }
@@ -3931,17 +4069,25 @@ final class SpaceWatch {
         return map?.indexes[id]
     }
 
+    /// A window sample met a SkyLight Space yabai's map does not know: ask yabai for its map again (one request at a
+    /// time, at most once a second, as for a display read), so a later sample may know it.
+    func mapMissed() {
+        lock.lock(); defer { lock.unlock() }
+        refreshMap()
+    }
+
     enum NativePlacement { case unknown, onTims, elsewhere, assigned }
 
     /// Classifies every membership with one map/read snapshot; an unknown cannot hide beside a target.
-    /// Even the assigned Space is refused when Tim's display shows it.
+    /// Unlike ordinary counting, an assigned Space is not exempt from physical Tim visibility. Expected-Space
+    /// counting is enforced by the caller's WindowLook.onTims before accepting this proof.
     func placementOnAgent(_ memberships: [UInt64]) -> NativePlacement {
         lock.lock(); defer { lock.unlock() }
         guard !memberships.isEmpty, let map else { return .unknown }
         var assigned = false, tims = false
         for sid in memberships {
             guard let index = map.indexes[sid] else { return .unknown }
-            if timSpaces.contains(index) || sid == shown { tims = true }
+            if timMembership(index, shown: sid == shown) { tims = true }
             if index == space { assigned = true }
         }
         return tims ? .onTims : assigned ? .assigned : .elsewhere
@@ -4401,13 +4547,14 @@ func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  //
     // end's work is settled (or reported unsettled); and main, which serves the activations and notifications, serves
     // none in between.
     spaceWatch.seal()
+    let queries = yabaiQueries.value
     let records: [String: Any] = [
         "reverted": reverted, "moves": moves.value, "spaceRestores": spaceEvents.value, "problems": problems.value,
         "spaceHistory": spaceWatch.history, "ownerQueryTimeouts": ownerTimeouts.value, "windowFaults": windowFaults.value,
         "finalWindowList": finalWindowList.value.isEmpty ? NSNull() as Any : finalWindowList.value as Any,
-        "yabaiQueries": yabaiQueries.value,
-        "nativeWindows": nativeWindows.value.values.sorted { ($0["window"] as? Int ?? 0) < ($1["window"] as? Int ?? 0) },
-        "nativePlacements": nativePlacements.value.values.sorted { ($0["window"] as? Int ?? 0) < ($1["window"] as? Int ?? 0) },
+        "yabaiQueries": queries.rows, "yabaiQueryStats": queries.stats,
+        "nativeWindows": byWindow(nativeWindows.value),
+        "nativePlacements": byWindow(nativePlacements.value),
         "exemptWindows": exemptRecords.value,
         "timSpace": ["atLaunch": timSpaceAtLaunch ?? NSNull(), "expected": spacePolicy.value.expected.map(spaceField) ?? NSNull()] as [String: Any],
     ]

@@ -24,7 +24,7 @@ and/or guards one that something else starts, then checks that nothing took it.
     SIGTERM/SIGINT.
 - Before it launches anything the guard takes its baseline: Tim's front app, his focused window and its Space
   (from yabai's window list), the Space his display shows, and yabai's Spaces by SkyLight id. A yabai query there
-  that fails, misses its 2 s deadline or answers unreadably (a window row that does not say whether it has focus,
+  that fails, exhausts its two attempts within 4 s or answers unreadably (a window row that does not say whether it has focus,
   a focused row without its id, pid or Space, a Space without its id), a direct read of his display (SkyLight)
   that does not show the Space yabai says it shows, or an AppKit app (below) that is not the guard's own or whose
   activation policy will not be .prohibited, launches nothing: exit 2.
@@ -46,8 +46,9 @@ and/or guards one that something else starts, then checks that nothing took it.
   by then, it focuses Tim's restore-target window by id through
   yabai (the one he had focused at launch or after his last own app switch, never a window of the tree), or
   re-activates his app again if there is none or the focus fails (1 s). Before every focus his app is checked again,
-  and so is the window's owner, by a 1 s query made for that focus whose answer counts only if no activation,
-  Space change or new restore target came while it ran (it is asked again only while the focus is still wanted): a
+  and so is the window's owner, by up to two attempts in the focus's 1 s reply budget (about 450 ms, 50 ms backoff,
+  then the remaining time; helper cleanup is bounded separately). An answer counts only if no activation,
+  Space change or new restore target came while it ran (it is asked again only while focus is still wanted): a
   window it cannot vouch for is not focused, and the focus must still be wanted immediately before it is made. The
   re-activation checks his app again in the same main-queue turn. An owner query that runs out of time is an
   owner-query-timeout event, expected-slow and no problem only when the window was not focused, an activation (at
@@ -115,12 +116,16 @@ and/or guards one that something else starts, then checks that nothing took it.
   shows it gone) is judged by its earlier samples; if the guard had never seen it before, it fails the check (where
   it was is unknown).
   Every sweep also reads CGWindowList's all-window list, including hidden Spaces, to locate windows yabai omits by
-  the native owner's current pid/start identity. window-native-located / nativeWindows records id, pid, bounds and
-  on-screen state.
-  An id query that exits 1 (untracked), with CG owner/bounds and complete SkyLight memberships proving the window
-  already on its assigned agent Space and on no Tim/Tim-visible Space, is real placement: placed-native (untracked
-  by yabai), recorded in nativePlacements. No native move is made. Unknown/unmapped Space, Tim membership, timed-out
-  queries and earlier counted exposure still fail closed; native location alone excuses none of these.
+  the native owner's current pid/start identity; each is sampled directly first, so an exempt one (below) is never
+  asked about. Others are parked on a separate serial native lane, so a hung discovery/retry never delays AX/shown
+  parks; each id has one in-flight park across both lanes. window-native-located / nativeWindows records id, pid,
+  bounds and on-screen state. A list that cannot be read is a problem, once per run.
+  An id query that exits 1 with yabai's "could not locate window" diagnostic (not a socket failure), with CG
+  owner/bounds and complete SkyLight memberships proving the window already on its assigned agent Space and on
+  no Tim/Tim-visible Space, is real placement: placed-native (untracked by yabai), recorded in nativePlacements.
+  No native move is made. A membership yabai's map cannot name, or Tim's visible assigned Space, is unplaced like
+  any other reason (retried, window-unknown, a problem at the end unless placed); timed-out queries and earlier
+  counted exposure fail closed too; native location alone excuses none of these.
   A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
   (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen (every
@@ -146,10 +151,12 @@ and/or guards one that something else starts, then checks that nothing took it.
   "caller" or "target"). macOS still lets an app activate itself and
   opens its new windows on the Space Tim is viewing: the guard undoes both within milliseconds, it cannot prevent
   them. The guard exits when gui-launch does, even by SIGKILL. It bounds every yabai call over its exit and its
-  output. Every query gets up to two attempts with 50 ms backoff, at most 2 s per reply, within one absolute 4 s
-  deadline including helper cleanup; the restore-owner query retains its absolute 1 s deadline. Mutation commands
-  are not retried. A recovered query is no problem; exhausted queries remain fail-closed under the existing owner
-  and window adjudications. yabai-query / yabaiQueries records args, attempts, errors and per-attempt/total latency.
+  output. Transient reads get up to two attempts with 50 ms backoff, at most 2 s per reply, within one absolute 4 s
+  deadline including helper cleanup; a definitive id miss is single-try. Restore-owner replies share the caller's
+  1 s deadline, with bounded cleanup outside it. Mutation commands are not retried. A recovered query is no problem;
+  exhausted queries remain fail-closed under the existing owner and window adjudications. Every yabai-query event
+  records args, attempts, errors and latency. yabaiQueries retains the first 128 records; yabaiQueryStats reports
+  total/failed/retried/retained/dropped counts and total/max latency, so summary size is bounded without losing totals.
   Output that reaches 16 MiB is refused,
   whether or not the helper exits, and fails the check. The guard runs none on its main thread, and ends each with its process
   group (a member it cannot read counts as alive). At its end, work in flight (reverts included) gets 3 s to finish
@@ -676,8 +683,8 @@ def main():
           'spaceRestored': len([e for e in summary.get('spaceRestores') or [] if e.get('event') == 'space-restored']),
           'spaceHistory': summary.get('spaceHistory') or [], 'ownerQueryTimeouts': summary.get('ownerQueryTimeouts') or [],
           'windowFaults': summary.get('windowFaults') or [], 'exemptWindows': summary.get('exemptWindows') or [],
-          'yabaiQueries': summary.get('yabaiQueries') or [], 'nativeWindows': summary.get('nativeWindows') or [],
-          'nativePlacements': summary.get('nativePlacements') or [],
+          'yabaiQueries': summary.get('yabaiQueries') or [], 'yabaiQueryStats': summary.get('yabaiQueryStats') or {},
+          'nativeWindows': summary.get('nativeWindows') or [], 'nativePlacements': summary.get('nativePlacements') or [],
           'placement': 'caller' if args.allow_caller_placement else 'target',
           'finalWindowList': summary.get('finalWindowList'), 'exemptionProbe': probe})
     if found:

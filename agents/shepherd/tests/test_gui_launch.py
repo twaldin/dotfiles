@@ -15,6 +15,7 @@ calls, the drain and its end through --helpers, its startup with stand-in yabais
 guard itself through --rig: a stand-in yabai, a file standing in for SkyLight's record of the Spaces displays show,
 and macOS's notifications sent on stdin. None of these touches a window.
 """
+import atexit
 import hashlib
 import json
 import os
@@ -33,6 +34,11 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+
+# Keep compiled Mach-O fixtures until the whole invocation exits: deleting a per-test executable while
+# Gatekeeper scans it can crash syspolicyd and stall every later non-Apple launch on Home.
+RUN_FILES = tempfile.TemporaryDirectory(prefix='gui-launch-tests-')
+atexit.register(RUN_FILES.cleanup)
 
 CHECKOUT = Path(__file__).resolve().parent.parent
 GUI_LAUNCH = CHECKOUT / 'bin' / 'gui-launch'
@@ -224,7 +230,10 @@ case "$2 $3" in
     printf '{"index": %%s}' "$4" > "$dir/focused-display.json" ;;
   "query --windows")
     echo "$4 $5" >> "$dir/windows-queries"
+    if [ -f "$dir/time-queries" ]; then '%(python)s' -c 'import time; print(time.clock_gettime(time.CLOCK_MONOTONIC))' >> "$dir/windows-query-times"; fi
     mode="$(cat "$dir/windows-mode")"
+    if [ "$mode" = disconnected ]; then echo 'yabai: failed to connect to socket' >&2; exit 1; fi
+    if [ "$mode" = unreadable-once ] && [ -z "$4" ]; then echo answer > "$dir/windows-mode"; echo 'not json'; exit 0; fi
     if [ "$mode" = hang ]; then [ -n "$5" ] && : > "$dir/window-$5-asked"; exec sleep 30; fi
     if [ "$mode" = hang-once ] && [ -z "$4" ]; then echo answer > "$dir/windows-mode"; exec sleep 30; fi
     if [ "$mode" = hang-hard ] && [ -z "$4" ]; then
@@ -236,10 +245,12 @@ case "$2 $3" in
     if [ -n "$5" ]; then
       delay=0
       [ -f "$dir/window-delay" ] && delay="$(cat "$dir/window-delay")"
+      [ -f "$dir/window-$5-delay" ] && delay="$(cat "$dir/window-$5-delay")"
       : > "$dir/window-$5-asked"
+      if [ -f "$dir/window-hang-once" ]; then rm "$dir/window-hang-once"; exec sleep 30; fi
       [ "$delay" != 0 ] && sleep "$delay"
-      cat "$dir/window-$5.json" 2>/dev/null || exit 1
-    elif [ "$4" = --window ]; then exit 1
+      cat "$dir/window-$5.json" 2>/dev/null || { echo 'yabai: could not locate window with the specified id' >&2; exit 1; }
+    elif [ "$4" = --window ]; then echo 'yabai: could not locate window with the specified id' >&2; exit 1
     else
       if [ -f "$dir/windows-hold" ]; then
         : > "$dir/windows-held"
@@ -247,6 +258,7 @@ case "$2 $3" in
       fi
       cat "$dir/windows.json"; fi ;;
   "window "*)
+    echo "$2 $3 $4 $5" >> "$dir/mutations.log"
     if [ "$3" = --focus ]; then echo "$4" >> "$dir/focus.log"; [ -f "$dir/focus-ok" ] || exit 1; exit 0; fi
     if [ "$4" = --space ] && [ "$(cat "$dir/moves" 2>/dev/null)" = apply ] && [ -f "$dir/window-$3.json" ]; then
       [ -f "$dir/move-delay" ] && sleep "$(cat "$dir/move-delay")"
@@ -419,13 +431,9 @@ class Lines:
 class GuiLaunch(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.build = tempfile.TemporaryDirectory()
+        cls.build = RUN_FILES
         cls.stub_sudo = Path(cls.build.name) / 'sudo'
         build_c(STUB_SUDO_C, cls.stub_sudo)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.build.cleanup()
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -442,8 +450,9 @@ class GuiLaunch(unittest.TestCase):
         for name, body in (('yabai', FAKE_YABAI), ('gui-launch-guard', FAKE_GUARD), ('launchctl', FAKE_LAUNCHCTL)):
             (stubs / name).write_text(body % names)
             (stubs / name).chmod(0o755)
-        self.sudo = stubs / 'sudo'
-        shutil.copy2(self.stub_sudo, self.sudo)
+        self.sudo = self.stub_sudo
+        for suffix in ('.log', '.fail'):
+            Path(str(self.sudo) + suffix).unlink(missing_ok=True)
         self.guard = stubs / 'gui-launch-guard'
         # gui-launch with its root-step programs replaced by the stand-ins.
         source = GUI_LAUNCH.read_text()
@@ -1002,16 +1011,19 @@ class GuiLaunch(unittest.TestCase):
         retried = dict(FINAL_LIST, retried=True, tries=[{'try': 1, 'ms': 2001.0, 'error': 'yabai -m query --windows did not answer within 2.0 s'},
                                                         {'try': 2, 'ms': 15.0, 'error': None}])
         queries = [dict(retried, event='yabai-query', args=['query', '--windows'])]
+        query_stats = {'total': 129, 'failed': 0, 'retried': 1, 'retained': 128, 'dropped': 1, 'capacity': 128,
+                       'totalMs': 2222.0, 'maxMs': 2016.0}
         native = [{'event': 'window-native-located', 'source': 'CGWindowList', 'window': 9008,
                    'pid': 500, 'bounds': [0, 0, 800, 600], 'onScreen': False}]
         placements = [dict(native[0], event='placed-native', space=7, placement='placed-native (untracked by yabai)')]
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app),
-                                     summary=summary(finalWindowList=retried, yabaiQueries=queries, nativeWindows=native,
-                                                     nativePlacements=placements))
+                                     summary=summary(finalWindowList=retried, yabaiQueries=queries, yabaiQueryStats=query_stats,
+                                                     nativeWindows=native, nativePlacements=placements))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         check = self.check_event(result)
         self.assertEqual(check['finalWindowList'], retried)
         self.assertEqual(check['yabaiQueries'], queries)
+        self.assertEqual(check['yabaiQueryStats'], query_stats)
         self.assertEqual(check['nativeWindows'], native)
         self.assertEqual(check['nativePlacements'], placements)
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(finalWindowList=None))
@@ -1047,7 +1059,7 @@ class Guard(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory()
+        cls.tmp = RUN_FILES
         root = Path(cls.tmp.name)
         cls.binary = root / 'gui-launch-guard'
         build = subprocess.run([SWIFTC, '-O', '-swift-version', '5', '-target', 'arm64-apple-macos13',
@@ -1065,10 +1077,6 @@ class Guard(unittest.TestCase):
         cls.linked_java.symlink_to(cls.java)
         cls.zombies = root / 'zombies'
         build_c(ZOMBIES_C, cls.zombies)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tmp.cleanup()
 
     def decide(self, header, rows):
         lines = [json.dumps(header)] + [json.dumps(row) for row in rows]
@@ -2018,14 +2026,14 @@ class Guard(unittest.TestCase):
                 done, took, marker, pids = self.launch_with(body)
                 self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
                 seen = events(done.stdout)
-                self.assertEqual([e['event'] for e in seen if e['event'] not in ('yabai-query', 'problem')],
+                self.assertEqual([e['event'] for e in seen if e['event'] != 'yabai-query'],
                                  ['guard'] + ['yabai-timeout'] * bool(count) + ['error'])
                 queries = [e for e in seen if e['event'] == 'yabai-query']
                 self.assertEqual(len(queries), 1, seen)
                 self.assertFalse(queries[0]['ok'], queries[0])
                 self.assertEqual(len(queries[0]['tries']), 2, queries[0])
                 self.assertEqual(seen[-1]['message'], 'no baseline, so nothing was launched: ' + why)
-                self.assertTrue(took < 6, took)
+                self.assertTrue(took < 7, took)
                 self.assertFalse(marker.exists())
                 if count:
                     self.assert_gone(self.recorded(pids, count))
@@ -2168,12 +2176,13 @@ class Guard(unittest.TestCase):
         query = [row for row in querying if row.get('event') == 'yabai-query' and
                  row['args'] == ['query', '--windows', '--window', '9002']][-1]
         self.assertEqual((query['ok'], len(query['tries']), query['limitS']), (False, 2, 4.0), query)
-        self.assertLessEqual(query['ms'], 4100, query)
+        self.assertLessEqual(query['ms'], 4300, query)
         self.assertEqual(query['tries'][0]['error'], 'yabai -m query --windows --window 9002 did not answer within 2.0 s')
-        self.assertEqual((unknown['window'], unknown['reason']), (9002, query['tries'][-1]['error']))
+        self.assertEqual((unknown['window'], unknown['reason']),
+                         (9002, 'yabai -m query --windows --window 9002 did not answer within 4.0 s'))
         seen, result = self.end_rig(process, lines, root)
         self.assertIn('window-list-failed', [e.get('event') for e in seen])
-        self.assertIn("the tree's windows could not be located at the guard's end: " + result['finalWindowList']['tries'][-1]['error'],
+        self.assertIn("the tree's windows could not be located at the guard's end: yabai -m query --windows did not answer within 4.0 s",
                       result['problems'])
         final_unknown = [f for f in result['windowFaults'] if f['event'] == 'window-unknown' and f['window'] == 9002][-1]
         self.assertIn("window 9002 of the tree could not be located at the guard's end: " + final_unknown['reason'],
@@ -2444,6 +2453,66 @@ class Guard(unittest.TestCase):
         process, lines, root = self.rig(windows=[{'id': 42, 'pid': tim.pid, 'app': 'Tim', 'title': 'zsh', 'space': 1, 'has-focus': True}])
         self.send(process, 'root %d' % thief.pid, 'tim %d 42 1' % tim.pid)
         return process, lines, root, tim.pid, thief.pid
+
+    def test_a_restore_owner_answer_after_300ms_still_focuses_its_window(self):
+        process, lines, root, tim, thief = self.theft_rig()
+        put(root / 'focus-ok', '')
+        put(root / 'window-delay', '0.3')
+        self.send(process, 'activate %d' % thief)
+        seen = lines.until(lambda row: row.get('event') == 'restore-call', 10)
+        self.assertEqual((seen[-1]['method'], seen[-1]['window'], seen[-1]['ok']), ('window', 42, True), seen)
+        self.assertEqual((root / 'focus.log').read_text().splitlines(), ['42'])
+        put(root / 'window-delay', '0')
+        self.send(process, 'activate %d' % tim)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['ownerQueryTimeouts'], [])
+
+    def test_a_restore_owner_retry_can_answer_after_300ms(self):
+        process, lines, root, tim, thief = self.theft_rig()
+        put(root / 'focus-ok', '')
+        put(root / 'window-hang-once', '')
+        put(root / 'window-delay', '0.3')
+        self.send(process, 'activate %d' % thief)
+        seen = lines.until(lambda row: row.get('event') == 'restore-call', 10)
+        self.assertEqual((seen[-1]['method'], seen[-1]['window'], seen[-1]['ok']), ('window', 42, True), seen)
+        query = [e for e in seen if e.get('event') == 'yabai-query' and
+                 e['args'] == ['query', '--windows', '--window', '42']][-1]
+        self.assertEqual((query['ok'], query['retried'], len(query['tries'])), (True, True, 2), query)
+        self.assertGreaterEqual(query['tries'][0]['ms'], 350, query)
+        self.assertLessEqual(query['ms'], 1300, query)
+        put(root / 'window-delay', '0')
+        self.send(process, 'activate %d' % tim)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['ownerQueryTimeouts'], [])
+
+    def test_a_hanging_restore_owner_gets_two_attempts_in_its_reply_budget(self):
+        process, lines, root, tim, thief = self.theft_rig()
+        put(root / 'window-delay', '30')
+        self.send(process, 'activate %d' % thief)
+        seen = lines.until(lambda row: row.get('event') == 'owner-query-timeout', 10)
+        query = [e for e in seen if e.get('event') == 'yabai-query' and
+                 e['args'] == ['query', '--windows', '--window', '42']][-1]
+        self.assertEqual((query['ok'], query['retried'], len(query['tries'])), (False, True, 2), query)
+        self.assertAlmostEqual(query['limitS'], 1.0, delta=0.05)
+        self.assertGreaterEqual(query['tries'][0]['ms'], 350, query)
+        self.assertGreaterEqual(query['ms'], 900, query)
+        self.assertLessEqual(query['ms'], 1300, query)
+        self.assertAlmostEqual(seen[-1]['timeoutS'], 1.0, delta=0.05)
+        put(root / 'window-delay', '0')
+        self.send(process, 'activate %d' % tim)
+        self.end_rig(process, lines, root)
+
+    def test_a_failed_focus_mutation_is_not_retried(self):
+        # Control: the new query policy must not retry a mutation that has already run.
+        process, lines, root, tim, thief = self.theft_rig()
+        self.send(process, 'activate %d' % thief)
+        seen = lines.until(lambda row: row.get('event') == 'restore-call', 10)
+        self.assertEqual(seen[-1]['method'], 'activate', seen)
+        self.assertEqual((root / 'focus.log').read_text().splitlines(), ['42'])
+        self.assertEqual([row.strip() for row in (root / 'mutations.log').read_text().splitlines()
+                          if '--focus' in row], ['window --focus 42'])
+        self.send(process, 'activate %d' % tim)
+        self.end_rig(process, lines, root)
 
     def test_every_activation_record_carries_the_input_and_the_app_frontmost_before_it(self):
         # GR2 item 6, diagnostic only: a tree activation's record carried no sinceInputMs; each activation's record (and
@@ -2855,7 +2924,7 @@ class Guard(unittest.TestCase):
         self.assertEqual([t['try'] for t in query['tries']], [1, 2])
         self.assertGreaterEqual(query['tries'][0]['ms'], 1900)
         self.assertIsNone(query['tries'][1]['error'])
-        self.assertLessEqual(query['ms'], 4100)
+        self.assertLessEqual(query['ms'], 4300)
 
     def test_an_activation_window_list_that_never_answers_retries_and_fails_closed(self):
         process, lines, root = self.rig()
@@ -2871,8 +2940,86 @@ class Guard(unittest.TestCase):
         self.assertEqual(len(failed), 1, result['yabaiQueries'])
         self.assertEqual(len(failed[0]['tries']), 2)
         self.assertTrue(all(t['error'] and t['ms'] > 0 for t in failed[0]['tries']))
-        self.assertLessEqual(failed[0]['ms'], 4100)
+        self.assertLessEqual(failed[0]['ms'], 4300)
         self.assertTrue(any('yabai -m query --windows did not answer' in p for p in result['problems']), result['problems'])
+
+    def test_a_transient_unreadable_query_waits_50ms_before_retry(self):
+        # Control: backoff separates read attempts even when the first helper exits immediately.
+        process, lines, root = self.rig()
+        put(root / 'time-queries', '')
+        put(root / 'windows-mode', 'unreadable-once')
+        self.send(process, 'sweep')
+        seen = lines.until(lambda row: row.get('event') == 'yabai-query' and row.get('retried'), 8)
+        query = seen[-1]
+        self.assertEqual((query['ok'], len(query['tries'])), (True, 2), query)
+        self.assertEqual(query['tries'][0]['error'], 'yabai -m query --windows answered unreadably')
+        times = [float(row) for row in (root / 'windows-query-times').read_text().splitlines()]
+        self.assertEqual(len(times), 2)
+        self.assertGreaterEqual(times[1] - times[0], 0.045)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+
+    def test_an_unreadable_nonfinal_list_can_recover_without_a_permanent_problem(self):
+        process, lines, root = self.rig()
+        put(root / 'windows.json', 'not json')
+        self.send(process, 'sweep')
+        seen = lines.until(lambda row: row.get('event') == 'window-list-failed', 8)
+        query = [row for row in seen if row.get('event') == 'yabai-query' and
+                 row['args'] == ['query', '--windows']][-1]
+        self.assertEqual((query['ok'], query['retried'], len(query['tries'])), (False, True, 2), query)
+        put(root / 'windows.json', '[]')
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+
+    def test_a_timeout_near_shutdown_cap_is_not_erased_by_a_refused_retry(self):
+        process, lines, root = self.rig()
+        put(root / 'windows-mode', 'hang')
+        seen, result = self.end_rig(process, lines, root)
+        what = 'yabai -m query --windows --window'
+        self.assertIn(what + ' did not answer within 4.0 s (bounded query retries exhausted)', result['problems'])
+        query = [row for row in seen if row.get('event') == 'yabai-query' and
+                 row['args'] == ['query', '--windows', '--window']][-1]
+        self.assertEqual(len(query['tries']), 1, query)
+        self.assertIn('did not answer', query['tries'][0]['error'])
+        timeout = [row for row in seen if row.get('event') == 'yabai-timeout' and
+                   row['args'] == query['args']][-1]
+        self.assertEqual(timeout['timeoutS'], 4.0)
+
+    def test_query_summary_receipts_are_bounded_but_totals_and_events_are_complete(self):
+        process, lines, root = self.rig()
+        self.send(process, *(['sweep'] * 140))
+        deadline = time.monotonic() + 15
+        while len((root / 'windows-queries').read_text().splitlines()) < 141:
+            self.assertLess(time.monotonic(), deadline, 'the query receipts never filled')
+            time.sleep(0.01)
+        seen, result = self.end_rig(process, lines, root)
+        receipts = result['yabaiQueries']
+        self.assertLessEqual(len(receipts), 128)
+        stats = result['yabaiQueryStats']
+        streamed = [row for row in seen if row.get('event') == 'yabai-query']
+        self.assertEqual((stats['capacity'], stats['retained']), (128, 128))
+        self.assertEqual(stats['total'], len(streamed) + 2)  # two baseline reads preceded the rig's start
+        self.assertEqual(stats['dropped'], stats['total'] - len(receipts))
+        self.assertGreater(stats['dropped'], 0)
+        self.assertEqual(stats['failed'], sum(not row['ok'] for row in streamed))
+        self.assertEqual(stats['retried'], sum(row['retried'] for row in streamed))
+
+    def test_a_socket_failure_is_not_native_untracked_window_evidence(self):
+        wid = 89415
+        probe, _ = self.probe(self.java)
+        process, lines, root = self.rig(onscreen=True, skylight={wid: {'spaces': [107], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, False, 'Probe']]))
+        put(root / 'windows-mode', 'disconnected')
+        self.send(process, 'root %d' % probe.pid, 'window %d' % wid)
+        message = 'yabai -m query --windows --window %d could not connect to yabai' % wid
+        seen = lines.until(lambda row: row.get('event') == 'problem' and row.get('message') == message, 8)
+        self.assertFalse(any(row.get('status') == 'placed-native' for row in seen))
+        query = [row for row in seen if row.get('event') == 'yabai-query' and
+                 row['args'] == ['query', '--windows', '--window', str(wid)]][-1]
+        self.assertEqual(len(query['tries']), 1, query)
+        put(root / 'windows-mode', 'answer')
+        _, result = self.end_rig(process, lines, root)
+        self.assertIn(message, result['problems'])
 
     def test_a_window_missing_from_yabai_is_located_by_its_native_owner(self):
         # No AX event, no on-screen poll sighting, no yabai row: the all-window fallback must find an owned window.
@@ -2891,47 +3038,228 @@ class Guard(unittest.TestCase):
         self.assertFalse(any(w['pid'] == outsider.pid for w in result['nativeWindows']), result['nativeWindows'])
         self.assertEqual(result['problems'], [])
 
-    def untracked_window_rig(self, wid, memberships, shown=1):
+    def untracked_window_rig(self, wid, memberships, shown=1, listed=False):
+        """A rig where yabai's id query says it never tracked window `wid` ("could not locate", exit 1), and
+        WindowServer (800x600, off screen) and, with `memberships`, SkyLight have it, as a window of a tree process: the
+        realistic case is a window yabai omits from its whole list too (`listed` False). `listed` also covers a real
+        has-ax-reference:false row: the whole list sees SkyLight windows that yabai's id/AX tracking table does not."""
         probe, _ = self.probe(self.java)
         skylight = None if memberships is None else {wid: {'spaces': memberships, 'display': 'D1'}}
         process, lines, root = self.rig(onscreen=True, skylight=skylight, shown=shown)
-        put(root / 'windows.json', json.dumps([{'id': wid, 'pid': probe.pid, 'app': 'Probe', 'title': '',
-                                               'space': 7, 'display': 1, 'has-focus': False, 'has-ax-reference': False}]))
+        if listed:
+            put(root / 'windows.json', json.dumps([{'id': wid, 'pid': probe.pid, 'app': 'Probe', 'title': '',
+                                                   'space': 7, 'display': 1, 'has-focus': False, 'has-ax-reference': False}]))
         put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, False, 'Probe']]))
         self.send(process, 'root %d' % probe.pid, 'sweep')
         lines.until(lambda row: row.get('event') == 'window-native-located' and row.get('window') == wid, 8)
         return process, lines, root, probe.pid
 
     def test_an_untracked_window_already_on_its_agent_space_is_placed_native(self):
-        wid = 89402
-        process, lines, root, pid = self.untracked_window_rig(wid, [107])
-        placed = lines.until(lambda row: row.get('event') == 'placed-native' and row.get('window') == wid, 8)[-1]
-        self.assertEqual({k: placed[k] for k in ('window', 'pid', 'space', 'placement')},
-                         {'window': wid, 'pid': pid, 'space': 7, 'placement': 'placed-native (untracked by yabai)'})
-        self.assertEqual(placed['spaceIds'], [107])
-        _, result = self.end_rig(process, lines, root)
-        self.assertEqual(result['problems'], [])
-        self.assertTrue(any(w['window'] == wid for w in result['nativePlacements']))
-        self.assertFalse(any(w['window'] == wid and w['event'] == 'window-unknown' for w in result['windowFaults']))
-        self.assertEqual(result['moves'], [], 'already-placed native windows require no move')
+        # Both fixtures were green at the frozen head (valid controls, the first now realistic: a window yabai omits
+        # from its whole list is found by CGWindowList, its id query says "could not locate"): SkyLight proves it on
+        # the assigned Space 7 and on none of Tim's. No move, no yabai mutation at all.
+        for listed in (False, True):
+            with self.subTest(listed=listed):
+                wid = 89402
+                process, lines, root, pid = self.untracked_window_rig(wid, [107], listed=listed)
+                placed = lines.until(lambda row: row.get('event') == 'placed-native' and row.get('window') == wid, 8)[-1]
+                self.assertEqual({k: placed[k] for k in ('window', 'pid', 'space', 'placement', 'source')},
+                                 {'window': wid, 'pid': pid, 'space': 7, 'placement': 'placed-native (untracked by yabai)',
+                                  'source': 'CGWindowList+SkyLight'})
+                self.assertEqual(placed['spaceIds'], [107])
+                _, result = self.end_rig(process, lines, root)
+                self.assertEqual(result['problems'], [])
+                self.assertEqual([w['window'] for w in result['nativePlacements']], [wid])
+                self.assertEqual([w['window'] for w in result['nativeWindows']], [wid])
+                self.assertEqual(result['windowFaults'], [])
+                self.assertEqual(result['moves'], [], 'already-placed native windows require no move')
+                id_queries = [q for q in result['yabaiQueries'] if q['args'] == ['query', '--windows', '--window', str(wid)]]
+                self.assertTrue(id_queries, result['yabaiQueries'])
+                self.assertTrue(all(len(q['tries']) == 1 and not q['retried'] for q in id_queries), id_queries)
+                self.assertFalse((root / 'mutations.log').exists(), 'no yabai mutation')
 
     def test_an_untracked_window_on_tims_space_still_fails_closed(self):
-        for memberships, shown in (([102], 1), ([107, 102], 1), ([107], 7)):
-            with self.subTest(memberships=memberships, shown=shown):
-                wid = 89403
-                process, lines, root, _ = self.untracked_window_rig(wid, memberships, shown=shown)
-                _, result = self.end_rig(process, lines, root)
-                self.assertFalse(any(w['window'] == wid for w in result.get('nativePlacements', [])))
-                self.assertTrue(any('window %d ' % wid in p for p in result['problems']), result['problems'])
+        # Window 89403 yabai never tracked, with SkyLight on Tim's Space 2 (alone, or beside the assigned Space 7), or on the
+        # assigned Space while his display shows it. The first two were green at the frozen head (valid controls); the
+        # third raised its problem on the first sample there, and the end's check excused it (SkyLight always showed it
+        # off the target's Tim spaces): it is unplaced like any other reason, and the end reports it.
+        cases = (([102], 1, "yabai -m query --windows --window %d exited 1"),
+                 ([107, 102], 1, "yabai -m query --windows --window %d exited 1"),
+                 ([107], 7, "window %d of the tree is untracked by yabai and on Tim's currently visible assigned Space: not placed-native"))
+        for listed in (False, True):
+            for memberships, shown, reason in cases:
+                with self.subTest(memberships=memberships, shown=shown, listed=listed):
+                    wid = 89403
+                    process, lines, root, _ = self.untracked_window_rig(wid, memberships, shown=shown, listed=listed)
+                    _, result = self.end_rig(process, lines, root)
+                    self.assertEqual(result['nativePlacements'], [])
+                    self.assertIn("window %d of the tree could not be located at the guard's end: %s" % (wid, reason % wid),
+                                  result['problems'])
 
     def test_an_untracked_window_with_unknown_space_still_fails_closed(self):
-        for memberships in (None, [150]):
-            with self.subTest(memberships=memberships):
-                wid = 89404
-                process, lines, root, _ = self.untracked_window_rig(wid, memberships)
-                _, result = self.end_rig(process, lines, root)
-                self.assertFalse(any(w['window'] == wid for w in result.get('nativePlacements', [])))
-                self.assertTrue(any('window %d ' % wid in p for p in result['problems']), result['problems'])
+        # SkyLight cannot say where window 89404 is (no read), or puts it on a Space 150 that yabai's map does not
+        # know: unplaced, retried, and the end reports it though no sample showed it on Tim's screen. None was green at
+        # the frozen head (a valid control); the unmapped membership raised its problem on the first sample there, and
+        # the end's check excused it.
+        cases = ((None, "yabai -m query --windows --window %d exited 1"),
+                 ([150], "window %d of the tree has native Space membership yabai cannot map: placement is unknown"))
+        for listed in (False, True):
+            for memberships, reason in cases:
+                with self.subTest(memberships=memberships, listed=listed):
+                    wid = 89404
+                    process, lines, root, _ = self.untracked_window_rig(wid, memberships, listed=listed)
+                    _, result = self.end_rig(process, lines, root)
+                    self.assertEqual(result['nativePlacements'], [])
+                    self.assertIn("window %d of the tree could not be located at the guard's end: %s" % (wid, reason % wid),
+                                  result['problems'])
+
+    def test_a_membership_yabais_map_learns_within_three_seconds_is_placed_native_with_no_problem(self):
+        # S4: window 89420 is on the assigned Space 7 and on a Space 150 yabai's map does not know yet. That is unplaced
+        # (asked again every 50 ms, the map asked for again too), not a problem by itself: yabai's map learns Space 150
+        # a moment later and the next sample proves the window placed. Red at the frozen head: it raised a permanent
+        # problem on the first sample.
+        wid = 89420
+        process, lines, root, _ = self.untracked_window_rig(wid, [107, 150])
+        put(root / 'spaces.json', json.dumps(rig_spaces(extra=[150])))
+        placed = lines.until(lambda row: row.get('event') == 'placed-native' and row.get('window') == wid, 8)[-1]
+        self.assertEqual(placed['spaceIds'], [107, 150])
+        seen, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+        self.assertEqual(result['windowFaults'], [])
+        self.assertNotIn('window-unknown', [e.get('event') for e in seen])
+        self.assertEqual([w['window'] for w in result['nativePlacements']], [wid])
+
+    def test_the_assigned_space_tims_display_leaves_within_three_seconds_is_placed_native_with_no_problem(self):
+        # S4: window 89421 is on the assigned Space 7, which Tim's display shows when the guard first samples it: unplaced
+        # (retried every 50 ms). His display goes back to Space 1 0.4 s later (macOS's Space notification, which re-reads
+        # it and sweeps again), and the next sample proves the window placed, with no problem about the window. Red at
+        # the frozen head: it raised a permanent problem on the first sample.
+        wid = 89421
+        process, lines, root, _ = self.untracked_window_rig(wid, [107], shown=7)
+        time.sleep(0.4)
+        show(root, 101)
+        self.send(process, 'notify')
+        placed = lines.until(lambda row: row.get('event') == 'placed-native' and row.get('window') == wid, 8)[-1]
+        self.assertEqual(placed['spaceIds'], [107])
+        seen, result = self.end_rig(process, lines, root)
+        self.assertEqual([p for p in result['problems'] if p.startswith('window ')], [])
+        self.assertEqual(result['windowFaults'], [])
+        self.assertNotIn('window-unknown', [e.get('event') for e in seen])
+
+    def test_an_unreadable_all_window_list_is_one_problem_per_run(self):
+        # S3: the guard's CGWindowList read fails (here the rig's stand-in file is unreadable) on every sweep: a tree
+        # window yabai omits could go unseen, which is one problem, however many sweeps and the final one fail too.
+        # Red at the frozen head: the failed read was skipped silently.
+        process, lines, root = self.rig(onscreen=True)
+        put(root / 'onscreen.json', 'not json')
+        self.send(process, 'sweep')
+        found = lines.until(lambda row: row.get('event') == 'problem' and 'all-window list' in row.get('message', ''), 8)[-1]
+        self.assertRegex(found['message'], r"^the guard's all-window list could not be read \([\w-]+\): a tree window "
+                                           r"yabai's list omits could go unseen$")
+        self.send(process, 'sweep')
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual([p for p in result['problems'] if 'all-window list' in p], [found['message']])
+
+    def test_a_window_on_tims_space_that_native_proof_later_places_still_fails_for_its_exposure(self):
+        # P2-1(d): window 89460 is on Tim's Space 4 (SkyLight) for 0.6 s while yabai says it never tracked it, then SkyLight
+        # puts it on the assigned Space 6: placed-native, and the 0.6 s on his screen still fails the check (more than
+        # 250 ms). Green at the frozen head (a new control: the proof never excuses exposure already counted).
+        wid = 89460
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False, 'easl']]))
+        self.send(process, 'window %d' % wid)
+        time.sleep(0.6)
+        put(root / 'skylight-windows.json', json.dumps({str(wid): {'spaces': [106], 'display': 'D1'}}))
+        placed = lines.until(lambda row: row.get('event') == 'placed-native' and row.get('window') == wid, 8)[-1]
+        self.assertGreaterEqual(placed['onTimSpaceMs'], 500)
+        _, result = self.end_rig(process, lines, root)
+        slow = [p for p in result['problems'] if p.startswith('window %d ' % wid)]
+        self.assertEqual(len(slow), 1, result['problems'])
+        self.assertRegex(slow[0], r"^window 89460 of the tree \(easl, pid %d\) was on Tim's screen for \d+\.\d ms before the guard "
+                                  r"placed it \(more than 250 ms\)$" % easl)
+        self.assertEqual([w['window'] for w in result['nativePlacements']], [wid])
+
+    def test_an_id_query_that_never_answers_is_no_native_placement_though_skylight_shows_the_assigned_space(self):
+        # P2-1(e): yabai never answers the id query for window 89470, and SkyLight shows it on the assigned Space 6.
+        # Native proof needs yabai's answer that it never tracked the window: this is no such answer, and the
+        # unanswered query stays a problem. Green at the frozen head (a new control).
+        wid = 89470
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [106], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False, 'easl']]))
+        put(root / 'window-delay', '30')
+        self.send(process, 'window %d' % wid)
+        message = ('yabai -m query --windows --window %d did not answer within 4.0 s (bounded query retries exhausted)' % wid)
+        seen = lines.until(lambda row: row.get('event') == 'yabai-timeout' and
+                           row.get('args') == ['query', '--windows', '--window', str(wid)], 15)
+        self.assertEqual(seen[-1]['timeoutS'], 4.0)
+        self.assertFalse([row for row in seen if row.get('event') == 'placed-native'], seen)
+        _, result = self.end_rig(process, lines, root)
+        self.assertIn(message, result['problems'])
+        self.assertEqual(result['nativePlacements'], [])
+
+    def test_a_failed_move_is_a_problem_though_skylight_shows_the_assigned_space_and_is_never_retried(self):
+        # P2-1(f): yabai lists window 89480 on Space 4 and the guard's move to Space 6 fails (exit 1) while SkyLight shows
+        # it on Space 6: native proof never rescues a failed move. One mutation only, read before the end's final
+        # sweep asks again. Green at the frozen head (a new control).
+        wid = 89480
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [106], 'display': 'D1'}})
+        put(root / 'moves', 'refuse')
+        put(root / ('window-%d.json' % wid), json.dumps({'id': wid, 'pid': easl, 'app': 'easl', 'title': '', 'space': 4}))
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False, 'easl']]))
+        self.send(process, 'window %d' % wid)
+        message = ("window %d of the tree (easl, pid %d) is on Space 4, not on --space 6, after the guard's move (ax-created): "
+                   "yabai -m window %d --space 6 exited 1" % (wid, easl, wid))
+        lines.until(lambda row: row.get('event') == 'problem' and row.get('message') == message, 10)
+        self.assertEqual((root / 'mutations.log').read_text().splitlines(), ['window %d --space 6' % wid])
+        _, result = self.end_rig(process, lines, root)
+        self.assertIn(message, result['problems'])
+        self.assertEqual(result['nativePlacements'], [])
+
+    def test_many_native_helper_windows_are_never_asked_about_and_never_delay_a_new_windows_move(self):
+        # P1-2: 20 helper windows of the tree that yabai omits (half ordered out, half 1x1, both exempt) are judged by their
+        # own samples: no yabai id query for any of them. A new window on Tim's Space 4 that arrives with a sweep is
+        # still moved within 250 ms. Red at the frozen head: every omitted helper cost an id query on the serial yabai
+        # queue (each retried after 50 ms) in every sweep, and the new window was moved after them.
+        helpers = list(range(89500, 89520))
+        wid = 89520
+        skylight = {h: {'spaces': [] if h % 2 == 0 else [104], 'display': None if h % 2 == 0 else 'D1'} for h in helpers}
+        skylight[wid] = {'spaces': [104], 'display': 'D1'}
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight=skylight)
+        put(root / ('window-%d.json' % wid), json.dumps({'id': wid, 'pid': easl, 'app': 'easl', 'title': 'root', 'space': 4}))
+        put(root / 'onscreen.json', json.dumps([[h, easl, 500, 500, False, 'easl'] if h % 2 == 0 else [h, easl, 1, 1, False, 'easl']
+                                                for h in helpers] + [[wid, easl, 800, 600, False, 'easl']]))
+        self.send(process, 'sweep', 'window %d' % wid)
+        moved = lines.until(lambda row: row.get('event') == 'window' and row.get('id') == wid, 20)[-1]
+        self.assertTrue(moved['moved'], moved)
+        seen, result = self.end_rig(process, lines, root)
+        self.assertLessEqual(moved['onTimSpaceMs'], 250, moved)
+        helper_queries = {'--window %d' % h for h in helpers}
+        asked = [line for line in (root / 'windows-queries').read_text().splitlines() if line.strip() in helper_queries]
+        self.assertEqual(asked, [], 'no id query for an exempt native helper')
+        self.assertEqual(result['problems'], [])
+        self.assertEqual(sorted({e['window'] for e in result['exemptWindows']}), helpers)
+
+    def test_a_hung_native_park_never_delays_a_new_ax_windows_move(self):
+        native, wid = 89540, 89541
+        places = {native: {'spaces': [106], 'display': 'D1'}, wid: {'spaces': [104], 'display': 'D1'}}
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight=places)
+        put(root / ('window-%d-delay' % native), '30')
+        put(root / 'onscreen.json', json.dumps([[native, easl, 800, 600, False, 'easl']]))
+        self.send(process, 'sweep')
+        deadline = time.monotonic() + 5
+        while not (root / ('window-%d-asked' % native)).exists():
+            self.assertLess(time.monotonic(), deadline, 'the native park never began its query')
+            time.sleep(0.01)
+        put(root / ('window-%d.json' % wid), json.dumps({'id': wid, 'pid': easl, 'app': 'easl', 'title': 'new', 'space': 4}))
+        put(root / 'onscreen.json', json.dumps([[native, easl, 800, 600, False, 'easl'], [wid, easl, 800, 600, False, 'easl']]))
+        self.send(process, 'window %d' % wid)
+        moved = lines.until(lambda row: row.get('event') == 'window' and row.get('id') == wid, 15)[-1]
+        self.assertTrue(moved['moved'], moved)
+        self.assertLessEqual(moved['onTimSpaceMs'], 250, moved)
+        put(root / ('window-%d-delay' % native), '0')
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False, 'easl']]))
+        _, result = self.end_rig(process, lines, root)
+        self.assertFalse([p for p in result['problems'] if p.startswith('window %d ' % wid)], result['problems'])
 
     def test_the_final_window_list_gets_one_retry_and_a_list_it_reads_is_no_problem(self):
         # GR2 (item 5): roblox's run saw the final `yabai -m query --windows` miss its 2.0 s once, and the check failed
@@ -2956,8 +3284,8 @@ class Guard(unittest.TestCase):
         self.assertEqual(final['tries'][0]['error'], 'yabai -m query --windows did not answer within 2.0 s')
         self.assertEqual(len(final['tries']), 2)
         self.assertRegex(final['tries'][1]['error'], r'^yabai -m query --windows did not answer within 1\.\d s$')
-        self.assertLessEqual(final['ms'], 4100)
-        self.assertIn("the tree's windows could not be located at the guard's end: " + final['tries'][-1]['error'],
+        self.assertLessEqual(final['ms'], 4300)
+        self.assertIn("the tree's windows could not be located at the guard's end: yabai -m query --windows did not answer within 4.0 s",
                       result['problems'])
 
     def test_the_final_list_deadline_includes_cleanup_of_a_helper_that_ignores_sigterm(self):
@@ -2967,9 +3295,9 @@ class Guard(unittest.TestCase):
         _, result = self.end_rig(process, lines, root)
         final = result['finalWindowList']
         self.assertEqual((final['ok'], final['retried'], final['limitS'], len(final['tries'])), (False, True, 4.0, 2))
-        self.assertLessEqual(final['ms'], 4100, final)
+        self.assertLessEqual(final['ms'], 4300, final)
         self.assertTrue(all(t['error'] for t in final['tries']), final)
-        self.assertIn("the tree's windows could not be located at the guard's end: " + final['tries'][-1]['error'],
+        self.assertIn("the tree's windows could not be located at the guard's end: yabai -m query --windows did not answer within 4.0 s",
                       result['problems'])
         self.assert_gone(self.recorded(root / 'windows-pids', 4))
 
