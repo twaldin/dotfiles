@@ -38,25 +38,13 @@
       "scout": "@sol"
     },
     "showResolvedModelBadge": true,
-    "agentCompactionThresholdOverrides": {
-      "task": 500000,
-      "opus": 500000,
-      "scout": 500000,
-      "reviewer": 500000,
-      "security-reviewer": 500000,
-      "grok": 500000,
-      "sonic": 500000,
-      "swarm-lead": 500000,
-      "swarm-worker": 500000,
-      "swarm-critic": 500000
-    },
     "isolation": {
       "enabled": true
     }
   },
   "compaction": {
     "thresholdPercent": -1,
-    "thresholdTokens": 200000
+    "thresholdTokens": 500000
   },
   "statusLine": {
     "preset": "full"
