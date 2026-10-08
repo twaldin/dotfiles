@@ -83,6 +83,11 @@ if '--files-from=-' in sys.argv:
                                                'Total transferred file size: 1,234 bytes'))
     else:
         print('Number of regular files transferred: 2\nTotal bytes sent: 1,234')
+elif os.environ.get('FAKE_FETCH_STALL'):
+    import time
+    with open(os.path.join(log, 'fetch.started'), 'w') as f:
+        f.write('started\n')
+    time.sleep(60)
 sys.exit(int(os.environ.get('FAKE_RSYNC_EXIT', '0')))
 '''
 
@@ -102,6 +107,17 @@ for o in opts:
         env[k] = v
     if o.startswith('--working-directory='):
         os.chdir(o.split('=', 1)[1])
+if os.environ.get('FAKE_SYSTEMD_CLIENT'):
+    # The --wait client is in offload-run's group; systemd runs the unit outside it.
+    import subprocess, time
+    proc = subprocess.Popen(cmd, env=env, start_new_session=True, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    with open(os.path.join(log, unit + '.pgid'), 'w') as f:
+        f.write(str(proc.pid))
+    code = proc.wait()
+    while not os.path.exists(os.path.join(log, unit + '.stopped')):
+        time.sleep(0.01)
+    sys.exit(128 - code if code < 0 else code)
 os.setpgrp()
 with open(os.path.join(log, unit + '.pgid'), 'w') as f:
     f.write(str(os.getpid()))
@@ -109,7 +125,7 @@ os.execvpe(cmd[0], cmd, env)
 '''
 
 SYSTEMCTL = r'''#!/usr/bin/python3
-import os, signal, sys
+import os, signal, sys, time
 argv = sys.argv[1:]
 log = os.environ['FAKE_LOG']
 with open(os.path.join(log, 'systemctl.log'), 'a') as f:
@@ -121,10 +137,14 @@ elif argv[:2] == ['--user', 'stop']:
         pgid = int(open(os.path.join(log, argv[2] + '.pgid')).read())
     except OSError:
         sys.exit(5)
+    time.sleep(float(os.environ.get('FAKE_STOP_DELAY', '0')))
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    if os.environ.get('FAKE_SYSTEMD_CLIENT'):
+        with open(os.path.join(log, argv[2] + '.stopped'), 'w') as f:
+            f.write('stopped\n')
 '''
 
 GIT_ENV = {'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_AUTHOR_NAME': 't',
@@ -367,6 +387,53 @@ class InPlace(OffloadCase):
         run = self.runs()[-1]
         self.assertEqual((run['inPlace'], run['remote'], run['exit'], run['cwd']), (True, None, 4, 'sub'))
 
+    def test_offload_run_leaves_no_bytecode_in_its_installed_bin(self):
+        installed = self.root / 'bin'
+        installed.mkdir()
+        for script in (OFFLOAD_RUN, BIN / 'machine-ok-queue'):
+            shutil.copy2(script, installed / script.name)
+        env = {k: v for k, v in self.env.items() if k != 'PYTHONDONTWRITEBYTECODE'}
+        # Apple's python caches elsewhere by default; exercise deckbox's installed-directory behavior too.
+        bootstrap = ('import runpy, sys; sys.pycache_prefix = None; sys.argv = sys.argv[1:]; '
+                     'runpy.run_path(sys.argv[0], run_name="__main__")')
+        p = subprocess.Popen([PY39, '-c', bootstrap, str(installed / 'offload-run'), '--dir', str(self.repo),
+                              '--cpus', '1', '--mem', '1G', '--', 'true'],
+                             env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.procs.append(p)
+        p.wait(timeout=10)  # keep stdin open: EOF means cancellation, not an import check
+        _, err = p.communicate(timeout=10)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(sorted(path.name for path in installed.iterdir()), ['machine-ok-queue', 'offload-run'])
+
+    def test_cancellation_waits_for_the_unit_stop_before_killing_the_helpers(self):
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(sig=sig.name):
+                pid_file = self.repo / 'cmd.pid'
+                pid_file.unlink(missing_ok=True)
+                p = subprocess.Popen([PY39, str(OFFLOAD), '--', 'sh', '-c',
+                                      'echo $$ > cmd.pid; exec sleep 60'],
+                                     cwd=self.repo, env={**self.env, 'FAKE_SYSTEMD_CLIENT': '1',
+                                                        'FAKE_STOP_DELAY': '0.3'},
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                     start_new_session=True)
+                self.procs.append(p)
+                end = time.monotonic() + 10
+                while not (pid_file.exists() and pid_file.read_text().strip()):
+                    self.assertLess(time.monotonic(), end, 'the in-place unit never started')
+                    self.assertIsNone(p.poll())
+                    time.sleep(0.05)
+                unit = next(x.split('=', 1)[1] for x in self.records('systemd-run.jsonl')[-1]
+                            if x.startswith('--unit='))
+                pid = int(pid_file.read_text())
+                p.send_signal(sig)
+                _, err = p.communicate(timeout=10)
+                self.assertEqual(p.returncode, 128 + sig, err)
+                self.assertTrue((self.log_dir / (unit + '.stopped')).exists(),
+                                'the unit stop must complete before offload kills its helpers')
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+                self.assertEqual(list((self.home / '.local/state/machine-ok/queue').glob('*.json')), [])
+
     def test_user_at_host_and_localhost_are_this_host_too(self):
         for host in ('tim@deckbox', 'localhost'):
             with self.subTest(host=host):
@@ -435,6 +502,27 @@ class ExitAndGit(OffloadCase):
         self.assertEqual(r.returncode, 255)
         self.assertIn('ssh to deckbox was killed by signal 9', r.stderr)
         self.assertEqual(self.runs()[-1]['exit'], 255)
+
+    def test_cancellation_during_fetch_keeps_the_original_signal(self):
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(sig=sig.name):
+                started = self.log_dir / 'fetch.started'
+                started.unlink(missing_ok=True)
+                p = subprocess.Popen([PY39, str(OFFLOAD), '--fetch', 'out', '--', 'true'],
+                                     cwd=self.repo, env={**self.env, 'FAKE_SSH_EXIT': '0',
+                                                        'FAKE_FETCH_STALL': '1'},
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                     start_new_session=True)
+                self.procs.append(p)
+                end = time.monotonic() + 10
+                while not started.exists():
+                    self.assertLess(time.monotonic(), end, 'the fetch never started')
+                    self.assertIsNone(p.poll())
+                    time.sleep(0.05)
+                p.send_signal(sig)
+                _, err = p.communicate(timeout=10)
+                self.assertEqual(p.returncode, 128 + sig, err)
+                self.assertEqual((self.runs()[-1]['exit'], self.runs()[-1]['signal']), (128 + sig, sig))
 
     def test_a_failed_sync_runs_nothing_and_exits_255(self):
         r = self.offload('--', 'true', env={'FAKE_RSYNC_EXIT': '12'})

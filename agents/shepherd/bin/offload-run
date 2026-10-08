@@ -8,7 +8,7 @@ Only `offload` calls it: over `ssh -T` with --dir offload/<name> (the synced cop
 on deckbox itself, directly with --dir set to the worktree's absolute path (the step runs in place). Steps:
 - Queue: one ticket in deckbox's heavy-work queue (machine-ok-queue beside this file, --no-gate: Linux has no
   machine-ok; deckbox's slot count is in its ~/.config/machine-shepherd/slots.json, 8 since 2026-10-07), so offloaded
-  steps take turns like home's.
+  steps take turns like home's. Loading that queue never writes bytecode into the installed bin directory.
 - Unit: `systemd-run --user --wait --pipe --collect --quiet --expand-environment=no` in ~/<dir>/<SUB> with
   Slice=offload.slice, CPUQuota=N*100%, MemoryMax=SIZE and CPUAffinity = the system agents.slice's AllowedCPUs.
   A --user unit cannot join the system agents.slice: `-p Slice=agents.slice` under --user names a user slice
@@ -42,6 +42,7 @@ WRAPPER = 'if [ -n "$1" ]; then eval "$1" || exit; fi; shift; "$@"; exit $?'
 
 
 def load_queue():
+    sys.dont_write_bytecode = True  # bin/ contains installed commands, not a __pycache__ to link as another bin
     path = os.path.join(HERE, "machine-ok-queue")
     loader = importlib.machinery.SourceFileLoader("machine_ok_queue", path)
     spec = importlib.util.spec_from_loader(loader.name, loader)

@@ -20,11 +20,14 @@
    a dropped ssh stops the remote unit.
 3. Fetch: each --fetch PATH (relative to the current directory) is copied back to the same place afterwards,
    whatever the exit status. A failed fetch after a passing command exits with rsync's status.
+   Cancellation during fetch, like cancellation during sync or run, exits with 128+N for the original signal N.
 4. Log: one JSON line per run in ~/.local/state/offload/runs.jsonl.
 
 On <host> itself (deckbox agents running `offload` there), there is nothing to sync: the step runs in place, in
 this worktree, through the same queue and the same capped unit, with the same refusal of steps that mention
 `git `; --fetch and --clean have nothing to do. The local host is SHEPHERD_HOST, else the short hostname.
+Cancellation in place signals only offload-run, which stops its unit before releasing its queue slot. It gets
+up to 30 s before its helper group is killed; if offload itself dies, EOF on offload-run's stdin stops the unit.
 
 offload never syncs .git/, and there is no git sync mode. A step whose text mentions `git ` is refused before
 anything is sent, and a run whose output says "not a git repository" ends with a loud note: such steps run on
@@ -60,7 +63,7 @@ SSH_OPTS = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "Serve
             "-o", "ServerAliveCountMax=4"]
 BIG_MB = 200  # the change set offload sends without --big (home's uplink: ~0.5 MB/s, so 200 MB is ~7 min)
 STALL_S = int(os.environ.get("OFFLOAD_STALL_S", "120"))  # rsync --timeout: this long without data aborts the sync
-GROUPS = set()  # process groups of the running children (each child leads its own)
+GROUPS = {}  # group leader pid -> running child; in-place offload-run stops its own systemd unit
 STOPPED = []  # signals offload got
 GIT_TEXT = re.compile(r"(?<![\w.-])git(\s|$)")
 GIT_FAILURE = b"not a git repository"
@@ -182,14 +185,25 @@ def stop_group(pgid, sig=signal.SIGTERM):
         pass
 
 
+def stop_child(proc, sig):
+    if proc.in_place:
+        try:
+            proc.send_signal(sig)  # leave systemd-run --wait alive until the unit stop completes
+        except ProcessLookupError:
+            pass
+    else:
+        stop_group(proc.pid)
+    if proc.stop_timer is None:
+        proc.stop_timer = threading.Timer(30 if proc.in_place else 5, stop_group, (proc.pid, signal.SIGKILL))
+        proc.stop_timer.daemon = True
+        proc.stop_timer.start()
+
+
 def on_signal(sig, _frame):
-    """SIGINT, SIGTERM, SIGHUP: stop every running child's group (SIGKILL 5 s later if any is still there)."""
+    """Stop rsync/ssh groups; let in-place offload-run finish stopping its unit (bounded to 30 s)."""
     STOPPED.append(sig)
-    for pgid in list(GROUPS):
-        stop_group(pgid)
-        t = threading.Timer(5, stop_group, (pgid, signal.SIGKILL))
-        t.daemon = True
-        t.start()
+    for proc in list(GROUPS.values()):
+        stop_child(proc, sig)
 
 
 # Leads each child's process group: runs argv in it and mirrors its exit, and when offload dies first (even by
@@ -223,30 +237,38 @@ while True:
 """
 
 
-def spawn(argv, **kw):
-    """Popen argv under GUARD in a process group of its own, registered so a signal to offload stops the group: argv
-    and everything it starts (the ssh under an rsync)."""
-    read_end, write_end = os.pipe()  # offload holds the write end until the child ends or offload dies
-    try:
-        proc = subprocess.Popen([sys.executable, "-c", f"exec({GUARD!r})", str(read_end), *argv],  # one ps line
-                                start_new_session=True, pass_fds=(read_end,), **kw)
-    except BaseException:
-        os.close(write_end)
-        raise
-    finally:
-        os.close(read_end)
-    proc.lifeline = write_end
-    GROUPS.add(proc.pid)
+def spawn(argv, in_place=False, **kw):
+    """rsync/ssh get a guard and a group lifeline; local offload-run uses its own stdin lifeline and unit cleanup."""
+    if in_place:
+        proc = subprocess.Popen(argv, start_new_session=True, **kw)
+        proc.lifeline = None
+    else:
+        read_end, write_end = os.pipe()  # offload holds this end until the child ends or offload dies
+        try:
+            proc = subprocess.Popen([sys.executable, "-c", f"exec({GUARD!r})", str(read_end), *argv],  # one ps line
+                                    start_new_session=True, pass_fds=(read_end,), **kw)
+        except BaseException:
+            os.close(write_end)
+            raise
+        finally:
+            os.close(read_end)
+        proc.lifeline = write_end
+    proc.in_place = in_place
+    proc.stop_timer = None
+    GROUPS[proc.pid] = proc
     if STOPPED:  # the signal came while it was starting
-        stop_group(proc.pid)
+        stop_child(proc, STOPPED[0])
     return proc
 
 
 def reap(proc):
     """After the child ends: kill what is left of its group (an ssh still draining under a timed-out rsync)."""
-    GROUPS.discard(proc.pid)
+    GROUPS.pop(proc.pid, None)
+    if proc.stop_timer is not None:
+        proc.stop_timer.cancel()
     stop_group(proc.pid, signal.SIGKILL)
-    os.close(proc.lifeline)
+    if proc.lifeline is not None:
+        os.close(proc.lifeline)
 
 
 def child(argv, data=None, capture=False, **kw):
@@ -408,7 +430,7 @@ def main(argv):
 
     t1 = time.monotonic()
     # Ending ssh (a signal stops its group) closes the remote stdin; offload-run then stops the unit.
-    proc = spawn(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = spawn(argv, in_place=local, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     seen = threading.Event()
     pumps = [threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, seen)),
              threading.Thread(target=pump, args=(proc.stderr, sys.stderr.buffer, seen))]
@@ -436,11 +458,15 @@ def main(argv):
             break
         f = child(fetch_argv(a.host, remote, rel), cwd=root)[0]
         fetched.append({"path": rel, "exit": f})
+        if STOPPED:
+            break
         if f:
             say(f"fetch {rel} " + (f"stalled: no data for {STALL_S}s (rsync exit 30)" if f == 30
                                    else f"failed (rsync exit {f})"))
             if code == 0:
                 code = f
+    if STOPPED:
+        code = 128 + STOPPED[0]
     if seen.is_set():
         print(GIT_NOTE.format(why="The run failed with \"not a git repository\": nothing under .git/ exists there.",
                               command=shlex.join(a.command)), file=sys.stderr)
