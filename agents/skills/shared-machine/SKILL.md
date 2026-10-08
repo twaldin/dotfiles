@@ -7,15 +7,15 @@ Machine load never blocks agent work: queue the heavy process and keep non-heavy
 
 ## twaldin-home and deckbox: the queue
 
-Run every heavy step as `machine-ok-queue run [--gpu] [--memory] -- <cmd>`. It waits for a host slot and the memory gate, runs the command, and exits with the command's status. `--memory` is the default gate: on a Mac it waits for `machine-ok --memory`; deckbox admits by slots alone.
+Run every heavy step as `machine-ok-queue run [--gpu] -- <cmd>`. It waits for a host slot and the memory gate, runs the command, and exits with the command's status. On a Mac the default gate is `machine-ok --memory`; deckbox admits by slots alone.
 
-- On a Mac the command and every descendant run clamped (utility QoS, nice 10), so Tim's input wins. A slot caps jobs, not a job's own workers: also cap its parallelism.
+- On a Mac the command and every descendant run clamped by default (utility QoS, nice 10), so Tim's input wins. A slot caps jobs, not a job's own workers: also cap its parallelism.
 - Add `--gpu` for MLX, whisper, Metal, Blender renders and hardware video encodes. GPU jobs run one at a time while Tim is active; non-GPU tickets pass a waiting GPU job.
 - `machine-ok-queue status` lists runners, waiters and the GPU rule.
 
 ## twaldin-work
 
-Gate with `machine-ok --wait --memory`, then run the command, testing the gate's exit status directly: `machine-ok --wait --memory && <cmd>`. In a pipe such as `machine-ok | tee`, `$?` is `tee`'s and the gate always appears to pass. Add `--gpu` for GPU work.
+Run `machine-ok --wait --memory && <cmd>` (add `--gpu` for GPU work); test the gate's own status: in `machine-ok | tee`, `$?` is `tee`'s.
 
 ## Deckbox offload
 

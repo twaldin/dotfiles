@@ -8,7 +8,7 @@ Pick the probe for the symptom and run it once. `machine-watch` schedules nothin
 ## Pressure or input lag
 
 - `machine-census`: CPU and memory grouped by owner, plus omp sessions with their heaviest subprocess. Memory is physical footprint (Activity Monitor's figure), not RSS, so compressed and swapped pages count. It uses `sudo -n` when available and warns that counts are partial without it. `--detail` lists each group's heaviest members; `--json` prints the structured report.
-- `machine-watch`: one JSON report on stdout: the census, a 5 s FSEvents sample, ColorSync request and profile-build rates over the last 120 s, WindowServer's pid and Tim's input-idle seconds. `null` means that probe failed, not zero. It takes no arguments.
+- `machine-watch`: one JSON report on stdout: the census, a 5 s FSEvents sample, ColorSync request and profile-build rates over the last 120 s, WindowServer's pid and Tim's input-idle seconds. A null value means that probe failed, not zero. It takes no arguments.
 - `fsevents-top [seconds=30] [depth=5] [rows=25]`: filesystem mutations (create, modify, remove, rename; never reads or stats) grouped by path prefix. Read the event rate, top-prefix share and `dropped` count before blaming a watcher.
 - `gpu-top [seconds=5] [rows=12]`: whole-GPU utilisation next to per-process busy time from the GPU driver's counters. `powermetrics` per-process GPU time reads 0 on these Macs. Lag with idle CPU can be the GPU.
 
@@ -17,6 +17,6 @@ Pick the probe for the symptom and run it once. `machine-watch` schedules nothin
 - `colorsync-k [periods=12]`: K, the number of WindowServer ColorSync chains, from display-info requests over about 60 s; each chain costs one synchronous request and one ~57 ms frame hitch every ~5.03 s. Read-only.
 - `cs-measure [secs=60]`: request rate, K, displays per request, request service-time median/p90/max, and ColorSync and WindowServer CPU over 5 s. Both tools read the log through `sudo -n`; without it a zero rate is a missing measurement.
 - `logout-colorsync-test baseline`: read-only K, screens and the Agent-p2N identity. After Tim's logout and login, `logout-colorsync-test post --no-send` writes the readout locally before any agent touches a screen; without `--no-send` it messages sky-lead and bench-judge.
-- Steps `a`, `b` and `c [SCREEN]` quit and relaunch BetterDisplay or disconnect and reconnect a screen (default CanvasTest). Run them only on Tim's "ready" just before his logout, with every agent paused. `b` and `c` follow only if `a` left K unchanged. Read `mac-gui` before any display change.
+- Steps `a`/`b`/`c` change Tim's displays; run them only when Tim asks, and run `logout-colorsync-test` with no arguments for the procedure.
 
 Report the numbers that matched the symptom (CPU idle, free, compressed and swap memory, owner and pid, event or GPU rate, ColorSync K and timing). Reclaim only processes you can prove are yours, and queue the next heavy run through `shared-machine`.
