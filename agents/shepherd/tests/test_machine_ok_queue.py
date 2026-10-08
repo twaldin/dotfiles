@@ -459,7 +459,10 @@ class Gate(QueueCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.order(), ['M'])
         self.assertIsNone(g.poll(), 'its own gate is still closed')
-        out = subprocess.run([sys.executable, str(QUEUE), 'status'], env=self.env, capture_output=True, text=True).stdout
+        # Keep the cached verdict visible to status between the waiter's fast gate retries.
+        out = subprocess.run([sys.executable, str(QUEUE), 'status'],
+                             env={**self.env, 'MACHINE_OK_QUEUE_GATE_RETRY': 'inf'},
+                             capture_output=True, text=True).stdout
         self.assertIn('(its gate is closed: free=60%', out)
         (self.root / 'exit-gpu').unlink()
         self.assertEqual(self.finish(g)[0], 0)
