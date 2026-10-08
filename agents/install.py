@@ -326,9 +326,9 @@ def main():
                     # The user mcp.json is machine-local: twaldin-home's computer-guest server lives there.
                     if name not in ('skills', 'mcp.json'):
                         plan(native / name, 'retire')
-            # Our message inbox and its sender. Other tools' extensions (herdr, Canvas) stay theirs.
-            plan(native / 'extensions' / 'omp-inbox.ts', 'link', SOURCE / 'inbox/omp-inbox.ts')
-            plan(home / '.local/bin/agent-msg', 'link', SOURCE / 'inbox/agent-msg')
+            # easl owns peer messaging. Retire our old inbox; other tools' extensions stay theirs.
+            plan(native / 'extensions' / 'omp-inbox.ts', 'retire')
+            plan(home / '.local/bin/agent-msg', 'retire')
 
         else:
             if not (runtime / 'catalog').is_dir():

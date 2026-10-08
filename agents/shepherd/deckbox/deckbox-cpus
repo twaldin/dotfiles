@@ -10,7 +10,7 @@ or failed one has "ok": false and an "error", and exits 1 (2 for usage errors).
 
 Owner `smoke` is a reservation-only tool test: nothing runs on its CPUs. Every other owner counts as an ARM for
 Hutter, whose eval overlapping it is invalid and re-run (hone, 2026-10-07), so test and smoke this tool as `smoke`.
-Rows and messages say which (`"arm": false` for smoke).
+Rows and journal entries say which (`"arm": false` for smoke).
 
 take fails, changing nothing, when a CPU is held by another owner, is one of Hutter's 1-4,13-16 (its
 calibrations and evals hold them; any overlap invalidates the eval), or is outside agents.slice's base set
@@ -32,15 +32,15 @@ AllowedCPUs and CPUQuota before and after, the busy sample, the offload threads 
 
 give removes the owner's reservation, cancels its timer and restores agents.slice: the base set minus any
 other owner's CPUs, and no CPUQuota once nothing is held. Giving when nothing is held exits 0 with a note.
-take and give message hone (as hone@twaldin-home; see RECIPIENTS) and hutter-v2@deckbox through
-~/.local/bin/agent-msg; a send that fails is appended to ~/hutter/run/arm-windows.ndjson instead.
+take and give write to the journal through `logger -t deckbox-cpus`; no agent is messaged.
 State: ~/.local/state/deckbox-cpus/holds.json. The audit is log.jsonl. Every take and give (the expiry timer's
-too) appends its row under the lock with the holds update, fsync'd, before any message goes out (sends can take
-2 x 60 s). sliceChangedAtUtc is stamped (ms) immediately before agents.slice changes, so the reservation is
+too) appends its row under the lock with the holds update, fsync'd, before the journal entry.
+sliceChangedAtUtc is stamped (ms) immediately before agents.slice changes, so the reservation is
 [take's sliceChangedAtUtc, give's sliceChangedAtUtc]; take rows also carry takenAtUtc, give rows the take's
-takeSliceChangedAtUtc and takenAtUtc and their own gaveAtUtc. The messages and the arm-windows fallback rows
-carry the same stamps; a take-messages or give-messages row with the send outcomes follows. A take rolled back
-after its slice change is logged with that interval (take-rolled-back); refusals are logged too.
+takeSliceChangedAtUtc and takenAtUtc and their own gaveAtUtc. Journal entries carry the same stamps;
+a take-journal or give-journal audit row follows with logger's outcome. The local audit remains authoritative
+if logger fails. A take rolled back after its slice change is logged with that interval (take-rolled-back);
+refusals are logged too.
 """
 import datetime as dt
 import fcntl
@@ -64,12 +64,6 @@ HOME = os.path.expanduser("~")
 STATE = os.path.join(HOME, ".local/state/deckbox-cpus")
 HOLDS = os.path.join(STATE, "holds.json")
 LOG = os.path.join(STATE, "log.jsonl")
-AGENT_MSG = os.path.join(HOME, ".local/bin/agent-msg")
-# hone is the easl tile hone@hone, whose process runs here, but deckbox's easl CLI has no socket outside a tile (an
-# ssh caller or the expiry timer never is one), so agent-msg reads `@hone` as a host. hone@twaldin-home goes over
-# ssh to the Mac, whose easl delivers it to the tile (measured 2026-10-07: exit 0, "queued for hone@hone", ~17 s).
-RECIPIENTS = ("hone@twaldin-home", "hutter-v2@deckbox")
-ARM_WINDOWS = os.path.join(HOME, "hutter/run/arm-windows.ndjson")
 USAGE = ("usage: deckbox-cpus take <owner> <cpulist> (--for <min> | --until <ISO-UTC>)\n"
          "       deckbox-cpus give <owner>\n"
          "       deckbox-cpus status\n"
@@ -285,27 +279,17 @@ def lock():
     return fd
 
 
-def notify(event, owner, cpus, stamps, text):
-    """Message each recipient; a failed send goes to Hutter's arm-windows file instead, with the event's stamps.
-    Returns the outcomes."""
-    out = []
-    for to in RECIPIENTS:
-        try:
-            r = subprocess.run([AGENT_MSG, to, text, "--from", "deckbox-cpus"], capture_output=True, text=True,
-                               timeout=60)
-            code, err = r.returncode, (r.stderr or r.stdout).strip()[-300:]
-        except (OSError, subprocess.SubprocessError) as e:
-            code, err = None, str(e)
-        row = {"to": to, "exit": code}
-        if code != 0:
-            os.makedirs(os.path.dirname(ARM_WINDOWS), exist_ok=True)
-            with open(ARM_WINDOWS, "a") as f:
-                f.write(json.dumps({"ts": iso(now()), "source": "deckbox-cpus", "event": event, "owner": owner,
-                                    "arm": owner != SMOKE, "cpus": cpus, **stamps, "undelivered_to": to, "exit": code,
-                                    "error": err, "text": text}) + "\n")
-            row["fallback"] = ARM_WINDOWS
-        out.append(row)
-    return out
+def journal(text):
+    """Write the reservation to the journal; the fsync'd local audit already holds its stamps."""
+    try:
+        result = subprocess.run(["logger", "-t", "deckbox-cpus", "--", text], capture_output=True, text=True,
+                                timeout=10)
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"exit": None, "error": str(error)}
+    outcome = {"exit": result.returncode}
+    if result.returncode:
+        outcome["error"] = (result.stderr or result.stdout).strip()[-300:]
+    return outcome
 
 
 def timer_name(owner):
@@ -390,14 +374,14 @@ def take(owner, cpus_text, expires):
                **power(cpus), "agentsSlice": {"before": before, "after": after},
                "busyPct": {str(c): p for c, p in pct.items()}, "busyLimitPct": BUSY_PCT, "offloadMoved": moved,
                "timer": timer}
-        log({"ts": iso(now()), **row})  # under the lock with the holds update, before any message goes out
+        log({"ts": iso(now()), **row})  # under the lock with the holds update, before the journal entry
     finally:
         os.close(fd)
     text = (f"deckbox-cpus: {owner} took deckbox CPUs {fmt_cpus(cpus)}: agents.slice changed at {changed}, taken at "
             f"{taken}, until {iso(expires)} (auto-give timer){SMOKE_NOTE if owner == SMOKE else ''}. agents.slice "
             f"now {after['AllowedCPUs']}, CPUQuota {after['CPUQuota']}.")
-    row["messages"] = notify("take", owner, row["cpus"], stamps, text)
-    log({"ts": iso(now()), "event": "take-messages", "owner": owner, **stamps, "messages": row["messages"]})
+    row["journal"] = journal(text)
+    log({"ts": iso(now()), "event": "take-journal", "owner": owner, **stamps, "journal": row["journal"]})
     return row
 
 
@@ -425,15 +409,15 @@ def give(owner, expired=False):
         row = {"ok": True, "event": "give", "owner": owner, "arm": owner != SMOKE, "cpus": cpus, **stamps,
                "expired": expired, "agentsSlice": {"before": before, "after": after},
                "baseRestored": parse_cpus(after["AllowedCPUs"] or "") == base and not holds}
-        log({"ts": iso(now()), **row})  # under the lock with the holds update, before any message goes out
+        log({"ts": iso(now()), **row})  # under the lock with the holds update, before the journal entry
     finally:
         os.close(fd)
     text = (f"deckbox-cpus: {owner} {'reservation expired; gave back' if expired else 'gave back'} deckbox CPUs "
             f"{cpus}: agents.slice changed back at {changed} (it changed for the take at "
             f"{stamps['takeSliceChangedAtUtc']}; taken at {stamps['takenAtUtc']}){SMOKE_NOTE if owner == SMOKE else ''}. "
             f"agents.slice now {after['AllowedCPUs']}, CPUQuota {after['CPUQuota'] or 'none'}.")
-    row["messages"] = notify("give", owner, cpus, stamps, text)
-    log({"ts": iso(now()), "event": "give-messages", "owner": owner, **stamps, "messages": row["messages"]})
+    row["journal"] = journal(text)
+    log({"ts": iso(now()), "event": "give-journal", "owner": owner, **stamps, "journal": row["journal"]})
     return row
 
 

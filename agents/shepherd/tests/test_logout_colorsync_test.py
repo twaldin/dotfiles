@@ -1,10 +1,9 @@
-"""Only the safe steps run here: usage, `baseline` (read-only) and `post` (read-only plus a readout and agent-msg).
+"""Only the safe steps run here: usage, `baseline` (read-only) and `post` (read-only plus a readout).
 
 Steps a, b and c quit BetterDisplay, relaunch it and disconnect a screen; they are never run.
 $HOME/.local/bin comes first on the script's PATH, so the fakes live there. colorsync-k is the real
 script, so K is derived from the fake `log` output end to end.
 """
-import json
 import os
 import re
 import subprocess
@@ -49,13 +48,6 @@ FAKE_SLEEP = '''#!/bin/bash
 echo "sleep $*" >> "$FAKE_CALLS"
 '''
 
-# Records the message, fails for targets listed in $FAKE_UNREACHABLE.
-FAKE_AGENT_MSG = '''#!/usr/bin/python3
-import json, os, sys
-with open(os.environ['FAKE_MSGS'], 'a') as f:
-    f.write(json.dumps(sys.argv[1:]) + '\\n')
-sys.exit(1 if sys.argv[3] in os.environ.get('FAKE_UNREACHABLE', '').split() else 0)
-'''
 
 # Display 1 has no BetterDisplay name (the built-in); display 2 prints two JSON objects back to back.
 FAKE_BD = '''#!/bin/bash
@@ -92,7 +84,7 @@ class LogoutColorsyncTest(unittest.TestCase):
         stubs = self.home.parent / 'stubs'
         stubs.mkdir()
         for name, body in (('sudo', FAKE_SUDO), ('log', FAKE_LOG), ('pgrep', FAKE_PGREP), ('ps', FAKE_PS),
-                           ('sleep', FAKE_SLEEP), ('agent-msg', FAKE_AGENT_MSG)):
+                           ('sleep', FAKE_SLEEP)):
             (local_bin / name).write_text(body)
             (local_bin / name).chmod(0o755)
         (local_bin / 'colorsync-k').symlink_to(BIN / 'colorsync-k')
@@ -100,10 +92,9 @@ class LogoutColorsyncTest(unittest.TestCase):
             (stubs / name).write_text(body)
             (stubs / name).chmod(0o755)
         self.calls = self.home.parent / 'calls.log'
-        self.msgs = self.home.parent / 'msgs.jsonl'
         self.env = {**os.environ, 'HOME': str(self.home), 'LC_ALL': 'C',
                     'BETTERDISPLAYCLI': str(stubs / 'betterdisplaycli'), 'YABAI_BIN': str(stubs / 'yabai'),
-                    'FAKE_CALLS': str(self.calls), 'FAKE_MSGS': str(self.msgs),
+                    'FAKE_CALLS': str(self.calls),
                     'FAKE_LSTART': lstart(1000), 'FAKE_REQUESTS': '18'}
 
     def tearDown(self):
@@ -115,9 +106,6 @@ class LogoutColorsyncTest(unittest.TestCase):
 
     def call_log(self):
         return self.calls.read_text().splitlines() if self.calls.exists() else []
-
-    def messages(self):
-        return [json.loads(line) for line in self.msgs.read_text().splitlines()] if self.msgs.exists() else []
 
     def test_missing_or_unknown_step_prints_usage_and_exits_2(self):
         for args in ((), ('bogus',)):
@@ -153,7 +141,6 @@ class LogoutColorsyncTest(unittest.TestCase):
                 self.assertTrue(call.startswith('betterdisplaycli get '), call)
             if call.startswith('yabai '):
                 self.assertEqual(call, 'yabai -m query --displays')
-        self.assertEqual(self.messages(), [])
 
     def test_baseline_says_so_when_the_agent_display_is_absent(self):
         result = self.step('baseline', FAKE_P2N='absent')
@@ -162,10 +149,10 @@ class LogoutColorsyncTest(unittest.TestCase):
         self.assertIn('screens: built-in=1 CanvasTest=2', result.stdout)
 
     def post_verdict(self, requests):
-        result = self.step('post', '--no-send', FAKE_REQUESTS=str(requests))
+        result = self.step('post', FAKE_REQUESTS=str(requests))
         self.assertEqual(result.returncode, 0, result.stderr)
         readout = (self.state / 'k-readout.txt').read_text()
-        self.assertEqual(readout, result.stdout)
+        self.assertEqual(result.stdout, readout + f'readout: {self.state / "k-readout.txt"}\n')
         return readout
 
     def test_post_readout_passes_the_bench_judge_bar_at_k_2_and_fails_above_it(self):
@@ -179,36 +166,24 @@ class LogoutColorsyncTest(unittest.TestCase):
         self.assertIn('Agent-p2N: displayID 7 UUID UUID-7', readout)
         self.assertIn('lease: missing', readout)
         self.assertRegex(readout, r'(?m)^WindowServer pid 4242, up \d+\+ s$')
-        # --no-send: written and logged, nobody messaged.
-        self.assertEqual(self.messages(), [])
         self.assertIn('bench-judge bar', (self.state / 'logout-test.log').read_text())
 
-    def test_post_sends_the_readout_to_sky_lead_and_bench_judge(self):
+    def test_post_exports_the_readout_and_prints_its_path(self):
         result = self.step('post', FAKE_REQUESTS='36')
         self.assertEqual(result.returncode, 0, result.stderr)
-        readout = (self.state / 'k-readout.txt').read_text().rstrip('\n')
-        self.assertEqual([m[:3] for m in self.messages()],
-                         [['--from', 'shepherd', 'sky-lead'], ['--from', 'shepherd', 'bench-judge']])
-        self.assertEqual([m[3] for m in self.messages()], [readout, readout])
+        path = self.state / 'k-readout.txt'
+        readout = path.read_text()
         self.assertIn('bench-judge bar (K <= 2): FAIL', readout)
-        self.assertIn('sent to sky-lead', result.stdout)
-        self.assertIn('sent to bench-judge', result.stdout)
-
-    def test_post_reports_an_unreachable_recipient_and_points_at_the_readout_file(self):
-        result = self.step('post', FAKE_UNREACHABLE='bench-judge')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('sent to sky-lead', result.stdout)
-        self.assertIn('could not reach bench-judge; readout is in %s' % (self.state / 'k-readout.txt'),
-                      result.stdout)
-        self.assertNotIn('sent to bench-judge', result.stdout)
+        self.assertEqual(result.stdout, readout + f'readout: {path}\n')
+        self.assertEqual((self.state / 'logout-test.log').read_text(), readout)
 
     def test_post_waits_out_a_freshly_started_windowserver_but_not_an_old_one(self):
-        old = self.step('post', '--no-send')
+        old = self.step('post')
         self.assertEqual(old.returncode, 0, old.stderr)
         self.assertNotIn('waiting for a full 60 s window', old.stdout)
         self.assertEqual([c for c in self.call_log() if c.startswith('sleep ')], [])
 
-        young = self.step('post', '--no-send', FAKE_LSTART=lstart(5))
+        young = self.step('post', FAKE_LSTART=lstart(5))
         self.assertEqual(young.returncode, 0, young.stderr)
         self.assertRegex(young.stdout, r'post: WindowServer 4242 is \d+s old; waiting for a full 60 s window')
         sleeps = [c for c in self.call_log() if c.startswith('sleep ')]

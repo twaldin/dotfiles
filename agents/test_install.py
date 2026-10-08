@@ -150,6 +150,10 @@ class SharedInstall(unittest.TestCase):
             (native / 'config.yml').write_text(yaml_value({'retry': {'fallbackChains': {'task': ['local/model']}}}))
             (native / 'RULES.md').write_text('local rule')
             (native / 'extensions/canvas.ts').write_text('canvas')
+            (native / 'extensions/omp-inbox.ts').write_text('retired inbox')
+            sender = home / '.local/bin/agent-msg'
+            sender.parent.mkdir(parents=True)
+            sender.write_text('retired sender')
             (home / '.claude').mkdir()
             (home / '.claude/settings.json').write_text(json.dumps({'hooks': {'Stop': [{'hooks': [{'command': 'mine'}]}]}}))
             (home / '.codex').mkdir()
@@ -166,8 +170,8 @@ class SharedInstall(unittest.TestCase):
             self.assertEqual((home / '.omp/agent/skills').resolve(), target)
             self.assertTrue((target / 'mac-gui/SKILL.md').is_file())
             self.assertTrue((native / 'agents/scout.md').is_symlink())
-            self.assertEqual((native / 'extensions/omp-inbox.ts').resolve(),
-                             Path(__file__).with_name('inbox').resolve() / 'omp-inbox.ts')
+            self.assertEqual(fingerprint(native / 'extensions/omp-inbox.ts'), 'absent')
+            self.assertEqual(fingerprint(sender), 'absent')
             for path, value in before.items():
                 self.assertEqual(fingerprint(path), value, path)
             self.assertIn('0 changes', subprocess.run(command, check=True, capture_output=True, text=True).stdout)
