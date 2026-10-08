@@ -144,16 +144,21 @@ class SharedInstall(unittest.TestCase):
 
     def test_library_only_leaves_harness_settings_alone(self):
         with tempfile.TemporaryDirectory() as scratch:
-            home = Path(scratch)
+            home = Path(scratch).resolve()
             native = home / '.omp/agent'
             (native / 'extensions').mkdir(parents=True)
             (native / 'config.yml').write_text(yaml_value({'retry': {'fallbackChains': {'task': ['local/model']}}}))
             (native / 'RULES.md').write_text('local rule')
             (native / 'extensions/canvas.ts').write_text('canvas')
-            (native / 'extensions/omp-inbox.ts').write_text('retired inbox')
+            inbox = native / 'extensions/omp-inbox.ts'
             sender = home / '.local/bin/agent-msg'
             sender.parent.mkdir(parents=True)
-            sender.write_text('retired sender')
+            retired = {
+                inbox: home / 'dotfiles/agents/inbox/omp-inbox.ts',
+                sender: home / 'dotfiles/agents/inbox/agent-msg',
+            }
+            for path, missing_target in retired.items():
+                path.symlink_to(missing_target)
             (home / '.claude').mkdir()
             (home / '.claude/settings.json').write_text(json.dumps({'hooks': {'Stop': [{'hooks': [{'command': 'mine'}]}]}}))
             (home / '.codex').mkdir()
@@ -170,13 +175,23 @@ class SharedInstall(unittest.TestCase):
             self.assertEqual((home / '.omp/agent/skills').resolve(), target)
             self.assertTrue((target / 'mac-gui/SKILL.md').is_file())
             self.assertTrue((native / 'agents/scout.md').is_symlink())
-            self.assertEqual(fingerprint(native / 'extensions/omp-inbox.ts'), 'absent')
-            self.assertEqual(fingerprint(sender), 'absent')
+            for path in retired:
+                self.assertEqual(fingerprint(path), 'absent')
+            backup = next((home / '.local/state/agent-setup/backups').iterdir())
+            manifest = json.loads((backup / 'manifest.json').read_text())
+            for path, missing_target in retired.items():
+                item = next(item for item in manifest if item['path'] == str(path))
+                self.assertEqual((item['kind'], item['before'], item['after']),
+                                 ('retire', 'link:' + str(missing_target), 'absent'))
+                self.assertEqual(fingerprint(Path(item['backup'])), 'link:' + str(missing_target))
             for path, value in before.items():
                 self.assertEqual(fingerprint(path), value, path)
             self.assertIn('0 changes', subprocess.run(command, check=True, capture_output=True, text=True).stdout)
             result = subprocess.run(command + ['--project', str(home), '--project-source', str(home)], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
+            subprocess.run(command[:2] + ['--restore', str(backup)], check=True, capture_output=True)
+            for path, missing_target in retired.items():
+                self.assertEqual(fingerprint(path), 'link:' + str(missing_target))
 
     def test_two_project_views_keep_team_files_and_exclude_local_guidance(self):
         with tempfile.TemporaryDirectory() as scratch:

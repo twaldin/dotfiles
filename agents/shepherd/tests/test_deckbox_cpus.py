@@ -98,7 +98,7 @@ class CpusCase(unittest.TestCase):
         self.stubs = self.root / 'stubs'
         self.proc = self.root / 'proc'
         self.sys = self.root / 'sys'
-        for d in (self.home / '.local' / 'bin', self.fake, self.stubs, self.proc):
+        for d in (self.fake, self.stubs, self.proc):
             d.mkdir(parents=True)
         for name, body in (('systemctl', SYSTEMCTL), ('sudo', SUDO), ('systemd-run', SYSTEMD_RUN), ('logger', LOGGER)):
             (self.stubs / name).write_text(body)

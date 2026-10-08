@@ -37,7 +37,7 @@ State: ~/.local/state/deckbox-cpus/holds.json. The audit is log.jsonl. Every tak
 too) appends its row under the lock with the holds update, fsync'd, before the journal entry.
 sliceChangedAtUtc is stamped (ms) immediately before agents.slice changes, so the reservation is
 [take's sliceChangedAtUtc, give's sliceChangedAtUtc]; take rows also carry takenAtUtc, give rows the take's
-takeSliceChangedAtUtc and takenAtUtc and their own gaveAtUtc. Journal entries carry the same stamps;
+takeSliceChangedAtUtc and takenAtUtc and their own gaveAtUtc. Journal entries include the slice-change and take stamps;
 a take-journal or give-journal audit row follows with logger's outcome. The local audit remains authoritative
 if logger fails. A take rolled back after its slice change is logged with that interval (take-rolled-back);
 refusals are logged too.
