@@ -66,7 +66,7 @@ class ColorsyncK(unittest.TestCase):
         self.assertEqual(result.stdout, 'K=6.0  (24 requests in 20 s = 1.20/s; 2 displays per request)\n')
         self.assertEqual(self.log_windows()[0], '20s')
 
-    def test_quiet_window_reads_k_zero_and_unknown_displays(self):
+    def test_a_window_without_requests_reads_k_zero_and_unknown_displays(self):
         result = self.measure(FAKE_REQUESTS='0')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'K=0.0  (0 requests in 60 s = 0.00/s; ? displays per request)\n')

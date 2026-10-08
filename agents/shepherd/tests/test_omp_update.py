@@ -1,14 +1,13 @@
-"""Smoke test for bin/omp-update: the quiet-window check, the extension-fingerprint pins that decide whether a
+"""Smoke test for bin/omp-update: the extension-fingerprint pins that decide whether a
 pane is due a restart, the checkpoint summary line, the easl tiles (the switch file, tile restarts and their
 gates, roll, `migrate`), the hourly rotation triggers and gates, the post-restart extension check and the
 rollout it can stop, and per-host version holds.
 
-The script is loaded as a module with HOME = a temp dir, so every path it derives (state, config, the quiet
-book, HERDR, the easl switch) is sandboxed. What it reaches outside itself is replaced by one fake `World`: herdr's
-JSON, the easl CLI (FakeEasl), the process table and the clock (sleeps advance it; nothing really waits). Config,
-state files, the quiet book, the run lock (a real flock), idle_gate, live_children,
-quiet_block and the session-size check run for real. A few tests run the script itself, or the easl helpers,
-against real processes.
+The script is loaded as a module with HOME = a temp dir, so every path it derives (state, config, HERDR, the easl
+switch) is sandboxed. What it reaches outside itself is replaced by one fake `World`: herdr's JSON, the easl CLI
+(FakeEasl), the process table and the clock (sleeps advance it; nothing really waits). Config, state files, the run
+lock (a real flock), idle_gate, live_children and the session-size check run for real. A few tests run the script
+itself, or the easl helpers, against real processes.
 """
 import argparse
 import contextlib
@@ -43,11 +42,6 @@ def load_omp_update():
     finally:
         sys.dont_write_bytecode = keep
     return module
-
-
-def stamp(minutes=0):
-    """UTC timestamp (minute resolution), as the quiet book writes it, `minutes` from now."""
-    return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=minutes)).strftime('%Y-%m-%dT%H:%MZ')
 
 
 class Clock:
@@ -313,7 +307,6 @@ class Sandbox(unittest.TestCase):
         self.clock = Clock()
         self.mod.time = self.clock
         os.makedirs(self.mod.STATE)
-        self.book_path = self.root / '.config' / 'machine-shepherd' / 'quiet-windows.json'
         self.new_world()
 
     def new_world(self):
@@ -321,83 +314,11 @@ class Sandbox(unittest.TestCase):
         self.mod.herdr, self.mod.sh, self.mod.ps_table = self.world.herdr, self.world.sh, self.world.ps_table
         shutil.rmtree(self.mod.STATE)
         os.makedirs(self.mod.STATE)
-        if self.book_path.exists():
-            self.book_path.unlink()
         return self.world
-
-    def book(self, *windows, quiet='full'):
-        """windows: (start, end) minutes from now; quiet: the row's level ("full", "heavy", None = no field)."""
-        self.book_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = []
-        for i, (s, e) in enumerate(windows, 1):
-            row = {'id': f'w{i}', 'start': stamp(s), 'end': stamp(e), 'owner': 'bench-judge', 'label': 'latency run'}
-            if quiet:
-                row['quiet'] = quiet
-            rows.append(row)
-        self.book_path.write_text(json.dumps(rows))
 
     def actions(self):
         path = Path(self.mod.STATE) / 'actions.jsonl'
         return [json.loads(ln) for ln in path.read_text().splitlines()] if path.exists() else []
-
-
-class QuietBlock(Sandbox):
-    BOOK = '~/.config/machine-shepherd/quiet-windows.json'
-
-    def test_blocks_from_the_guard_before_the_start_until_the_end(self):
-        cases = [  # (start, end) minutes from now, guard, blocked?
-            ((-5, 60), 30, True),    # running
-            ((25, 55), 30, True),    # starts within the guard
-            ((35, 65), 30, False),   # starts after the guard
-            ((35, 65), 40, True),    # the same window, a wider guard
-            ((-60, -1), 30, False),  # over
-        ]
-        for window, guard, blocked in cases:
-            with self.subTest(window=window, guard=guard):
-                self.book(window)
-                reason = self.mod.quiet_block(self.BOOK, guard)
-                if blocked:
-                    self.assertIn('quiet window w1', reason)
-                    self.assertIn('(bench-judge)', reason)
-                else:
-                    self.assertIsNone(reason)
-
-    def test_only_the_window_that_covers_now_blocks(self):
-        self.book((-120, -60), (200, 230), (-5, 10))
-        self.assertIn('quiet window w3 ', self.mod.quiet_block(self.BOOK, 30))
-
-    def test_a_host_with_no_book_is_never_blocked(self):
-        self.assertIsNone(self.mod.quiet_block(self.BOOK, 30))
-
-    def test_a_hold_beside_the_book_blocks_like_a_booking(self):
-        # quiet-window keeps holds (runs whose driver refuses booked rows) in quiet-holds.json.
-        self.book((-120, -60))
-        (self.book_path.parent / 'quiet-holds.json').write_text(json.dumps(
-            [{'id': 'h1-hold', 'start': stamp(10), 'end': stamp(40), 'owner': 'teleport-lab', 'label': 'r4',
-              'quiet': 'full'}]))
-        self.addCleanup((self.book_path.parent / 'quiet-holds.json').unlink)
-        self.assertEqual(self.mod.quiet_block(self.BOOK, 30),
-                         f"quiet window h1-hold {stamp(10)}->{stamp(40)} (teleport-lab)")
-
-    def test_a_heavy_only_row_or_one_without_a_level_never_blocks(self):
-        # quiet-window: a row without `quiet` (written before the levels) is heavy. A resume restart of an idle
-        # agent and an install are light, so only FULL quiet stops them.
-        holds = self.book_path.parent / 'quiet-holds.json'
-        for quiet in ('heavy', None):
-            with self.subTest(quiet=quiet):
-                self.book((-5, 60), (25, 55), quiet=quiet)
-                row = {'id': 'h1-hold', 'start': stamp(-5), 'end': stamp(60), 'owner': 'perf', 'label': 'remeasure'}
-                holds.write_text(json.dumps([dict(row, quiet=quiet) if quiet else row]))
-                self.assertIsNone(self.mod.quiet_block(self.BOOK, 30))
-        holds.unlink()
-
-    def test_a_running_heavy_hold_is_named_for_the_report_and_a_later_one_is_not(self):
-        self.book((-5, 60), quiet='heavy')
-        self.assertEqual(self.mod.quiet_heavy(self.BOOK), f'heavy hold w1 {stamp(-5)}->{stamp(60)} (bench-judge)')
-        self.book((10, 60), quiet=None)
-        self.assertIsNone(self.mod.quiet_heavy(self.BOOK))
-        self.book((-5, 60), quiet='full')
-        self.assertIsNone(self.mod.quiet_heavy(self.BOOK))
 
 
 class ExtensionFingerprint(Sandbox):
@@ -519,8 +440,8 @@ class ExtensionPins(Sandbox):
         row, ext = self.pane_row()
         self.assertEqual((row['triggers'], ext['pinned']), (['extensions changed'], False))
 
-    def test_a_due_pane_waits_while_the_host_is_in_a_quiet_window(self):
-        reason = 'quiet window w1 2026-10-05T08:00Z->2026-10-05T09:00Z (bench-judge)'
+    def test_a_due_pane_waits_once_the_rollout_stopped(self):
+        reason = 'rollout stopped: extension check failed on deckbox omp 18.8.0 after restarting hutter: x'
         row, _ = self.pane_row(blocked=reason)
         self.assertEqual(row['triggers'], ['extensions changed'])
         self.assertEqual(row['action'], f'skip: {reason}')
@@ -541,7 +462,7 @@ class SummaryLine(Sandbox):
                  {'pane': 'w1:p3', 'action': 'restarted', 'mem_before_mb': 1900, 'mem_after_mb': 400,
                   'triggers': ['session 150 MB']},
                  {'pane': 'w1:p4', 'action': 'skip: working', 'triggers': ['up 60.0 h']},
-                 {'pane': 'w1:p5', 'action': 'skip: quiet window w1 2026-10-05T08:00Z->2026-10-05T09:00Z (x)',
+                 {'pane': 'w1:p5', 'action': 'skip: focused by Tim',
                   'triggers': ['extensions changed']},
                  {'pane': 'w1:p6', 'action': 'skip: working', 'triggers': []},  # nothing due, so nothing left over
                  {'pane': 'w1:p7', 'action': 'report: seat/front door (owner decides)', 'version': '18.6.0',
@@ -553,7 +474,7 @@ class SummaryLine(Sandbox):
             line,
             '- 2026-10-05T21:00Z omp-update: target 18.6.0 (skipped v18.6.2, 18.7.0); '
             'deckbox 18.6.0 =, home 18.5.0->18.6.0; restarted 1 (p3 1900->400 MB); '
-            'due but left: working 1, quiet window 1; '
+            'due but left: working 1, focused by Tim 1; '
             'seats/outside herdr: 2 (home 4100 older up 80.5h 210 MB; home p7 18.6.0); '
             'services restarted omp-auth-broker restarted; '
             'errors 1 (w2:p9: failed: omp did not come back)')
@@ -589,7 +510,6 @@ else:
 class TileSandbox(Sandbox):
     """host_main, main_roll and main_migrate with the easl switch on, a fake easl CLI and herdr, a frozen ps and
     stubbed memory/binary probes (lsof and top on fake pids are slow)."""
-    BOOK = '~/.config/machine-shepherd/quiet-windows.json'
     RESTART = ['agent.restart', '--target', 'obj_lead', '--mode', 'resume']
 
     def setUp(self):
@@ -822,7 +742,7 @@ class TileRestart(TileSandbox):
         self.assertEqual(self.mutations(), [])
 
     def test_tims_own_unnamed_tile_is_never_restarted_and_a_named_one_over_the_same_lines_is(self):
-        # meta 2026-10-08: an unnamed tile is Tim's own session (quiet-window's test); rotation never touches it.
+        # meta 2026-10-08: an unnamed tile is Tim's own session; rotation never touches it.
         for name, action in ((None, "skip: Tim's tile"), ('worker', 'restarted')):
             with self.subTest(name=name):
                 world = self.new_world()
@@ -923,25 +843,8 @@ class TileRestart(TileSandbox):
         self.subagent(world, written_s_ago=600, held=False)  # finished ten minutes ago
         self.assertEqual(self.row(self.host())['action'], 'restarted')
 
-    def test_a_tile_waits_out_a_quiet_window_and_its_guard_but_not_a_distant_one(self):
-        self.book((-5, 60))
-        reason = self.mod.quiet_block(self.BOOK, 30)
-        self.assertTrue(reason.startswith('quiet window w1 '), reason)
-        self.assert_left_alone(f'skip: {reason}', blocked=reason)
-        world = self.new_world()
-        self.book((45, 75))  # starts after the 30 min guard
-        world.place_tile()
-        res = self.host(blocked=self.mod.quiet_block(self.BOOK, 30))
-        self.assertEqual(self.row(res)['action'], 'restarted')
-
-    def test_a_heavy_hold_lets_an_idle_tile_restart_and_a_full_one_does_not(self):
-        self.book((-5, 60), quiet='heavy')
-        self.world.place_tile()
-        self.assertEqual(self.row(self.host(blocked=self.mod.quiet_block(self.BOOK, 30)))['action'], 'restarted')
-        self.new_world()
-        self.book((-5, 60), quiet='full')
-        reason = self.mod.quiet_block(self.BOOK, 30)
-        self.assertTrue(reason.startswith('quiet window w1 '), reason)
+    def test_a_tile_is_left_alone_once_the_rollout_stopped(self):
+        reason = 'rollout stopped: extension check failed on deckbox omp 18.8.0 after restarting hutter: x'
         self.assert_left_alone(f'skip: {reason}', blocked=reason)
 
     def test_a_tile_that_turned_busy_or_vanished_since_the_listing_is_not_restarted(self):
@@ -1241,12 +1144,12 @@ class Target(Sandbox):
 
 
 class Rollout(Sandbox):
-    """main_run across the hosts in canary order with run_host stubbed: per-host version holds, quiet levels, and
-    the stop an extension failure on the canary causes."""
+    """main_run across the hosts in canary order with run_host stubbed: per-host version holds and the stop an
+    extension failure on the canary causes."""
     HOLD = {'hold_below': '18.8.0', 'hold_note': 'canvas checks easl against 18.8.x'}
     CONFIG = {'hosts': {'deckbox': {'ssh': 'tim@deckbox'},
                         'work': {'ssh': 'twaldin-work', **HOLD},
-                        'home': {'ssh': None, 'quiet_book': '~/.config/machine-shepherd/quiet-windows.json', **HOLD}},
+                        'home': {'ssh': None, **HOLD}},
               'order': ['deckbox', 'work', 'home'], 'notify': ['canvas@canvas', 'meta@dotfiles']}
 
     def setUp(self):
@@ -1287,7 +1190,7 @@ class Rollout(Sandbox):
         self.params.clear()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.mod.main_run(argparse.Namespace(dry_run=False, hosts=None, only_pane=None, no_wait=False))
+            self.mod.main_run(argparse.Namespace(dry_run=False, hosts=None, only_pane=None))
         return out.getvalue()
 
     def test_held_hosts_take_the_newest_release_below_their_hold_and_the_report_says_why(self):
@@ -1343,16 +1246,6 @@ class Rollout(Sandbox):
         self.assertTrue(self.params['home']['blocked'].startswith('rollout stopped: extension check failed on deckbox'))
         self.assertNotIn('blocked_versions', self.config())
         self.assertEqual(self.msgs, [])
-
-    def test_a_full_hold_on_home_blocks_it_and_a_heavy_one_does_not(self):
-        self.book((-5, 60), quiet='heavy')
-        out = self.run_once()
-        self.assertIsNone(self.params['home']['blocked'])
-        self.assertIn(f'heavy hold w1 {stamp(-5)}->{stamp(60)} (bench-judge): light restarts allowed', out)
-        self.book((-5, 60), quiet='full')
-        self.run_once()
-        self.assertTrue(self.params['home']['blocked'].startswith('quiet window w1 '), self.params['home'])
-        self.assertIsNone(self.params['deckbox']['blocked'])
 
 
 class DropFlags(unittest.TestCase):
@@ -1483,16 +1376,12 @@ class Migrate(TileSandbox):
         def busy_child(w):
             w.add_child(w.omp_pid, '/usr/bin/cargo build --release')
 
-        def quiet_window(w):
-            self.book((-5, 60))
-
         cases = [
             ('focused', lambda w: w.agent.update(focused=True), 'migrate: lead: skip: focused by Tim'),
             ('working', lambda w: w.agent.update(agent_status='working'), 'migrate: lead: skip: working'),
             ('draft', lambda w: w.pane_text.__setitem__(w.pane, DRAFT_IN_EDITOR),
              'migrate: lead: skip: text waiting in the editor'),
             ('child work', busy_child, 'migrate: lead: skip: live child work'),
-            ('quiet window', quiet_window, 'migrate: lead: skip: quiet window w1 '),
         ]
         for label, setup, expected in cases:
             with self.subTest(gate=label):

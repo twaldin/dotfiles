@@ -611,7 +611,7 @@ def verdict(g, procs):
 
 def tims_session(owner):
     """Tim's own tile: one with no agent name (his ad-hoc session; his tiktok tile was home's top consumer on 10-07) or
-    the one he has focused (his call). Never told to stop, as in quiet-window (a191011)."""
+    the one he has focused (his call). Never told to stop."""
     t = owner_tile(owner)
     return t is not None and (not t.get("name") or t.get("focused") is True)
 

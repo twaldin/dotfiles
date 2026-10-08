@@ -11,11 +11,6 @@ Policy (Tim, 2026-10-05, via the meta pane; hourly rotation 2026-10-07):
   home; a host with `hold_below` (hosts.<h>.hold_below + hold_note; delete it to lift) takes
   the newest such release below that version. A host that is ahead is reported, never
   downgraded.
-- No install or restart on a host in a FULL quiet hold ("quiet": "full" rows of
-  ~/.config/machine-shepherd/quiet-windows.json and quiet-holds.json beside it), or when one
-  starts within 30 min: the run waits up to quiet_wait_hours, then leaves the host to the next
-  hourly run. A heavy-only hold (any other row) allows both: a resume restart of an idle agent
-  is light.
 - herdr panes and easl tiles: never touch one that is `working` (or `blocked`). An `idle`/`done`
   one is restarted (pane: /exit, then `herdr agent start <name> --kind omp --pane <id> --
   --resume=<session>`) when its omp is older than the installed one, its session jsonl is over
@@ -36,7 +31,7 @@ Policy (Tim, 2026-10-05, via the meta pane; hourly rotation 2026-10-07):
   reason, and the agents in config `notify` (canvas, meta) are told through agent-msg.
 - Seats and front doors (config report_only: `lindy-seat`; opt_in overrides it), and every
   omp outside herdr and easl tiles: the run only reports them. Tim's own tiles (an easl tile
-  with no agent name, quiet-window's test) are never restarted: "skip: Tim's tile".
+  with no agent name) are never restarted: "skip: Tim's tile".
 - launchd omp services (home: auth broker + gateway) restart through launchctl
   kickstart when their omp is older than the installed one.
 - easl tiles (home, behind ~/.config/machine-shepherd/easl.json {"enabled": true, "cli":
@@ -52,7 +47,7 @@ Logs: every action -> ~/.local/state/omp-update/actions.jsonl; the last run ->
 last-run.json; real runs also put one summary line in the shepherd checkpoint.
 
 Usage:
-  omp-update run [--dry-run] [--hosts home,work,deckbox] [--only-pane w2:pXX] [--no-wait]
+  omp-update run [--dry-run] [--hosts home,work,deckbox] [--only-pane w2:pXX]
   omp-update roll [--hosts home,deckbox] [--include <name>] [--hours 24] [--dry-run]
   omp-update migrate <herdr agent> [--board ~/dotfiles] [--model M] [--dry-run]
   omp-update ext-ack --since <UTC> --note <why>  # an extension change needs no restart
@@ -101,7 +96,7 @@ DEFAULT_CONFIG = {
         # gets its credentials from this broker; Tim 10-05: work keeps its own local store).
         # Any host may carry "hold_below": "18.8.0" + "hold_note": it then takes the newest
         # eligible release below that version (delete the two keys to lift the hold).
-        "home": {"ssh": None, "quiet_book": "~/.config/machine-shepherd/quiet-windows.json",
+        "home": {"ssh": None,
                  "services": [
                      {"label": "com.twaldin.omp-auth-broker", "match": "auth-broker serve",
                       "health": "http://100.85.222.119:8765/v1/healthz"},
@@ -113,9 +108,6 @@ DEFAULT_CONFIG = {
     "max_session_mb": 100,
     "max_uptime_hours": 12,
     "max_rss_mb": 1536,
-    "quiet_guard_minutes": 30,
-    # The job runs hourly: wait out a FULL hold for at most this long, then the next run retries.
-    "quiet_wait_hours": 0.5,
     # Seats/front doors: the hourly run only reports them (move a name to opt_in to manage it).
     "report_only": {"names": ["lindy-seat"], "panes": []},
     "opt_in": [],
@@ -750,7 +742,7 @@ def restart_services(services, installed, dry, blocked, pending, errors):
 def idle_gate(a, pid, procs, mine, blocked, recheck=True, session=None):
     """(skip reason or None, live children or subagents) for restarting the omp `pid` in herdr
     agent or easl tile `a` (a["tile"]) on `session`. Every restart (hourly run, roll, migrate)
-    passes the same gates: no FULL quiet hold now or within the guard, idle/done, not focused by
+    passes the same gates: the rollout not stopped, idle/done, not focused by
     Tim (he may start typing; /exit would race his draft), not running this job, no live child
     work (timers, jobs, servers, ssh: background jobs show as idle and /exit would kill them),
     no in-process subagent running, nothing typed in its editor; then the status is read once
@@ -903,7 +895,7 @@ def host_main(params):
         if seat:
             row["action"] = "report: seat/front door (owner decides)"
         elif tile and not name:
-            # An unnamed tile is Tim's own session (quiet-window's test): never rotated or restarted here; the binary
+            # An unnamed tile is Tim's own session: never rotated or restarted here; the binary
             # upgrade reaches it when Tim restarts omp himself (meta 2026-10-08).
             row["action"] = "skip: Tim's tile"
         elif pane in pol["skip_panes"]:
@@ -1019,44 +1011,6 @@ def host_target(tinfo, hc):
     return max(below, key=vtuple) if below else "0"
 
 
-def quiet_rows(book):
-    """The rows of the quiet book and of the holds beside it (quiet-holds.json: windows for runs
-    whose driver refuses any booked row); a missing or unreadable file has none."""
-    path = os.path.expanduser(book)
-    windows = []
-    for f in (path, os.path.join(os.path.dirname(path), "quiet-holds.json")):
-        try:
-            with open(f) as fh:
-                windows += json.load(fh)
-        except (OSError, ValueError):
-            pass
-    return windows
-
-
-def quiet_block(book, guard_min):
-    """The FULL quiet booking or hold ("quiet": "full") that blocks installs and restarts now: one
-    running, or starting within guard_min. Any other row is heavy-only (quiet-window reads a row
-    without a level, written before the levels, as heavy) and blocks nothing here: an install and
-    a resume restart of an idle agent are light."""
-    now = utcnow()
-    for w in quiet_rows(book):
-        if w.get("quiet") != "full":
-            continue
-        start, end = parse_ts(w["start"]), parse_ts(w["end"])
-        if start - dt.timedelta(minutes=guard_min) <= now < end:
-            return f"quiet window {w['id']} {w['start']}->{w['end']} ({w.get('owner')})"
-    return None
-
-
-def quiet_heavy(book):
-    """The heavy-only booking or hold running now, named for the report, or None."""
-    now = utcnow()
-    for w in quiet_rows(book):
-        if w.get("quiet") != "full" and parse_ts(w["start"]) <= now < parse_ts(w["end"]):
-            return f"heavy hold {w['id']} {w['start']}->{w['end']} ({w.get('owner')})"
-    return None
-
-
 def update_config(change):
     """Apply `change` to the config as written (defaults not filled in) and save it atomically."""
     with open(CONFIG) as f:
@@ -1146,8 +1100,7 @@ def summary_line(when, tinfo, results, stop=None):
             if act.startswith("restarted"):
                 restarted.append(f"{short_pane(p['pane'])} {p.get('mem_before_mb')}->{p.get('mem_after_mb')} MB")
             elif act.startswith("skip:") and p.get("triggers"):
-                key = "quiet window" if act.startswith("skip: quiet window") else act[6:]
-                left[key] = left.get(key, 0) + 1
+                left[act[6:]] = left.get(act[6:], 0) + 1
     seats = [f"{r['host']} {u['pid']} {u['version'] or 'older'} up {u['uptime_h']}h"
              + (f" {u['session_mb']} MB" if u.get("session_mb") else "")
              for r in results for u in r["unmanaged"] if not u.get("service")]
@@ -1210,8 +1163,6 @@ def print_report(tinfo, results, dry, stop=None):
         hold = r.get("hold")
         print(f"\n== {r['host']}: installed {r.get('installed_before')} -> {r.get('installed_after')} "
               f"(target {r.get('target')}" + (f"; held below {hold['below']}: {hold.get('note')}" if hold else "") + ")")
-        if r.get("heavy_hold"):
-            print(f"   {r['heavy_hold']}: light restarts allowed")
         for a in r["actions"]:
             if a["kind"] not in ("pane", "unmanaged"):
                 print(f"   {a['kind']}: " + ", ".join(f"{k}={v}" for k, v in a.items() if k != "kind"))
@@ -1253,7 +1204,7 @@ def take_lock(wait_s):
 
 def main_roll(args):
     """Restart every herdr omp pane started before the newest extension change, each at its
-    next idle/done moment (no live child work, empty editor, not focused, no quiet window),
+    next idle/done moment (no live child work, empty editor, not focused),
     one pass per minute until none is left or --hours passes. Session-preserving: same
     restart as the daily run (/exit, then herdr agent start ... --resume=<session>)."""
     cfg = load_config()
@@ -1273,9 +1224,8 @@ def main_roll(args):
                 if name != "home" and n % 5 and name in left and not left[name]:
                     continue  # remote with nothing left: re-check every 5th pass only
                 hc = cfg["hosts"][name]
-                blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"]) if hc.get("quiet_book") else None
                 r = run_host(name, hc, {"host": name, "target": "0", "dry_run": args.dry_run, "policy": policy,
-                                        "blocked": blocked, "roll": True,
+                                        "roll": True,
                                         "manage_panes": hc.get("manage_panes", True),
                                         "easl": host_easl(hc)})
                 left[name] = []
@@ -1411,11 +1361,8 @@ def main_migrate(args):
         sys.exit(f"migrate: easl agent.list: {err}")
     if any(t.get("name") == name for t in tiles):
         sys.exit(f"migrate: a tile named {name} already exists")
-    cfg = load_config()
-    hc = cfg["hosts"]["home"]
-    blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"]) if hc.get("quiet_book") else None
     procs = ps_table()
-    skip, busy = idle_gate(a, pid, procs, ancestors(procs), blocked, recheck=not dry, session=session)
+    skip, busy = idle_gate(a, pid, procs, ancestors(procs), None, recheck=not dry, session=session)
     if skip:
         sys.exit(f"migrate: {name}: {skip}" + (f" {busy}" if busy else ""))
     keep, dropped = resume_args(argv)
@@ -1495,13 +1442,6 @@ def main_run(args):
         hc = cfg["hosts"][name]
         target = host_target(tinfo, hc)
         blocked = f"rollout stopped: {stop}" if stop else None
-        if hc.get("quiet_book") and not blocked:
-            blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"])
-            deadline = time.time() + cfg["quiet_wait_hours"] * 3600
-            while blocked and not args.dry_run and not args.no_wait and time.time() < deadline:
-                note(f"{name}: waiting for {blocked}")
-                time.sleep(300)
-                blocked = quiet_block(hc["quiet_book"], cfg["quiet_guard_minutes"])
         params = {"host": name, "target": target, "dry_run": args.dry_run, "policy": policy,
                   "only_pane": args.only_pane, "blocked": blocked, "manage_panes": hc.get("manage_panes", True),
                   "services": hc.get("services", []), "easl": host_easl(hc)}
@@ -1510,9 +1450,6 @@ def main_run(args):
         r["target"] = target
         if hc.get("hold_below"):
             r["hold"] = {"below": hc["hold_below"], "note": hc.get("hold_note")}
-        heavy = quiet_heavy(hc["quiet_book"]) if hc.get("quiet_book") and not blocked else None
-        if heavy:
-            r["heavy_hold"] = heavy
         results.append(r)
         if r.get("ext_failures") and not stop:
             stop = stop_rollout(cfg, name, r, args.dry_run)
@@ -1543,7 +1480,6 @@ def main():
     r.add_argument("--dry-run", action="store_true")
     r.add_argument("--hosts")
     r.add_argument("--only-pane")
-    r.add_argument("--no-wait", action="store_true")
     sub.add_parser("target")
     sub.add_parser("ext-fp")
     ea = sub.add_parser("ext-ack", help="mark the current extension contents as needing no restart")

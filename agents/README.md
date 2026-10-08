@@ -65,7 +65,6 @@ Everything custom around the harnesses (omp extensions, herdr hooks, launchd job
 - `machine-watch` (launchd, every minute; the full watch every 2 min): logs machine health and alerts the shepherd. While Tim is typing, a CPU under 15% idle on two checks in a row messages the agents that own the top consumers to stop them and rerun them through `machine-ok-queue` or `offload` (`machine-watch --consumers` previews who they are). It also checks deckbox's path to home's auth broker and reports deckbox's patch state daily (reboot required, pending updates, required units down: urgent).
 - `machine-census` and `fsevents-top`: attribute memory, CPU and file-system churn.
 - `omp-update` (launchd, daily): moves every host to the vetted omp release and restarts idle panes onto it.
-- `quiet-window` and `quiet-check`: book and enforce quiet windows for measured runs.
 - `omp-browser-cycle` (launchd, hourly): recycles omp's headless browsers.
 - ColorSync and GPU diagnostics: `gpu-top`, `colorsync-k`, `cs-measure`, `logout-colorsync-test`.
 - `gui-launch` (twaldin-home): launches an agent's GUI test app off Tim's Spaces, reverts any focus it takes, and checks afterwards; its event-driven guard is `src/gui-launch-guard.swift`.

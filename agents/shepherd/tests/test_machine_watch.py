@@ -639,7 +639,7 @@ class FastSaturation(MachineWatchCase):
                 self.assertIn('. Messaged no agent. Not messaged: pid %d ' % procs[-1][0], shepherd)
 
     def test_tims_own_tiles_an_unnamed_one_or_the_one_he_has_focused_are_never_messaged(self):
-        # quiet-window's rule (a191011): a tile with no agent name is Tim's ad-hoc session (his tiktok tile was the top
+        # A tile with no agent name is Tim's ad-hoc session (his tiktok tile was the top
         # consumer on 10-07), and the tile he has focused is his call.
         unnamed = {k: v for k, v in TERMS_TILE.items() if k != 'name'}
         for tile in (unnamed, {**TERMS_TILE, 'focused': True}):

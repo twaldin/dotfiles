@@ -1,6 +1,6 @@
 """Tests for the heavy-work queue, bin/machine-ok-queue (`run [--memory] [--gpu] -- <cmd>` and `status`).
 
-Every test runs real queue processes against a temp HOME (state, slots.json, quiet-window rows) with fast
+Every test runs real queue processes against a temp HOME (state, slots.json) with fast
 poll intervals. Gates are stand-in scripts that record their arguments, except an end-to-end run through
 the real, unchanged machine-ok gate with the stand-in system tools of test_machine_ok.
 """
@@ -52,11 +52,6 @@ echo '  }'
 '''
 
 
-def minute(delta_min):
-    t = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=delta_min)
-    return t.strftime('%Y-%m-%dT%H:%MZ')
-
-
 class QueueCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -98,9 +93,6 @@ class QueueCase(unittest.TestCase):
 
     def slots(self, n):
         (self.conf / 'slots.json').write_text(json.dumps({'testhost': n}))
-
-    def holds(self, rows, name='quiet-holds.json'):
-        (self.conf / name).write_text(json.dumps(rows))
 
     def start(self, *cmd, flags=(), gate=True, env=None):
         """A queue process in its own session: no controlling terminal, so every forwarded signal is ours."""
@@ -290,94 +282,8 @@ class Fifo(QueueCase):
         self.assertIn('has waited', err)
 
 
-class Holds(QueueCase):
-    def assert_paused_then_runs(self, rows, name='quiet-holds.json', env=None):
-        for f in (self.work / 'order', self.root / 'calls'):
-            f.unlink(missing_ok=True)
-        self.holds(rows, name)
-        p = self.start(*self.recorder('X'), env=env)
-        self.until(lambda: self.tickets(), what='ticket')
-        time.sleep(0.4)
-        self.assertEqual(self.order(), [], f'admitted despite {rows}')
-        self.assertFalse((self.root / 'calls').exists(), 'a held queue does not even sample the gate')
-        self.holds([], name)
-        code, _, err = self.finish(p)
-        self.assertEqual(code, 0, err)
-        self.assertIn('queue paused by quiet-window hold', err)
-        self.assertEqual(self.order(), ['X'])
-
-    def assert_runs_at_once(self, rows, env=None, lane='owner'):
-        self.holds(rows)
-        code, _, err = self.finish(self.start(*self.recorder('X'), env=env), timeout=10)
-        self.assertEqual(code, 0, err)
-        self.assertNotIn('paused', err)
-        self.assertEqual([e for e in self.events() if e['event'] == 'admit'][-1]['lane'], lane)
-
-    FULL = {'quiet': 'full', 'reason': 'latency bounds'}
-
-    def test_a_running_full_hold_pauses_admission(self):
-        self.assert_paused_then_runs([{'start': minute(-5), 'end': minute(20), 'owner': 'sky-beta', 'label': 'r6',
-                                       **self.FULL}])
-
-    def test_a_running_full_booking_pauses_admission_too(self):
-        self.assert_paused_then_runs([{'start': minute(-5), 'end': minute(20), 'owner': 'perf', 'label': 'p',
-                                       **self.FULL}], name='quiet-windows.json')
-
-    def test_a_full_hold_pauses_30_minutes_ahead_a_heavy_one_admits_10_minutes_ahead_in_its_lane(self):
-        self.assert_paused_then_runs([{'start': minute(25), 'end': minute(60), 'owner': 'b', 'label': 'full',
-                                       **self.FULL}])
-        self.assert_runs_at_once([{'start': minute(8), 'end': minute(40), 'owner': 'a', 'label': 'heavy soon'}],
-                                 lane='heavy-hold')
-
-    def test_a_heavy_only_hold_gives_foreign_tickets_one_background_slot_and_the_owner_its_normal_lane(self):
-        # bench ruling heavy-only-holds-queue-clamp-ruling-1: a heavy-only hold no longer pauses the queue.
-        self.slots(3)
-        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure', 'quiet': 'heavy'}])
-        f1 = self.start(*self.blocker('F1'))
-        self.until(lambda: (self.work / 'F1.pid').exists(), what='F1 running')
-        f2 = self.start(*self.recorder('F2'))
-        self.until(lambda: f2.pid in self.ticket_pids(), what='F2 ticket')
-        time.sleep(0.4)
-        self.assertEqual(self.order(), [], 'one foreign slot during the hold, though two slots are free')
-        owner = self.start(*self.recorder('O'), flags=['--agent', 'perf'])
-        code, _, err = self.finish(owner)
-        self.assertEqual(code, 0, err)
-        self.assertEqual(self.order(), ['O'], 'the owner passes the waiting foreign ticket')
-        self.assertIsNone(f2.poll())
-        (self.work / 'F1.go').touch()
-        for p in (f1, f2):
-            self.assertEqual(self.finish(p)[0], 0)
-        self.assertEqual(self.order(), ['O', 'F1', 'F2'])
-        admits = sorted((e for e in self.events() if e['event'] == 'admit'), key=lambda e: e['ticket'])  # F1, F2, O
-        lanes = [(e['lane'], e['clamp']) for e in admits]
-        background = 'taskpolicy -b, nice 10 (heavy hold)' if platform.system() == 'Darwin' else None
-        normal = 'taskpolicy -c utility, nice 10' if platform.system() == 'Darwin' else None
-        self.assertEqual(lanes, [('heavy-hold', background), ('heavy-hold', background), ('owner', normal)])
-        self.assertEqual(set((self.root / 'calls').read_text().splitlines()), {'--memory'})
-
-    def test_a_foreign_ticket_in_a_heavy_only_hold_waits_for_the_memory_gate(self):
-        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure'}])
-        (self.root / 'exit').write_text('1')
-        p = self.start(*self.recorder('F'))
-        self.until(lambda: (self.root / 'calls').exists() and len((self.root / 'calls').read_text().split('\n')) > 2,
-                   what='two gate samples')
-        self.assertEqual(self.order(), [])
-        (self.root / 'exit').write_text('0')
-        code, _, err = self.finish(p)
-        self.assertEqual(code, 0, err)
-        self.assertEqual(set((self.root / 'calls').read_text().splitlines()), {'--memory'})
-        self.assertEqual([e for e in self.events() if e['event'] == 'admit'][-1]['lane'], 'heavy-hold')
-
-    def test_holds_further_ahead_or_past_do_not_pause(self):
-        self.assert_runs_at_once([
-            {'start': minute(25), 'end': minute(60), 'owner': 'a', 'label': 'heavy in 25 min', 'quiet': 'heavy'},
-            {'start': minute(45), 'end': minute(60), 'owner': 'b', 'label': 'full in 45 min', 'quiet': 'full'},
-            {'start': minute(-60), 'end': minute(-1), 'owner': 'c', 'label': 'over'},
-        ], lane='normal')
-
-    def test_the_hold_owner_is_not_held(self):
-        self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': 'obj_OWNER', 'label': 'mine',
-                                   **self.FULL}], env={'EASL_TILE_ID': 'obj_OWNER'})
+class Identity(QueueCase):
+    """The caller's display name in tickets, queue.jsonl and `status`: an easl tile's name, else its tile id."""
 
     def easl_tiles(self, *tiles):
         """easl agent.list answers with these {tile, name, address} rows."""
@@ -385,73 +291,24 @@ class Holds(QueueCase):
 
     PERF = {'tile': 'obj_PERF', 'name': 'perf', 'address': 'perf@bench'}
 
-    def test_a_tile_inside_its_own_hold_is_admitted_by_its_easl_name_or_address(self):
-        self.easl_tiles({'tile': 'obj_OTHER', 'name': 'other', 'address': 'other@b'}, self.PERF)
-        for owner in ('perf', 'perf@bench'):
-            with self.subTest(owner=owner):
-                self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': owner, 'label': 'mine',
-                                           **self.FULL}], env={'EASL_TILE_ID': 'obj_PERF'})
-        admit = [e for e in self.events() if e['event'] == 'admit'][-1]
-        self.assertEqual(admit['agent'], 'perf')
+    def admitted_agent(self, env):
+        code, _, err = self.finish(self.start(*self.recorder('X'), env=env), timeout=10)
+        self.assertEqual(code, 0, err)
+        return [e for e in self.events() if e['event'] == 'admit'][-1]['agent']
 
-    def test_another_tiles_full_hold_still_pauses_a_tile(self):
-        self.easl_tiles(self.PERF, {'tile': 'obj_SKY', 'name': 'sky-beta', 'address': 'sky-beta@sky'})
-        self.assert_paused_then_runs([{'start': minute(-5), 'end': minute(20), 'owner': 'sky-beta', 'label': 'r6',
-                                       **self.FULL}], env={'EASL_TILE_ID': 'obj_PERF'})
+    def test_a_tile_goes_by_its_easl_name(self):
+        self.easl_tiles({'tile': 'obj_OTHER', 'name': 'other', 'address': 'other@b'}, self.PERF)
+        self.assertEqual(self.admitted_agent({'EASL_TILE_ID': 'obj_PERF'}), 'perf')
 
     def test_an_unreachable_easl_neither_hangs_nor_loses_the_tile_id(self):
         self.easl_tiles(self.PERF)
         started = time.monotonic()
-        self.assert_runs_at_once([{'start': minute(-5), 'end': minute(20), 'owner': 'obj_PERF', 'label': 'mine'}],
-                                 env={'EASL_TILE_ID': 'obj_PERF', 'FAKE_EASL_SLEEP': '30'})
+        self.assertEqual(self.admitted_agent({'EASL_TILE_ID': 'obj_PERF', 'FAKE_EASL_SLEEP': '30'}), 'obj_PERF')
         self.assertLess(time.monotonic() - started, 15)
-
-    def test_the_hold_owner_bypasses_foreign_tickets_its_hold_paused_then_fifo_resumes(self):
-        # perf's ticket 255 (2026-10-07 19:41Z) sat inside perf's own hold behind 7 foreign tickets that hold paused.
-        holder = self.start(*self.blocker('H'))
-        self.until(lambda: (self.work / 'H.pid').exists(), what='holder running')
-        foreign = []
-        for i, name in enumerate(('F1', 'F2', 'F3'), start=2):
-            foreign.append(self.start(*self.recorder(name)))
-            self.queued(foreign[-1], i)
-        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure', **self.FULL}])
-        (self.work / 'H.go').touch()
-        self.assertEqual(self.finish(holder)[0], 0)
-        owners = []
-        for name in ('O1', 'O2'):
-            p = self.start(*self.recorder(name), flags=['--agent', 'perf'])
-            owners.append(p)
-            self.until(lambda: p.pid in self.ticket_pids() or p.poll() is not None, what=f'{name} ticket')
-        for p in owners:
-            code, _, err = self.finish(p, timeout=15)
-            self.assertEqual(code, 0, err)
-        time.sleep(0.4)
-        self.assertEqual(self.order(), ['H', 'O1', 'O2'], 'the owner lane runs; the foreign tickets stay paused')
-        self.assertTrue(all(p.poll() is None for p in foreign))
-        self.holds([])
-        for p in foreign:
-            self.assertEqual(self.finish(p)[0], 0)
-        self.assertEqual(self.order(), ['H', 'O1', 'O2', 'F1', 'F2', 'F3'])
-        gate_calls = (self.root / 'calls').read_text().splitlines()
-        self.assertEqual(len(gate_calls), 6, 'one gate sample per admission: only each lane head samples')
-
-    def test_a_running_job_keeps_running_when_a_hold_begins(self):
-        p = self.start(*self.blocker('H'))
-        self.until(lambda: (self.work / 'H.pid').exists(), what='running')
-        self.holds([{'start': minute(-1), 'end': minute(20), 'owner': 'x', 'label': 'late', **self.FULL},
-                    {'start': minute(-1), 'end': minute(20), 'owner': 'y', 'label': 'heavy'}])
-        time.sleep(0.2)
-        self.assertIsNone(p.poll())
-        listing = subprocess.run([sys.executable, str(QUEUE), 'status'], env=self.env, capture_output=True, text=True)
-        self.assertIn("paused (no new admissions except its owner's) by quiet-window hold x", listing.stdout)
-        self.assertIn("heavy-only hold: other agents' steps get 1 slot at background priority, by quiet-window hold y",
-                      listing.stdout)
-        (self.work / 'H.go').touch()
-        self.assertEqual(self.finish(p)[0], 0)
 
 
 class Gpu(QueueCase):
-    """Rule 5: while Tim is active, GPU jobs (--gpu) run one at a time; idle, and on Linux, they use the normal slots."""
+    """Rule 4: while Tim is active, GPU jobs (--gpu) run one at a time; idle, and on Linux, they use the normal slots."""
 
     def setUp(self):
         super().setUp()
@@ -539,17 +396,6 @@ class Gpu(QueueCase):
             self.assertEqual(self.finish(p)[0], 0)
         self.assertEqual(self.order(), ['C', 'G1', 'G2'])
         self.assertEqual([e['gpu'] for e in self.events() if e['event'] == 'admit'], [True, False, True])
-
-    def test_holds_apply_to_gpu_jobs_too(self):
-        self.tim(900)
-        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'gpu a/b', 'quiet': 'full'}])
-        p = self.start(*self.recorder('G'), flags=['--gpu'])
-        self.until(lambda: p.pid in self.ticket_pids(), what='G ticket')
-        time.sleep(0.3)
-        self.assertEqual(self.order(), [])
-        self.holds([])
-        self.assertEqual(self.finish(p)[0], 0)
-        self.assertEqual(self.order(), ['G'])
 
     @unittest.skipIf(platform.system() == 'Darwin', 'Linux has no Tim at the keyboard')
     def test_linux_gpu_jobs_use_the_normal_slots(self):
@@ -734,17 +580,6 @@ class Clamp(QueueCase):
         (self.work / 'H.go').touch()
         self.finish(holder)
 
-    @unittest.skipUnless(platform.system() == 'Darwin', 'the clamp is macOS only')
-    def test_a_foreign_step_in_a_heavy_only_hold_runs_at_background_qos_and_nice_10_even_with_p_cores(self):
-        self.holds([{'start': minute(-1), 'end': minute(30), 'owner': 'perf', 'label': 'measure'}])
-        nice, (child, grandchild), err = self.family(flags=['--p-cores'])
-        self.assertEqual(nice, ['10', '10'])
-        self.assertGreater(grandchild['background'], 0, grandchild)
-        self.assertEqual(sum(v for q, v in grandchild.items() if q not in ('background', 'maintenance')), 0, grandchild)
-        self.assertEqual(child['utility'] + child['user_initiated'] + child['user_interactive'], 0, child)
-        admit = [e for e in self.events() if e['event'] == 'admit'][-1]
-        self.assertEqual((admit['lane'], admit['clamp']), ('heavy-hold', 'taskpolicy -b, nice 10 (heavy hold)'))
-
     @unittest.skipIf(platform.system() == 'Darwin', 'Linux runs commands as they are')
     def test_linux_runs_unclamped_and_ignores_p_cores(self):
         for flags in ((), ('--p-cores',)):
@@ -776,8 +611,7 @@ class Log(QueueCase):
     def test_jobs_overlapping_the_window_and_cancels_inside_it(self):
         def job(ticket, admit, release, agent='canvas'):
             rows = [{'ts': admit, 'event': 'admit', 'ticket': ticket, 'slot': 1, 'agent': agent, 'wait_s': 12.0,
-                     'command': ['go', 'test', f'./pkg{ticket}/...'], 'clamp': 'taskpolicy -b, nice 10 (heavy hold)',
-                     'lane': 'heavy-hold', 'hold': '2026-10-07T21:00Z-roblox-hold'}]
+                     'command': ['go', 'test', f'./pkg{ticket}/...'], 'clamp': 'taskpolicy -c utility, nice 10'}]
             if release:
                 rows.append({'ts': release, 'event': 'release', 'ticket': ticket, 'run_s': 33.0, 'exit': 0})
             return rows
@@ -795,8 +629,8 @@ class Log(QueueCase):
         self.assertEqual(code, 0, err)
         self.assertEqual([(r['event'], r['ticket']) for r in rows], [('job', 2), ('job', 3), ('cancel', 4)])
         self.assertEqual(rows[0], {'event': 'job', 'host': 'testhost', 'ticket': 2, 'agent': 'canvas',
-                                   'cmd': 'go test ./pkg2/...', 'slot': 1, 'clamp': 'taskpolicy -b, nice 10 (heavy hold)',
-                                   'lane': 'heavy-hold', 'hold': '2026-10-07T21:00Z-roblox-hold', 'state': 'released',
+                                   'cmd': 'go test ./pkg2/...', 'slot': 1, 'clamp': 'taskpolicy -c utility, nice 10',
+                                   'state': 'released',
                                    'admitted': '2026-10-07T20:50:00Z', 'released': '2026-10-07T21:05:00Z',
                                    'wait_s': 12.0, 'run_s': 33.0, 'exit': 0})
         # Tickets 17, 195 and 245 on home (2026-10-07): admitted before release events were logged, read as slot-holders.
@@ -831,7 +665,7 @@ class Log(QueueCase):
         code, rows, err = self.excerpt('--from', t0.strftime('%Y-%m-%dT%H:%M:%SZ'), '--to', t1.strftime('%Y-%m-%dT%H:%MZ'))
         self.assertEqual(code, 0, err)
         (row,) = rows
-        self.assertEqual((row['cmd'], row['exit'], row['lane'], row['slot']), ("sh -c 'exit 3'", 3, 'normal', 1))
+        self.assertEqual((row['cmd'], row['exit'], row['slot']), ("sh -c 'exit 3'", 3, 1))
         for argv in ([], ['--from', '2026-10-07T21:00Z'], ['--from', 'yesterday', '--to', '2026-10-07T21:00Z'],
                      ['--to', '2026-10-07T21:00Z', '--from', '2026-10-07T20:00Z', '--x', 'y']):
             with self.subTest(argv=argv):
