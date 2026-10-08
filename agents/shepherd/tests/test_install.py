@@ -10,7 +10,7 @@ CHECKOUT = Path(__file__).resolve().parent.parent
 INSTALL = CHECKOUT / 'install.sh'
 
 WORK_BINS = ['machine-census', 'machine-ok', 'machine-ok-queue', 'machine-watch', 'omp-browser-cycle']
-WORK_JOBS = ['net.waldin.machine-watch', 'net.waldin.omp-browser-cycle']
+WORK_JOBS = ['net.waldin.omp-browser-cycle']
 
 # Records its arguments instead of talking to launchd.
 FAKE_LAUNCHCTL = '''#!/bin/sh

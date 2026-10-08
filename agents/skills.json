@@ -23,7 +23,9 @@
     "frontend": "skills/frontend",
     "writing": "skills/writing",
     "using-the-work-system": "skills/using-the-work-system",
-    "board-cos": "skills/board-cos"
+    "board-cos": "skills/board-cos",
+    "shared-machine": "skills/shared-machine",
+    "machine-health": "skills/machine-health"
   },
   "project": {
     "using-the-work-system": "skills/using-the-work-system"

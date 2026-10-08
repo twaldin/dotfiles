@@ -3,8 +3,8 @@
 # symlink bin/* into ~/.local/bin, build src/*.swift there, and copy launchd/*.plist
 # into ~/Library/LaunchAgents (launchd ignores symlinked plists at login), reloading a job
 # only when its plist changed. A bins entry with a slash is a path in this checkout.
-#   install.sh           install what this host runs (twaldin-home: all; twaldin-work: the watcher set;
-#                        deckbox: the heavy-work queue, offload and deckbox-cpus, no tools or jobs)
+#   install.sh           install what this host runs (twaldin-home: all; twaldin-work: the machine tools and
+#                        browser-cycle job; deckbox: the heavy-work queue, offload and deckbox-cpus, no tools or jobs)
 #   install.sh --check   report drift only; exit 1 if anything differs
 # machine-ok is the benchmark gate; bench-judge pins its sha256, so it is swapped only by
 # atomic rename while holding the native-client lock (never mid-run), and not at all while
@@ -27,11 +27,11 @@ case "$host" in
   twaldin-home)
     bins="machine-ok machine-ok-queue offload offload-run machine-watch machine-census omp-update omp-browser-cycle gpu-top colorsync-k cs-measure logout-colorsync-test gui-launch"
     tools="fsevents-top gui-launch-guard"
-    jobs="net.waldin.machine-watch net.waldin.omp-browser-cycle net.waldin.omp-update" ;;
+    jobs="net.waldin.omp-browser-cycle net.waldin.omp-update" ;;
   twaldin-work)
     bins="machine-ok machine-ok-queue machine-watch machine-census omp-browser-cycle"
     tools="fsevents-top"
-    jobs="net.waldin.machine-watch net.waldin.omp-browser-cycle" ;;
+    jobs="net.waldin.omp-browser-cycle" ;;
   deckbox)
     bins="machine-ok-queue offload offload-run deckbox/deckbox-cpus"
     tools=""

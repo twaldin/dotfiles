@@ -13,12 +13,10 @@
 
 # Shared machines
 
-- Machine load never blocks agents; there are no quiet windows or holds. Queue heavy processes (builds, dev servers, tests, renders, encodes, benchmarks, game clients, captures) and keep non-heavy work moving. Measured runs tolerate load, repeat or run on deckbox.
+- Before heavy steps (builds, dev servers, tests, renders, encodes, benchmarks, game clients, captures) read `shared-machine`: queue them and keep non-heavy work moving. Machine load never blocks agents; there are no quiet windows or holds.
 - Stop what you start (servers, watchers, browsers, REPLs, Blender, game clients) when its task ends, and kill your own orphans. Reuse running dev servers; say so when keeping a long render or bake running.
 - Kill only processes you can prove are yours by port, cwd or target URL; omp's shared broker makes process trees misleading. Report unfixable pressure with numbers to your lead or Tim; subagents use their result. Never kill system daemons or touch Colima/Docker.
 - Make scratch with `mktemp -d`, record its path and remove exactly that path. Delete only paths you created and recorded; never pattern-delete (`find … -delete`, `-exec rm`, globbed `rm -rf`) in shared roots such as /tmp, `$TMPDIR`, `$HOME`, `~/dev` or `~/worktrees`.
 - Cap each tool's parallelism (`-j`, `--threads`, `--maxWorkers`, `MAGICK_THREAD_LIMIT`) and simultaneous runs. A Lindy vitest worker uses about 2 GB.
-- On twaldin-home and deckbox, run every build, test, typecheck and other heavy step through `machine-ok-queue run [--gpu] -- <cmd>`; it queues behind `machine-ok` and returns the command's exit status. Use `offload -- <cmd>` for Linux-compatible suites on deckbox; it excludes `.git/`, so git-dependent steps run on home in the queue. On twaldin-work, gate with `machine-ok --wait --memory` and test its exit code directly.
-- Add `--gpu` for MLX, whisper, Metal, Blender renders and hardware video encodes; GPU jobs run one at a time while Tim is active.
 - Before launching, moving, capturing or showing a Mac GUI window, read `mac-gui`; never move a window without its id. Use agent Spaces first, then Tim's Spaces or windows if needed.
 - Use twaldin-home's screen when needed; Tim is usually at work over ssh. Keep displays brief; if his activity disturbs a run, note it and rerun. No gate waits for Tim to be idle.

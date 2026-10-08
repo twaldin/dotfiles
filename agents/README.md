@@ -2,7 +2,7 @@
 
 One maintained skill library, small project guidance, and native harnesses. OMP runs the sessions; Codex can be used entirely on its own.
 
-`skills.json` selects 24 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. Machine-specific procedure (such as `mac-gui` for Spaces, yabai and virtual screens) lives in skills, not in `instructions.md`, because skill descriptions reach omp subagents and AGENTS.md files do not.
+`skills.json` selects 26 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. Machine-specific procedure (such as `mac-gui` for Spaces, yabai and virtual screens, `shared-machine` for the heavy-work queue and `machine-health` for diagnosis) lives in skills, not in `instructions.md`, because skill descriptions reach omp subagents and AGENTS.md files do not.
 
 ## Install and verify
 
@@ -64,13 +64,13 @@ Everything custom around the harnesses (omp extensions, herdr hooks, launchd job
 
 The easl fallback requires easl 0.2.4+ for caller-supplied message IDs. `omp-inbox` reuses a valid `details.easl.message` (`msg_` followed by 8–64 letters, digits, `_` or `-`), or mints one ID for that write. The optional `agent-msg --message ID` carries the same ID through `easl tell`, including a selected SSH route: an earlier prompt may still queue after its sender times out, so every easl attempt must share the ID. Failed sends retain the native error and nested details; successful sends mark native receipts delivered. Herdr inbox delivery is unchanged, and `--herdr-only` remains accepted for older live extensions until they rotate naturally.
 
-[shepherd/](shepherd/) is the machine shepherd's health glue for twaldin-home and twaldin-work:
-- `machine-ok`: the headroom gate agents run before heavy work.
-- `machine-watch` (launchd, every minute; the full watch every 2 min): logs machine health and alerts the shepherd. While Tim is typing, a CPU under 15% idle on two checks in a row messages the agents that own the top consumers to stop them and rerun them through `machine-ok-queue` or `offload` (`machine-watch --consumers` previews who they are). It also checks deckbox's path to home's auth broker and reports deckbox's patch state daily (reboot required, pending updates, required units down: urgent).
+[shepherd/](shepherd/) holds the machine CLIs for twaldin-home and twaldin-work; deckbox gets the queue and offload. A recurring machine problem gets a CLI plus a skill any agent uses, never a daemon, watcher or agent that messages others: `shared-machine` covers admission and `machine-health` covers diagnosis.
+- `machine-ok` (the pinned headroom gate, whose bytes benchmark kits hash), `machine-ok-queue` (the heavy-step queue and QoS clamp) and `offload`/`offload-run` (Linux runs on deckbox): `shared-machine` says when and how to use them.
+- `machine-watch`: on-demand only. It prints one JSON health report (census, FSEvents sample, ColorSync rates, WindowServer pid, input idle) and keeps no state, sends no alerts or messages and runs on no schedule.
 - `machine-census` and `fsevents-top`: attribute memory, CPU and file-system churn.
 - `omp-update` (launchd, daily): moves every host to the vetted omp release and restarts idle panes onto it.
 - `omp-browser-cycle` (launchd, hourly): recycles omp's headless browsers.
-- ColorSync and GPU diagnostics: `gpu-top`, `colorsync-k`, `cs-measure`, `logout-colorsync-test`.
+- ColorSync and GPU diagnostics: `gpu-top`, `colorsync-k`, `cs-measure`, `logout-colorsync-test`. `machine-health` says which probe fits a symptom.
 - `gui-launch` (twaldin-home): launches an agent's GUI test app off Tim's Spaces, reverts any focus it takes, and checks afterwards; its event-driven guard is `src/gui-launch-guard.swift`.
 - `deckbox/`: deckbox's system config, installed by hand as root, with the live copy under `/etc`. It holds:
   - the default-deny inbound firewall: `deckbox-inbound.nft` in its own `inet` table, loaded by `deckbox-firewall.service`. It never flushes Docker's or Tailscale's rules, and the stock `nftables.service` is masked;

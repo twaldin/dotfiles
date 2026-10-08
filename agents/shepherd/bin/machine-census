@@ -348,8 +348,8 @@ def main():
     sudo = can_sudo()
     procs = processes(sudo)
     header = sample_top(procs, sudo, a.sample)
-    # A failed ps or top would report every footprint as 0. Fail instead: machine-watch skips the run,
-    # where zeros would read as a sudden multi-GB growth on the next good sample.
+    # A failed ps or top would report every footprint as 0. Fail instead: zeros would read as a sudden
+    # multi-GB growth against any earlier sample.
     if not procs or not header["rows"]:
         sys.exit(f"machine-census: sample failed ({len(procs)} processes from ps, {header['rows']} rows from top)")
     classify(procs)
@@ -370,8 +370,8 @@ def main():
         "footprint_total_gb": round(sum(p["mem"] for p in procs.values()) / 1024, 1),
         "groups": {k: {"mem_mb": round(v["mem_mb"]), "cpu": round(v["cpu"], 1), "procs": v["procs"]} for k, v in groups.items()},
         "agents": agents,
-        # Largest holders of compressed memory: a single hoarder here (fseventsd once held 14 GB) is what
-        # machine-watch's compressed_high rule looks for; many small holders are normal.
+        # Largest holders of compressed memory: a single hoarder here (fseventsd once held 14 GB) is the
+        # case to look for; many small holders are normal.
         "top_compressed": [{"pid": p["pid"], "name": exe_name(p["cmd"]), "cmprs_mb": round(p["cmprs"]), "mem_mb": round(p["mem"])}
                            for p in sorted(procs.values(), key=lambda p: -p["cmprs"])[:3]],
     }

@@ -1,6 +1,6 @@
 """Smoke test for bin/machine-census: who uses memory and CPU, grouped by owner.
 
-machine-watch runs `machine-census --json --sample 2` and reads memory, cpu_idle, groups, agents and
+machine-watch runs `machine-census --json --sample 2` and prints memory, cpu_idle, groups, agents and
 top_compressed from it, so that JSON is the contract. Two kinds of run:
   * the real machine (ps, top, vm_stat, sysctl, memory_pressure are real and read-only), asserting the shape;
   * a stubbed machine with a known process table, asserting grouping, agent rows and the failure exit.
@@ -17,7 +17,7 @@ from pathlib import Path
 
 MACHINE_CENSUS = Path(__file__).resolve().parent.parent / 'bin' / 'machine-census'
 
-# The fields machine-watch reads from each part of the report.
+# The fields machine-watch passes through from each part of the report.
 MEMORY_KEYS = {'total_gb', 'compressed_gb', 'wired_gb', 'swap_used_gb', 'free_pct'}
 GROUP_KEYS = {'mem_mb', 'cpu', 'procs'}
 AGENT_KEYS = {'pid', 'pane', 'uptime', 'mem_mb', 'cpu', 'session_mb', 'project', 'sub_mem_mb', 'sub_top'}
@@ -279,7 +279,7 @@ class StubbedMachine(CensusCase):
         self.assertTrue(lines[-1].endswith('proj / node 300MB, ruby 200MB'), lines[-1])
 
     def test_an_empty_top_sample_fails_instead_of_reporting_zero_footprints(self):
-        # machine-watch skips the run on this exit; zeros would read as a sudden multi-GB growth next time.
+        # machine-watch exits without a report on this failure; zeros would read as a sudden multi-GB growth.
         write_exec(self.bin_dir / 'top', '#!/bin/sh\nexit 0\n')
         result = self.census('--json', '--sample', '1')
         self.assertNotEqual(result.returncode, 0)
