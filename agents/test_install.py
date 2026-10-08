@@ -58,7 +58,10 @@ class SharedInstall(unittest.TestCase):
             self.assertIn('Outside omp', review)
             self.assertNotIn("Matt's separate Standards/Spec", review)
             self.assertIn('applicable standing rules from `instructions.md`', router)
-            self.assertIn('global omp config.yml settings, not per-task fields', router)
+            self.assertIn('omp configuration settings, not per-task fields', router)
+            self.assertIn("lead's repository `.omp/config.yml`", router)
+            self.assertIn('`--config` overlay at launch', router)
+            self.assertIn('Never change global isolation settings', router)
             self.assertIn('automatic patch application', router)
             for relative in ['scripts/log.sh', 'references/decision-log-template.tsv']:
                 self.assertEqual((pstack / 'show-me-your-work' / relative).read_bytes(),
@@ -102,6 +105,7 @@ class SharedInstall(unittest.TestCase):
                     'cursor-team-kit', 'deslop', 'from trunk with read', '/loop 1h',
                     '`control-ui`', '`control-cli`',
                     'a isolated checkout', r'configured [\w-]+ model', r'\bthe store\b',
+                    'store reports',
                     'with a prompt that runs this tick', 'by store path', 'ledger row',
                     'Drain the final inbox', 'status page', 'four-column', 'lane VM',
                     'agent store', r'`decision\.tsv`', 'git show origin/main:', '`swarm workers`',
@@ -118,6 +122,9 @@ class SharedInstall(unittest.TestCase):
             self.assertIn((pstack / 'poteto-mode/playbooks/autonomous-run.md').resolve(), reachable)
             self.assertIn((pstack / 'principle-prove-it-works/SKILL.md').resolve(), reachable)
             plan = (pstack / 'poteto-mode/playbooks/multi-phase-plan.md').read_text()
+            exploration = next(line for line in plan.splitlines() if line.startswith('3. Explore'))
+            self.assertIn('read-only `scout` subagents', exploration)
+            self.assertNotIn('isolated: true', exploration)
             template = plan.split('````markdown\n', 1)[1].split('\n````', 1)[0]
             program = template.split('## Program checklist\n', 1)[1].split('## <Task as a verb phrase>', 1)[0]
             markers = json.loads(re.search(r'const PROGRAM_MARKERS = (\[[^\n]+\]);', checker.read_text()).group(1))

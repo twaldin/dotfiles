@@ -109,6 +109,10 @@ def adapt_pstack(skills: Path) -> None:
             text = re.sub(r'^description:.*$', 'description: Engineering playbooks for features, bugs, performance, measurable improvement, prototypes, refactors, verification and shipping. Read first for engineering work; routes to the smallest fitting playbook and on-demand principles.', text, count=1, flags=re.M)
         if path == skills / 'interrogate/SKILL.md':
             text = re.sub(r'^description:.*$', 'description: Independent different-family code or design review, including required review gates, adversarial challenge, delta re-review after fixes and exact-head acceptance receipts.', text, count=1, flags=re.M)
+        if path == skills / 'poteto-mode/playbooks/multi-phase-plan.md':
+            text = text.replace(
+                '3. Explore in subagents with `subagent_type: "poteto-agent"` and an explicit model per the Subagents section',
+                '3. Explore with read-only `scout` subagents using the native research model role')
         if path.parent.name in {'poteto-mode', 'show-me-your-work', 'figure-it-out', 'unslop', 'interrogate'}:
             text = text.replace('disable-model-invocation: true\n', '')
         text = text.replace('`AskQuestion`', '`easl ask … --wait` in background `bash` (`async: true`, `timeout: 0`)')
@@ -141,6 +145,7 @@ def adapt_pstack(skills: Path) -> None:
         text = text.replace("Owners also keep the `children.tsv` of Autopilot-full step 2.",
                             "Use native task state for child accounting.")
         text = text.replace("`children.tsv`", "native task state")
+        text = text.replace('store reports', 'receipts on the work record')
         text = text.replace("Probe each owner with a generic liveness or status check, and collect the decision trails.",
                             "Read native task and branch/receipt evidence, and collect the decision trails without status pings.")
         text = text.replace("Probe all subagents", "Account for all native task results")
@@ -223,7 +228,7 @@ def adapt_pstack(skills: Path) -> None:
 
 Use native `task` with a parallel `tasks[]` batch for independent work. Children start without your conversation or global instructions. Give each a complete goal, scope, context, acceptance, exact proof commands, report shape and the applicable standing rules from `instructions.md` and the board. Every implementation owner first reads `skill://poteto-mode` and its applicable principles. A board lead never edits code, tests or implementation docs, even in a small-task collapse, Autonomous run, Arena synthesis or cleanup. Delegate those edits to the ticket's owner or integration owner.
 
-Writers use `isolated: true`. Native isolation may be a clone, overlay or copy, not a literal worktree. `task.isolation.apply` and `task.isolation.merge` are global omp config.yml settings, not per-task fields. Tim's current config enables isolation with automatic patch application; that is not review approval. For review before integration, configure `task.isolation.apply: false` before dispatch, and `task.isolation.merge: branch` when branch-mode worktrees are required. Keep one integration owner for coupled branches. Implementation is ticket-first per `using-the-work-system`; research and conversation need no fake tickets.
+Writers use `isolated: true`. Native isolation may be a clone, overlay or copy, not a literal worktree. `task.isolation.apply` and `task.isolation.merge` are omp configuration settings, not per-task fields. Tim's default config enables isolation with automatic patch application; that is not review approval. For review before integration, set `task.isolation.apply: false` before dispatch in the lead's repository `.omp/config.yml` or a `--config` overlay at launch; scope `task.isolation.merge: branch` there too when branch-mode worktrees are required. Never change global isolation settings for this workflow: other boards share the host. Keep one integration owner for coupled branches. Implementation is ticket-first per `using-the-work-system`; research and conversation need no fake tickets.
 
 Use native `task.agentModelOverrides` and `modelRoles`, not a Cursor model-rules file. Omit `agent` for ordinary implementation, use `opus` for hard judgment, `scout` for read-only investigation of unknown files, and the **interrogate** policy for review. Explicit per-item `model` selectors are available. Resolve quota failures through another available provider and report the substitute. Inspect the resolved model metadata before counting family independence.
 
