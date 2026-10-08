@@ -84,6 +84,19 @@ class SharedInstall(unittest.TestCase):
             self.assertEqual(read_settings(settings), original)
             self.assertEqual(fingerprint(auth), auth_before)
 
+    def test_full_install_preserves_claude_reset_redemption(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            home = Path(scratch)
+            settings = home / '.omp/agent/config.yml'
+            settings.parent.mkdir(parents=True)
+            resets = {'autoRedeem': 'yes'}
+            settings.write_text(yaml_value({'claudeResets': resets}))
+            command = [sys.executable, str(Path(__file__).with_name('install.py')),
+                       '--home', str(home), '--apply']
+            subprocess.run(command, check=True, capture_output=True)
+
+            self.assertEqual(read_settings(settings).get('claudeResets'), resets)
+
     def test_legacy_aliases_restore_and_idempotency(self):
         with tempfile.TemporaryDirectory() as scratch:
             home = Path(scratch)

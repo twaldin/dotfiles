@@ -18,7 +18,7 @@ SOURCE = Path(__file__).resolve().parent
 LOCAL_SETTINGS = {
     'providers', 'auth', 'enabledModels', 'enabledProviders',
     'modelProviderOrder', 'modelTags', 'setupVersion', 'shellPath',
-    'browser', 'computer', 'tools', 'ssh', 'dev', 'codexResets', 'hideThinkingBlock', 'worktree',
+    'browser', 'computer', 'tools', 'ssh', 'dev', 'codexResets', 'claudeResets', 'hideThinkingBlock', 'worktree',
 }
 SHARED_PREFERENCES = {
     'modelRoles', 'modelRoleStorage', 'defaultThinkingLevel',
