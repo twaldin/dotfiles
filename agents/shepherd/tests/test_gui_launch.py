@@ -3409,6 +3409,44 @@ class Guard(unittest.TestCase):
         result = json.loads((root / 'summary.json').read_text())
         self.assertEqual(result['problems'], [])
 
+    def close_late_window_at_the_end(self, wid, hold):
+        """Review 6: a window on Tim's Space 4 whose owner joins the tree in the turn before the end's closes while the
+        guard's end holds at `hold` (its rig waits while `<hold>-hold` exists, creating `<hold>-held` first):
+        final-pass, after the end's read of the windows on screen; final-sample, after each window's sighting there.
+        The summary's problems, and the owner's pid."""
+        probe, _ = self.probe(self.java)
+        process, lines, root = self.rig(space=6, shown=4, onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+        put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, True]]))
+        time.sleep(0.35)  # several reads see it on screen, its owner outside the tree
+        put(root / ('%s-hold' % hold), '')
+        self.send(process, 'root %d' % probe.pid, 'end')
+        deadline = time.monotonic() + 5
+        while not (root / ('%s-held' % hold)).exists():
+            self.assertLess(time.monotonic(), deadline, 'the end never reached %s' % hold)
+            time.sleep(0.01)
+        put(root / 'onscreen.json', '[]')
+        put(root / 'skylight-windows.json', '{}')
+        (root / ('%s-hold' % hold)).unlink()
+        lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        self.assertEqual(process.wait(10), 0)
+        return json.loads((root / 'summary.json').read_text())['problems'], probe.pid
+
+    def test_a_late_adopted_window_on_tims_screen_at_its_first_sample_is_judged_though_it_closes_right_after(self):
+        # Review 6 (Spec, blocking): the end's last read of the windows on screen is the window's first sighting; that
+        # sample finds it on Tim's Space 4, and it closes right after. The sample is the evidence: a problem.
+        wid = 89350
+        problems, pid = self.close_late_window_at_the_end(wid, 'final-sample')
+        self.assertTrue(any(p.startswith("window %d of the tree (pid %d) was on Tim's Space 4 at the guard's end (found by the end's last read" % (wid, pid))
+                            for p in problems), problems)
+
+    def test_a_late_adopted_window_gone_by_its_first_sample_counts_as_on_tims_screen(self):
+        # Review 6: the end's last read of the windows on screen lists it, its owner now in the tree, and it closes
+        # before its first sample. Nothing ever read where it was: it counts as on Tim's screen (fail closed).
+        wid = 89351
+        problems, pid = self.close_late_window_at_the_end(wid, 'final-pass')
+        self.assertTrue(any(p.startswith("window %d of the tree (pid %d) was on screen at the end's last read of the windows on screen and gone by its first sample" % (wid, pid))
+                            for p in problems), problems)
+
 
 if __name__ == '__main__':
     unittest.main()

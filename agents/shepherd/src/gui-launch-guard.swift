@@ -108,10 +108,12 @@
 //     tree ID is sighted and parked individually, even with no AX event and no yabai row, and so is one already on
 //     screen when its owner joins the tree (a window on screen whose owner was outside the tree is read again at the
 //     first poll after the tree gains a root or an adoption); at the end, after its last adoption (its own scan), the
-//     windows on screen are read once more and every tree window on them is sighted, and judged then (review 4: before
-//     the final sweep's window list, which may wait while the window closes): one on Tim's screen is a problem, and one
-//     its own sample shows gone (closed since that read) is on no screen, nothing to judge (review 5) (review
-//     3; a read that fails then is a problem). macOS can show an existing window again (a native tab selected again)
+//     windows on screen are read once more and every tree window on them is sighted and judged by one sample, the
+//     same for both (review 6) (review 4: before the final sweep's window list, which may wait while the window
+//     closes): one on Tim's screen is a problem; one that sample shows gone (closed since that read) is judged by its
+//     earlier samples if it had any (review 5), and counts as on Tim's screen if this was its first sighting (never
+//     read anywhere: fail closed, review 6) (review 3; a read that fails then is a problem). macOS can show an
+//     existing window again (a native tab selected again)
 //     with no create event and no Space change. The guard keeps both yabai's last index and the measured Tim
 //     membership.
 //     Any of a window's SkyLight memberships in Tim's Spaces counts, even when yabai reports the target. A window
@@ -2635,10 +2637,13 @@ let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
 let endReported = Locked(Set<Int>())
 
 /// A tree window was reported at `seen` (`via`): its first direct sample, before queued yabai work. An exempt sample
-/// is recorded and enrolled for the 100 ms resampler immediately. Any thread; no child process.
-@Sendable func sighted(_ id: Int, at seen: Double, via: String) {
-    guard firstSightings.value[id] == nil else { return }
-    let look = WindowLook(id)
+/// is recorded and enrolled for the 100 ms resampler immediately. `given`: that sample, already taken (review 6: the
+/// end's final pass judges the same one); nil: one is taken here. True: this was the window's first sighting. Any
+/// thread; no child process.
+@discardableResult
+@Sendable func sighted(_ id: Int, at seen: Double, via: String, look given: WindowLook? = nil) -> Bool {
+    guard firstSightings.value[id] == nil else { return false }
+    let look = given ?? WindowLook(id)
     let exempt = look.exempt
     let sighting = FirstSighting(at: seen, place: look.place, exempt: exempt, onTims: exempt != nil ? false : look.spaceOnTims)
     let fresh = firstSightings.update { (all: inout [Int: FirstSighting]) -> Bool in
@@ -2649,6 +2654,7 @@ let endReported = Locked(Set<Int>())
     if fresh, let exempt {
         exempted(id, look, at: seen, reason: exempt, via: via, found: nil, why: "yabai not queried at first sighting", final: false)
     }
+    return fresh
 }
 
 /// The first-sighting fields of window `id`'s records: firstAt (seconds since launch), firstSpace (its index; null:
@@ -3197,9 +3203,13 @@ final class ShownWindows {
     /// after the last poll (or by that scan) has windows no poll will read again. A read that fails is a problem.
     /// Review 4: each such window's sample is judged here, before the final sweep's window list (which may wait while
     /// the window closes, and then finds it gone): one on Tim's screen, not exempt, is a problem now (endReported, so
-    /// the final sweep reports no more of it). Review 5: one WindowServer shows gone by its own sample (closed since the
-    /// read of the windows on screen) is on no screen: nothing to judge (the final sweep finds it gone too). The rig
-    /// can hold the pass between those two reads (rigHold "final-pass"). shownQueue, waited for by the end.
+    /// the final sweep reports no more of it). Review 6: each window has ONE sample here, which registers its sighting
+    /// (when this read is its first) and is judged: an on-Tim sample is never lost to a later one that finds the window
+    /// gone. When that sample shows the window gone (closed since the read of the windows on screen): one sighted before
+    /// is judged by its earlier samples, where they were taken (review 5; the final sweep finds it gone too); one first
+    /// sighted here was never read anywhere but on screen, so it counts as on Tim's screen (fail closed, as at the end's
+    /// report of a window gone unplaced), a problem. The rig can hold the pass after that read (rigHold "final-pass")
+    /// and after each window's sighting (rigHold "final-sample"). shownQueue, waited for by the end.
     func finalPass() {
         guard let rows = shownWindows() else {
             problem("the windows on screen could not be read at the guard's end: a tree window on Tim's screen whose owner joined the tree late could go unseen")
@@ -3212,9 +3222,15 @@ final class ShownWindows {
             guard let pid = row.pid else { continue }
             if member[pid] == nil { member[pid] = tree.contains(pid) }
             guard member[pid] == true else { continue }
-            sighted(row.id, at: seen, via: "final-shown")
-            let look = WindowLook(row.id)
-            if look.gone { continue }  // closed since the read of the windows on screen: on no screen (review 5)
+            let look = WindowLook(row.id)  // the sighting's sample and the verdict's (review 6)
+            let first = sighted(row.id, at: seen, via: "final-shown", look: look)
+            rigHold("final-sample")
+            if look.gone {  // closed since the read of the windows on screen (review 5)
+                if first && endReported.update({ $0.insert(row.id).inserted }) {
+                    problem("window \(row.id) of the tree (pid \(pid)) was on screen at the end's last read of the windows on screen and gone by its first sample: nothing showed it off Tim's screen, so it counts as on it")
+                }
+                continue
+            }
             if look.exempt == nil && look.onTims && endReported.update({ $0.insert(row.id).inserted }) {
                 problem("window \(row.id) of the tree (pid \(pid)) was on \(look.timLocation) at the guard's end (found by the end's last read of the windows on screen)")
             }
