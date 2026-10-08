@@ -115,6 +115,7 @@ def stage_runtime(stage, destination):
     # Cross-skill links must work even through OMP's traversal-restricted skill:// URI.
     references = list((stage / 'skills').rglob('*.md'))
     references.extend((stage / 'vendor/pstack/skills').rglob('*.md'))
+    references.extend((stage / 'vendor/pstack/agents').glob('*.md'))
     for path in references:
         def resolve_link(match):
             relative = match.group(1)

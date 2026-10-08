@@ -77,7 +77,9 @@ else the native question tool) before designing interfaces in detail.
         text = path.read_text()
         text = re.sub(r'[Cc]all the Skill tool twice, for "([^"]+)" and "([^"]+)"',
                       r'Load the "\1" and "\2" skills', text)
-        text = re.sub(r'[Cc]all the Skill tool with "([^"]+)"', r'Load the "\1" skill', text)
+        text = re.sub(r'([Cc]alls?) the Skill tool with ["`]([^"`]+)["`]',
+                      lambda m: m.group(1).replace('Call', 'Load').replace('call', 'load')
+                      + ' the "' + m.group(2) + '" skill', text)
         text = text.replace('call the Skill tool for whichever skills', 'load whichever skills')
         text = text.replace('should call the Skill tool for', 'should load')
         path.write_text(text)
@@ -99,12 +101,127 @@ def adapt_pstack(skills: Path) -> None:
         first = text.index(start)
         last = text.index(end, first) if end else len(text)
         path.write_text(text[:first] + replacement + text[last:])
+    # These translations also apply to on-demand leaves and supporting references.
+    for path in skills.rglob('*.md'):
+        text = path.read_text()
+        text = text.replace('name: Poteto Mode', 'name: poteto-mode')
+        if path == skills / 'poteto-mode/SKILL.md':
+            text = re.sub(r'^description:.*$', 'description: Engineering playbooks for features, bugs, performance, measurable improvement, prototypes, refactors, verification and shipping. Read first for engineering work; routes to the smallest fitting playbook and on-demand principles.', text, count=1, flags=re.M)
+        if path == skills / 'interrogate/SKILL.md':
+            text = re.sub(r'^description:.*$', 'description: Independent different-family code or design review, including required review gates, adversarial challenge, delta re-review after fixes and exact-head acceptance receipts.', text, count=1, flags=re.M)
+        if path.parent.name in {'poteto-mode', 'show-me-your-work', 'figure-it-out', 'unslop', 'interrogate'}:
+            text = text.replace('disable-model-invocation: true\n', '')
+        text = text.replace('`AskQuestion`', '`easl ask … --wait` in background `bash` (`async: true`, `timeout: 0`)')
+        text = text.replace('Task tool', '`task` tool').replace('`Task`', '`task`').replace('Task subagent', '`task` subagent')
+        text = text.replace('`subagent_type: "poteto-agent"`', '`task` with `isolated: true`')
+        text = text.replace('`subagent_type: generalPurpose`', 'native `task`')
+        text = text.replace('- `subagent_type`: `generalPurpose`', '- Choose the native agent type for the role.')
+        text = re.sub(r'- `model`: the `[^\n]+', '- Use native model-role settings for this role.', text)
+        text = re.sub(r'- `readonly`: `[^\n]+', '- Give the agent explicit read-only scope; omp has no `readonly` task field.', text)
+        text = text.replace('`run_in_background: true`', 'one native `task` batch (`isolated: true` for writers); results arrive automatically')
+        text = text.replace('Cursor cloud agent', 'isolated omp owner subagent').replace('cloud VM', 'isolated checkout')
+        text = text.replace('parallel cloud workers', 'parallel native workers').replace('cloud concurrency limit', 'native task concurrency limit')
+        text = text.replace("Cursor's `/loop` command", "omp's native goal/turn-continuation mechanism")
+        text = text.replace('going offline, a Cursor restart', 'going offline, an omp restart')
+        text = text.replace('do the work directly in this session, plain workers where they help, verification inline',
+                            "dispatch the work to the ticket's isolated owner, with evidence-backed verification")
+        # Read adapted installed workflows, not raw Cursor sources from trunk.
+        text = re.sub(r'`git show origin/main:pstack/skills/([^`]+)`',
+                      r'read the installed adapted `\1`', text)
+        text = text.replace('from trunk with read the installed adapted', 'by reading the installed adapted')
+        text = text.replace('`git show origin/main:<control skill path>`',
+                            'Read the selected native control-skill file.')
+        text = text.replace("The root is the only topology writer.",
+                            "The root assigns one integration owner as the only topology writer.")
+        text = text.replace("The root fetches current trunk and rebases the chain from bottom to top.",
+                            "The root delegates fetching trunk and rebasing the chain bottom-up to that integration owner.")
+        text = text.replace('the root pushes the result', 'the integration owner pushes the result')
+        text = text.replace("As soon as a subagent starts, the owner adds its ID, expected runtime (at least the longest past run of that kind), and state to a `children.tsv` kept the same way.",
+                            "Record child IDs and branch/receipt pointers in native task state, not a separate children table.")
+        text = text.replace("Owners also keep the `children.tsv` of Autopilot-full step 2.",
+                            "Use native task state for child accounting.")
+        text = text.replace("`children.tsv`", "native task state")
+        text = text.replace("Probe each owner with a generic liveness or status check, and collect the decision trails.",
+                            "Read native task and branch/receipt evidence, and collect the decision trails without status pings.")
+        text = text.replace("Probe all subagents", "Account for all native task results")
+        text = text.replace("Before spawning investigators, list the available MCPs from the Cursor environment. Use the available-tools map when present. Otherwise inspect the `mcps/` directory Cursor exposes for enabled MCP servers.",
+                            "Before spawning investigators, inspect the exposed omp tools and available MCP resources. Use existing authenticated host CLIs for missing source categories.")
+        text = text.replace('Spawn `task` with `subagent_type: "Comment Sicko"`. Pass the scope. Do not restate its rules.',
+                            'Spawn an isolated native `task` whose brief reads [Comment Sicko](../../agents/comment-sicko.md) and names the scope. It may edit comments, not application code.')
+        text = text.replace('Fix trivial accepted flags directly by deleting a dead path, dropping a parameter, or using the real API.',
+                            'Delegate accepted implementation fixes to the ticket owner, including trivial deletions.')
+        text = text.replace('otherwise `/tmp/arena-<slug>/candidate-<n>/`',
+                            'otherwise a recorded `mktemp -d` directory per candidate')
+        text = text.replace('write it to a file like `/tmp/<slug>-resume.md`',
+                            'write it under an exact recorded `mktemp -d` scratch path')
+        text = text.replace('`node pstack/skills/poteto-mode/scripts/check-plan.mjs <plan.md>`',
+                            '[check-plan.mjs](../scripts/check-plan.mjs) with `node <resolved script path> <plan.md>`')
+        text = text.replace('`pstack/skills/', '`')
+        text = text.replace('from trunk at program start', 'from the installed adapted library at program start')
+        text = text.replace('Re-read the execution playbook from trunk.', 'Re-read the installed adapted execution playbook.')
+        text = text.replace('to `/tmp/swarm-<pr-id>/worker-<n>/<slug>.png`',
+                            "under the worker's exact recorded `mktemp -d` scratch path")
+        text = text.replace('Run `/deslop` from `cursor-team-kit` over the diff before commit.',
+                            'Run the project checks and inspect the diff for unnecessary code before commit.')
+        text = text.replace('the `deslop` skill from the `cursor-team-kit` plugin (`/deslop`)',
+                            'project checks and a diff cleanup')
+        text = text.replace('`grok-4.7-xhigh-fast`', 'the native `task` role')
+        text = text.replace('`claude-opus-5-5-xhigh`', 'the native `opus` role')
+        text = text.replace('`/deslop`', 'project checks and diff cleanup')
+        text = text.replace("**create-skill** skill (Cursor's built-in for authoring SKILL.md files)",
+                            '**writing-for-agents** skill (`skill://writing-for-agents`)')
+        text = text.replace('`control-cli` or `control-ui` from `cursor-team-kit`', 'the real CLI or native browser/easl')
+        text = text.replace('`control-ui` from `cursor-team-kit`', 'native browser/easl')
+        text = text.replace('`control-cli` from `cursor-team-kit`', 'the real CLI')
+        text = text.replace('`cursor-team-kit` publishes `control-cli` (CLIs and TUIs) and `control-ui` (browser / Electron / web UIs).',
+                            'Use the real CLI for CLIs/TUIs, native browser/easl for web UI, and `mac-gui` for native windows.')
+        text = text.replace('`control-ui` or `control-cli`', 'native browser/easl or the real CLI')
+        text = text.replace('**Just do it.** Use any MCP tool. Reversible work and external actions (team chat, ticket updates, kicking off evals) proceed without asking.',
+                            "**Just do it within authorization.** Reversible scoped work proceeds; outward actions and landing follow Tim's and the project's permission contract.")
+        text = text.replace('Open a todolist', 'Track parent phases with native todo (workers without todo report step status)')
+        text = text.replace('arm `/loop 1h` with a prompt that runs this tick.',
+                            'start one owned background `bash` job running `sleep 3600` (`async: true`, `timeout: 0`). Its completion triggers this audit; rearm only while this program is active.')
+        text = text.replace('arms `/loop 1h` with a prompt that runs this tick, per Autopilot-full step 6.',
+                            'starts the owned `sleep 3600` background job from Autopilot-full step 6; each completion triggers the next audit while the program remains active.')
+        text = text.replace('arm the audit tick as `/loop 1h` with the tick prompt below.',
+                            'start one owned background `bash` job running `sleep 3600` (`async: true`, `timeout: 0`). On completion run the tick below and rearm only while this program is active.')
+        text = text.replace('`/loop` works in local and cloud roots.', 'Native completion events wake the lead; this timer is not durable scheduling.')
+        text = text.replace('Probe each owner with a generic liveness or status check.', 'Read native results and branch/receipt evidence; do not status-ping owners.')
+        text = text.replace('Probe every active lane and judge progress by side effects only.', 'Read native task and artifact evidence for every active lane.')
+        text = text.replace('A `decision.tsv`, one row per attempt: id, hypothesis, change, before, after, delta, tests, verdict (kept or reverted), note.',
+                            'Use its canonical `decisions.tsv` schema, one decision row per attempt; point to the metric/regression receipt as evidence.')
+        text = text.replace('`decision.tsv`', '`decisions.tsv`')
+        text = re.sub(r'your configured [\w-]+ model \(default [^)\n]+\)',
+                      'native worker-model settings (`task` by default, `opus` for hard judgment)', text)
+        text = text.replace('on the `swarm workers` model (default the native `task` role)',
+                            'using native worker-model settings and recording the resolved model')
+        text = text.replace('<swarm workers model>', '<resolved worker model>')
+        text = text.replace("under the agent store's `docs/`", "in the effort's recorded planning-artifact directory")
+        text = text.replace('on a lane VM', "in the lane's isolated checkout")
+        text = text.replace('`/loop` per component until the diff is zero',
+                            'Continue in the component owner until the diff is zero')
+        text = text.replace('Spawn one reviewer per configured model to adversarially review code changes.',
+                            'Spawn the independent reviewers chosen in Step 3 to adversarially review code changes.')
+        text = text.replace('The configured reviewers have produced their findings.',
+                            'The reviewers chosen in Interrogate Step 3 have produced their findings.')
+        text = text.replace("use the watcher's Bugbot pass count",
+                            'derive the Bugbot pass count from the review history')
+        text = text.replace("the watcher's four-column table on GitHub", 'the primary forge receipts')
+        text = text.replace("After GitHub reports `READY`, a queued `WAITING`/`merge-queue` stop, or `COMPLETE`, or after Origin reports the frontier merge-ready,",
+                            'After the active forge reports the frontier merge-ready,')
+        path.write_text(text)
+
+    checker = skills / 'poteto-mode/scripts/check-plan.mjs'
+    text = checker.read_text().replace(
+        'const PROGRAM_MARKERS = ["git show origin/main:", "/loop 1h", "status message"];',
+        'const PROGRAM_MARKERS = ["installed adapted", "sleep 3600", "status message"];')
+    checker.write_text(text.replace('<swarm workers model>', '<resolved worker model>'))
 
     section('poteto-mode/SKILL.md', '## Subagents', '## Writing the reply', '''## Subagents
 
-Use native `task` with a parallel `tasks[]` batch for independent work. Children start without your conversation. Give each a complete goal, scope, context, acceptance, exact proof commands and report shape. Every implementation owner first reads `skill://poteto-mode` and its applicable principles. A board lead never edits code, tests or implementation docs, even in a small-task collapse, Autonomous run, Arena synthesis or cleanup. Delegate those edits to the ticket's owner or integration owner.
+Use native `task` with a parallel `tasks[]` batch for independent work. Children start without your conversation or global instructions. Give each a complete goal, scope, context, acceptance, exact proof commands, report shape and the applicable standing rules from `instructions.md` and the board. Every implementation owner first reads `skill://poteto-mode` and its applicable principles. A board lead never edits code, tests or implementation docs, even in a small-task collapse, Autonomous run, Arena synthesis or cleanup. Delegate those edits to the ticket's owner or integration owner.
 
-Writers use `isolated: true`. Native isolation may be a clone, overlay or copy, not a literal worktree. For review before integration use native `task.isolation.apply: false`; use `task.isolation.merge: branch` when branch-mode worktrees are required. Automatic patch application is not review approval. Keep one integration owner for coupled branches. Implementation is ticket-first per `using-the-work-system`; research and conversation need no fake tickets.
+Writers use `isolated: true`. Native isolation may be a clone, overlay or copy, not a literal worktree. `task.isolation.apply` and `task.isolation.merge` are global omp config.yml settings, not per-task fields. Tim's current config enables isolation with automatic patch application; that is not review approval. For review before integration, configure `task.isolation.apply: false` before dispatch, and `task.isolation.merge: branch` when branch-mode worktrees are required. Keep one integration owner for coupled branches. Implementation is ticket-first per `using-the-work-system`; research and conversation need no fake tickets.
 
 Use native `task.agentModelOverrides` and `modelRoles`, not a Cursor model-rules file. Omit `agent` for ordinary implementation, use `opus` for hard judgment, `scout` for read-only investigation of unknown files, and the **interrogate** policy for review. Explicit per-item `model` selectors are available. Resolve quota failures through another available provider and report the substitute. Inspect the resolved model metadata before counting family independence.
 
@@ -121,11 +238,13 @@ Choose reviewers from a different model family than the authors:
 
 - Anthropic authors → `agent: "reviewer"` (omp's `review` role, GPT-6 Astra).
 - OpenAI authors → `agent: "opus"`.
-- Mixed Anthropic/OpenAI authors → an available third family for the independent review. Additional family-specific reviewers may contribute, but a reviewer who shares any author's family does not satisfy independence.
-- `grok` is eligible only for small, low-risk diffs. Do not use it for security, concurrency, migrations or cross-cutting design.
+- Mixed Anthropic/OpenAI authors → an available third-family reviewer, such as GLM-5.3 (for example `model: "zai/glm-5.3"` only if enabled). Additional family-specific reviewers may contribute, but a reviewer who shares any author's family does not satisfy independence. If no eligible third family is available, report the review incomplete.
+- Any reviewer whose resolved model is Grok counts only for small, low-risk diffs, regardless of agent name or fallback chain. Grok cannot satisfy a required review of security, concurrency, migrations or cross-cutting design. If a `reviewer` or other agent falls back to Grok for such work, rerun on another eligible family or report the review incomplete.
 - A project's stricter reviewer policy takes precedence. If quota or rate limits prevent the chosen model, select an available different family, report the substitute and verify its resolved model. Do not wait for a reset.
 
 Verify actual author and reviewer models from returned launch/session metadata, including fallbacks, before counting the review. Changing a model's size, version or reasoning level does not change its family. Record resolved models and families, harness, and reviewed head SHA or immutable diff snapshot. Unknown or same-family metadata makes independence incomplete, not passed.
+
+Outside omp, use the harness's native delegation tools and an available different family, with the same resolved-model, risk and evidence requirements.
 
 ''' )
     section('interrogate/SKILL.md', '## Output Format', 'Present the verdict', '''## Fixes and acceptance
@@ -136,7 +255,7 @@ Review judges code, not product behavior. The author or integration owner runs t
 
 ## Output Format
 
-Include the reviewed revision, verified author/reviewer families, delta-review coverage and exact-head acceptance receipt, then use the upstream synthesized verdict below. This deliberately replaces Matt's separate Standards/Spec reports; intent and repository standards remain part of the shared rubric.
+Include the reviewed revision, verified author/reviewer families, delta-review coverage and exact-head acceptance receipt, then use the synthesized verdict below. Check both intent and repository standards with the shared rubric.
 
 ''' )
     section('poteto-mode/playbooks/orchestrate.md', '#### Roles and placement', '#### The brief', '''#### Roles and placement
@@ -151,7 +270,24 @@ Include the reviewed revision, verified author/reviewer families, delta-review c
 This is the smaller omp/easl interpretation, not maximal Orchestrate. Do not install `orch`, Graphite, a second inbox, scheduler or parallel status database. Tickets and native task state own units and dependencies; parent todos own phases. The board's rules note owns standing orders. Attach branch/PR/head and verification receipts to the existing work record. Keep material choices in the append-only **show-me-your-work** trail. Derive the board and brief from those same records.
 
 ''' )
-    section('poteto-mode/playbooks/orchestrate.md', '2. **Install the runtime.**', '3. **Pilot.**', '''2. **Prepare native state.** Read the standing orders, seed the ticket/native-task frontier from existing work, and open the **show-me-your-work** trail. No runtime installation or store scaffold.
+    section('poteto-mode/playbooks/orchestrate.md', 'Size the brief to the unit.', 'A dependency is a context relay', '''Size the brief to the unit. A one-command unit may be one paragraph, but retains goal, scope, acceptance, exact proof, report shape and applicable standing orders. Children do not inherit the lead's global instructions or board rules. Copy the applicable rules into every spawn and consolidated replacement brief.
+
+An optional track coordinator's brief also names its units, native task concurrency, machine-bound proof requirements, drain/accounting contract and rollup shape. Each child rollup includes name, status, branch/PR, head SHA, verdict and one line of evidence.
+
+''' )
+    path = skills / 'poteto-mode/playbooks/orchestrate.md'
+    path.write_text(path.read_text().replace(
+        '<preferences.md pasted verbatim>', '<applicable standing orders pasted verbatim>'))
+    section('poteto-mode/playbooks/orchestrate.md', '#### Steps', '#### Queue and drain', '''#### Steps
+
+1. **Frame.** State a countable done predicate, scope, rough effort and coupled branch groups. A one-session task routes to Autonomous run with its ticket and isolated owner; only the optional program ceremony collapses, never ownership, rules or evidence. A contested decomposition goes through **arena** before the pilot.
+2. **Prepare native state.** Read the standing orders, seed the ticket/native-task frontier from existing work, and open the **show-me-your-work** trail. No runtime installation or parallel bookkeeping scaffold.
+3. **Pilot.** Push one unit through brief, worker, exact-head verification receipt, integration and authorized landing. Use the evidence to fix the brief, proof recipe or unit size before scaling. A cheap repeated unit may itself be the pilot; expensive or novel units earn a dedicated different-family verifier.
+4. **Scale.** Refill a rolling window as children finish, batching independent ready units in `tasks[]`. Use a track coordinator only when the root cannot drain the track itself. Relay upstream reports into downstream briefs. Account for every child, and audit a sampled brief alongside the wave rather than blocking it.
+5. **Drain.** Classify terminal results and update the same ticket/task records before refilling. Follow Queue and drain below.
+6. **Land.** Integrate verified units continuously through one integration owner per coupled focus. Clean authorized cherry-picks or fast-forwards are coordinator bookkeeping; delegate conflict edits and restacks. Keep the lowest unmerged frontier green and recompute it after each merge or reported new head.
+7. **Close.** Account for every child as done, abandoned or reconciled. Confirm the predicate on the real artifact and exact-current-head receipts for every landed PR. Audit the decision trail with its different-family reviewer. Preserve ticket/task evidence and record recurring lessons in the board's rules or brief structure.
+
 ''' )
     section('poteto-mode/playbooks/orchestrate.md', '#### Queue and drain', '#### Verification', '''#### Queue and drain
 
@@ -165,6 +301,9 @@ Recompute the ordered PR list, branches, exact heads and lowest unmerged frontie
     section('poteto-mode/playbooks/orchestrate.md', 'Write ledger rows', 'A unit is not done', '''Attach a verification receipt keyed by PR number plus exact head SHA to the existing ticket/work record: `live-ui-verified | unit-test-verified | type-check-only | verifier-blocked | verifier-failed`. CI green is input, not a verdict. Behavioral work needs better than `type-check-only`; blocked is not passed. A failure creates a fix unit. A new head voids the receipt, including after restack. The verifier's evidence overrides a same-head worker self-report.
 
 ''' )
+    section('poteto-mode/playbooks/orchestrate.md', 'A unit is not done', '#### Liveness and failure', '''A unit is not done until its output is durable. The owner externalizes its branch/artifact and the verifier attaches the exact-head receipt to the existing work record as the unit lands, not at the end of the program.
+
+''' )
     section('poteto-mode/playbooks/orchestrate.md', '#### Liveness and failure', '#### Escalation', '''#### Liveness and failure
 
 Native task results, `agent://<id>`, branch/PR heads and receipts are the evidence. Never resume an agent just to check it or use transcript mtime as liveness. Retry failed work with fresh consolidated scope; smaller units for resource failures and a different available provider for model failures. Repeated failure needs a replan, not endless identical retries. Reconcile late results against current heads before accepting them.
@@ -172,7 +311,15 @@ Native task results, `agent://<id>`, branch/PR heads and receipts are the eviden
 After an omp restart, recover the board's rules, tickets, recorded branches, receipts and scoped `history://` transcripts. Do not assume children survived or restart another tile. Resume only proven retained state; otherwise dispatch a fresh owner. Preserve owned processes and locks unless their recorded ownership is still provable.
 
 ''' )
-    section('poteto-mode/playbooks/autonomous-run.md', '2. Pick the wake mechanism', '3. Each iteration', '''2. Run implementation iterations in the ticket's isolated owner subagent, never in the lead. Prefer native task/CI/background-job completion events. Omp goal mode continues terminal turns; `/loop` re-submits after turns, and `/loop 1h` is a duration deadline, not an hourly wake. When a timed re-check is necessary, start one owned `bash` job running `sleep <seconds>` with `async: true`, `timeout: 0`; its completion wakes the lead, which rearms it only while this run is active. No daemon or watcher service. This is not durable scheduling.
+    section('poteto-mode/playbooks/orchestrate.md', '#### Escalation', None, '''#### Escalation
+
+Human gates are irreversible or outward actions, product/preference calls no experiment settles, contradictory standing orders, or a program-level dead end after replanning. First check existing decisions and asks. Post one `easl ask … --wait` as background bash (`async: true`, `timeout: 0`), record its source on the ticket/board, and route independent work around it.
+
+Retries, CI flakes, review fixes and restacks go to owners, not Tim. Mid-run discoveries fix only what blocks the frontier; record the rest as scoped follow-ups. Decline scope the brief forbids.
+
+**Reply:** at checkpoints and close, derive the predicate counts, landed work, frontier PRs and SHAs, verdicts, abandoned scope, open human gates and trail path from the same ticket/task records and exact-head receipts. Include PR links and primary evidence pointers.
+''' )
+    section('poteto-mode/playbooks/autonomous-run.md', '2. Pick the wake mechanism', '3. Each iteration', '''2. Run implementation iterations in the ticket's isolated owner subagent, never in the lead. Prefer native task/CI/background-job completion events. Omp goal mode continues terminal turns; `/loop` re-submits after turns, and duration arguments are deadlines, not fixed-interval wakes. When a timed re-check is necessary, start one owned `bash` job running `sleep <seconds>` with `async: true`, `timeout: 0`; its completion wakes the lead, which rearms it only while this run is active. No daemon or watcher service. This is not durable scheduling.
 ''' )
     section('poteto-mode/playbooks/worktree-cleanup.md', '1. Snapshot and audit.', 'This is the one playbook', '''1. Record `df -h /` and read the repository's exact `git worktree list --porcelain` paths plus recorded native isolation artifacts. Do not run the Cursor transcript-scanning audit helper.
 2. Check ownership, branch/merge state, tracked and untracked WIP, PR state and active task/board receipts for every candidate. A clean or merged worktree can still be active. Unknown ownership is a hold.
@@ -187,7 +334,7 @@ After an omp restart, recover the board's rules, tickets, recorded branches, rec
 ''' )
     section('swarm/SKILL.md', '4. Pick the worker model', '5. Give each worker', '''4. Use native model-role settings. Omit `agent` for ordinary implementation; use `opus` for hard judgment. Name each arm's type or explicit per-item `model` for a model race and record resolved models.
 ''' )
-    section('swarm/SKILL.md', 'Spawn all N workers', 'Every brief stands alone', '''Spawn independent workers in one native `task` batch, with `isolated: true` for writers. Isolation is not a cloud VM. Machine-bound proof uses the host's existing tools and auth. For a non-default base, name the exact branch and SHA in the brief and have the owner establish its isolated checkout before writing; there is no `cloud_base_branch` field.
+    section('swarm/SKILL.md', 'Spawn all N workers', 'Every brief stands alone', '''Spawn independent workers in one native `task` batch, with `isolated: true` for writers. Isolation is not a separate machine. Machine-bound proof uses the host's existing tools and auth. For a non-default base, name the exact branch and SHA in the brief and have the owner establish its isolated checkout before writing; there is no `cloud_base_branch` field.
 
 ''' )
     section('arena/SKILL.md', '3. Pick the runners.', '4. Assign output paths.', '''3. Use native roles, normally ordinary `task` and `opus` for different-family candidates. Explicit per-item `model` selectors are available. Verify resolved families, name quota substitutions and preserve the task's risk requirements. Same-model races are useful for generation-bound work, but do not establish independence.
@@ -213,101 +360,11 @@ After an omp restart, recover the board's rules, tickets, recorded branches, rec
     section('poteto-mode/playbooks/shipping.md', '8. **Watch the current frontier', '9. **Stop at the ceiling', '''8. **Observe the current frontier without mutating the queue.** Use active-forge state and checks through background `bash` (`async: true`, `timeout: 0`). After each completion, re-read the exact PR until it is merged or blocked. On GitHub read `gh pr view <pr> --json state,mergedAt,mergeStateStatus,statusCheckRollup,autoMergeRequest`; on Origin read `origin pr view <pr> --checks --comments`. Check completion is not merge completion. Timed re-checks use one owned sleep job only while this run is active, never a watcher service.
 ''' )
 
-    # These translations also apply to on-demand leaves and supporting references.
-    for path in skills.rglob('*.md'):
+    # Resolve on-demand references after both literal translations and policy inserts.
+    references = list(skills.rglob('*.md'))
+    references.extend((skills.parent / 'agents').glob('*.md'))
+    for path in references:
         text = path.read_text()
-        text = text.replace('name: Poteto Mode', 'name: poteto-mode')
-        if path == skills / 'poteto-mode/SKILL.md':
-            text = re.sub(r'^description:.*$', 'description: Engineering playbooks for features, bugs, performance, measurable improvement, prototypes, refactors, verification and shipping. Read first for engineering work; routes to the smallest fitting playbook and on-demand principles.', text, count=1, flags=re.M)
-        if path == skills / 'interrogate/SKILL.md':
-            text = re.sub(r'^description:.*$', 'description: Independent different-family code or design review, including required review gates, adversarial challenge, delta re-review after fixes and exact-head acceptance receipts.', text, count=1, flags=re.M)
-        if path == skills / 'poteto-mode/playbooks/orchestrate.md':
-            for old, new in {
-                '`units.tsv`': 'the ticket/native-task records',
-                '`ledger.tsv`': 'the exact-head verification receipts',
-                '`frontier.json`': 'the derived branch/PR frontier',
-                '`preferences.md`': "the board's standing orders",
-                '<preferences.md pasted verbatim>': '<applicable standing orders pasted verbatim>',
-                '`gates.md` entry': 'native easl ask',
-                'the store': 'the existing work records',
-                'cloud spawns': 'isolated spawns',
-                'spawn budget with the cloud default and the local exception list': 'native task concurrency and machine-bound proof requirements',
-            }.items():
-                text = text.replace(old, new)
-        if path.parent.name in {'poteto-mode', 'show-me-your-work', 'figure-it-out', 'unslop', 'interrogate'}:
-            text = text.replace('disable-model-invocation: true\n', '')
-        text = text.replace('`AskQuestion`', '`easl ask … --wait` in background `bash` (`async: true`, `timeout: 0`)')
-        text = text.replace('Task tool', '`task` tool').replace('`Task`', '`task`').replace('Task subagent', '`task` subagent')
-        text = text.replace('`subagent_type: "poteto-agent"`', '`task` with `isolated: true`')
-        text = text.replace('`subagent_type: generalPurpose`', 'native `task`')
-        text = text.replace('- `subagent_type`: `generalPurpose`', '- Choose the native agent type for the role.')
-        text = re.sub(r'- `model`: the `[^\n]+', '- Use native model-role settings for this role.', text)
-        text = re.sub(r'- `readonly`: `[^\n]+', '- Give the agent explicit read-only scope; omp has no `readonly` task field.', text)
-        text = text.replace('`run_in_background: true`', 'one native `task` batch (`isolated: true` for writers); results arrive automatically')
-        text = text.replace('Cursor cloud agent', 'isolated omp owner subagent').replace('cloud VM', 'isolated checkout')
-        text = text.replace('parallel cloud workers', 'parallel native workers').replace('cloud concurrency limit', 'native task concurrency limit')
-        text = text.replace("Cursor's `/loop` command", "omp's native goal/turn-continuation mechanism")
-        text = text.replace('going offline, a Cursor restart', 'going offline, an omp restart')
-        text = text.replace('do the work directly in this session, plain workers where they help, verification inline',
-                            "dispatch the work to the ticket's isolated owner, with evidence-backed verification")
-        # Read adapted installed workflows, not raw Cursor sources from trunk.
-        text = re.sub(r'`git show origin/main:pstack/skills/([^`]+)`',
-                      r'read the installed adapted `\1`', text)
-        text = text.replace("The root is the only topology writer.",
-                            "The root assigns one integration owner as the only topology writer.")
-        text = text.replace("The root fetches current trunk and rebases the chain from bottom to top.",
-                            "The root delegates fetching trunk and rebasing the chain bottom-up to that integration owner.")
-        text = text.replace("As soon as a subagent starts, the owner adds its ID, expected runtime (at least the longest past run of that kind), and state to a `children.tsv` kept the same way.",
-                            "Record child IDs and branch/receipt pointers in native task state, not a separate children table.")
-        text = text.replace("Owners also keep the `children.tsv` of Autopilot-full step 2.",
-                            "Use native task state for child accounting.")
-        text = text.replace("`children.tsv`", "native task state")
-        text = text.replace("Probe each owner with a generic liveness or status check, and collect the decision trails.",
-                            "Read native task and branch/receipt evidence, and collect the decision trails without status pings.")
-        text = text.replace("Probe all subagents", "Account for all native task results")
-        text = text.replace("Before spawning investigators, list the available MCPs from the Cursor environment. Use the available-tools map when present. Otherwise inspect the `mcps/` directory Cursor exposes for enabled MCP servers.",
-                            "Before spawning investigators, inspect the exposed omp tools and available MCP resources. Use existing authenticated host CLIs for missing source categories.")
-        text = text.replace('Spawn `task` with `subagent_type: "Comment Sicko"`. Pass the scope. Do not restate its rules.',
-                            'Spawn an isolated native `task` whose brief reads [Comment Sicko](../../agents/comment-sicko.md) and names the scope. It may edit comments, not application code.')
-        text = text.replace('Fix trivial accepted flags directly by deleting a dead path, dropping a parameter, or using the real API.',
-                            'Delegate accepted implementation fixes to the ticket owner, including trivial deletions.')
-        text = text.replace('otherwise `/tmp/arena-<slug>/candidate-<n>/`',
-                            'otherwise a recorded `mktemp -d` directory per candidate')
-        text = text.replace('write it to a file like `/tmp/<slug>-resume.md`',
-                            'write it under an exact recorded `mktemp -d` scratch path')
-        text = text.replace('`grok-4.7-xhigh-fast`', 'the native `task` role')
-        text = text.replace('`claude-opus-5-5-xhigh`', 'the native `opus` role')
-        text = text.replace('`/deslop`', 'project checks and diff cleanup')
-        text = text.replace('`node pstack/skills/poteto-mode/scripts/check-plan.mjs <plan.md>`',
-                            '[check-plan.mjs](../scripts/check-plan.mjs) with `node <resolved script path> <plan.md>`')
-        text = text.replace('`pstack/skills/', '`')
-        text = text.replace('from trunk at program start', 'from the installed adapted library at program start')
-        text = text.replace('Re-read the execution playbook from trunk.', 'Re-read the installed adapted execution playbook.')
-        text = text.replace('to `/tmp/swarm-<pr-id>/worker-<n>/<slug>.png`',
-                            "under the worker's exact recorded `mktemp -d` scratch path")
-        text = text.replace('Run `/deslop` from `cursor-team-kit` over the diff before commit.',
-                            'Run the project checks and inspect the diff for unnecessary code before commit.')
-        text = text.replace('the `deslop` skill from the `cursor-team-kit` plugin (`/deslop`)',
-                            'project checks and a diff cleanup')
-        text = text.replace('Before commit → the `deslop` skill from the `cursor-team-kit` plugin (`/deslop`).',
-                            'Before commit → project checks and a diff cleanup.')
-        text = text.replace("**create-skill** skill (Cursor's built-in for authoring SKILL.md files)",
-                            '**writing-for-agents** skill (`skill://writing-for-agents`)')
-        text = text.replace('`control-ui` or `control-cli`', 'native browser/easl or the real CLI')
-        text = text.replace('`control-cli` or `control-ui` from `cursor-team-kit`', 'the real CLI or native browser/easl')
-        text = text.replace('`control-ui` from `cursor-team-kit`', 'native browser/easl')
-        text = text.replace('`control-cli` from `cursor-team-kit`', 'the real CLI')
-        text = text.replace('`cursor-team-kit` publishes `control-cli` (CLIs and TUIs) and `control-ui` (browser / Electron / web UIs).',
-                            'Use the real CLI for CLIs/TUIs, native browser/easl for web UI, and `mac-gui` for native windows.')
-        text = text.replace('**Just do it.** Use any MCP tool. Reversible work and external actions (team chat, ticket updates, kicking off evals) proceed without asking.',
-                            "**Just do it within authorization.** Reversible scoped work proceeds; outward actions and landing follow Tim's and the project's permission contract.")
-        text = text.replace('Open a todolist', 'Track parent phases with native todo (workers without todo report step status)')
-        text = text.replace('`/loop 1h`', 'one owned `bash` job running `sleep 3600` (`async: true`, `timeout: 0`), rearmed after each audit while active')
-        text = text.replace('`/loop` works in local and cloud roots.', 'Native completion events wake the lead; this timer is not durable scheduling.')
-        text = text.replace('Probe each owner with a generic liveness or status check.', 'Read native results and branch/receipt evidence; do not status-ping owners.')
-        text = text.replace('Probe every active lane and judge progress by side effects only.', 'Read native task and artifact evidence for every active lane.')
-        text = text.replace('A `decision.tsv`, one row per attempt: id, hypothesis, change, before, after, delta, tests, verdict (kept or reverted), note.',
-                            'Use its canonical `decisions.tsv` schema, one decision row per attempt; point to the metric/regression receipt as evidence.')
         # Principles and routed dependencies are on-demand files, not global skills.
         def link_skill(match):
             slug = match.group(1)
@@ -322,6 +379,8 @@ After an omp restart, recover the board's rules, tickets, recorded branches, rec
         def link_path(match):
             relative = match.group(1)
             candidates = [path.parent / relative, skills / relative]
+            if path.is_relative_to(skills):
+                candidates.append(skills / path.relative_to(skills).parts[0] / relative)
             if relative.startswith(('playbooks/', 'scripts/')):
                 candidates.append(skills / 'poteto-mode' / relative)
             target = next((candidate for candidate in candidates if candidate.is_file()), None)

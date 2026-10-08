@@ -18,8 +18,12 @@ class SharedInstall(unittest.TestCase):
         self.assertEqual(pin['repository'], 'https://github.com/cursor/plugins')
         self.assertEqual(pin['commit'], 'ccb5507cec1546dc88135c1139c811e6c59115ba')
         self.assertEqual(pin['license'], 'MIT')
-        actual = {str(path.relative_to(vendor)): hashlib.sha256(path.read_bytes()).hexdigest()
-                  for path in vendor.rglob('*') if path.is_file()}
+        tracked = subprocess.check_output(
+            ['git', '-C', str(SOURCE.parent), 'ls-files', '-z', '--', 'agents/vendor/pstack'],
+            text=True).split('\0')
+        actual = {str(Path(name).relative_to('agents/vendor/pstack')):
+                  hashlib.sha256((SOURCE.parent / name).read_bytes()).hexdigest()
+                  for name in tracked if name}
         self.assertEqual(actual, pin['files_sha256'])
         self.assertIn('Copyright (c) 2026 Lauren Tan', (vendor / 'LICENSE').read_text())
         before = fingerprint(vendor)
@@ -48,6 +52,14 @@ class SharedInstall(unittest.TestCase):
             for rule in ['GPT-6 Astra', 'agent: "opus"', 'resolved', 'different model family',
                          'small, low-risk', 'delta', 'exact final head', 'head SHA, command']:
                 self.assertIn(rule, review)
+            self.assertIn('Any reviewer whose resolved model is Grok counts only for small, low-risk diffs', review)
+            self.assertIn('regardless of agent name or fallback chain', review)
+            self.assertIn('GLM-5.3', review)
+            self.assertIn('Outside omp', review)
+            self.assertNotIn("Matt's separate Standards/Spec", review)
+            self.assertIn('applicable standing rules from `instructions.md`', router)
+            self.assertIn('global omp config.yml settings, not per-task fields', router)
+            self.assertIn('automatic patch application', router)
             for relative in ['scripts/log.sh', 'references/decision-log-template.tsv']:
                 self.assertEqual((pstack / 'show-me-your-work' / relative).read_bytes(),
                                  (vendor / 'skills/show-me-your-work' / relative).read_bytes())
@@ -74,6 +86,44 @@ class SharedInstall(unittest.TestCase):
             template = (pstack / 'why/references/synthesizer-prompt.md').read_text()
             self.assertIn('[PR #123](url)', template)
             self.assertIn('poteto-mode', (stage / 'vendor/mattpocock-skills/skills/engineering/wayfinder/SKILL.md').read_text())
+            for relative in ['engineering/retro/SKILL.md', 'engineering/wayfinder/SKILL.md']:
+                self.assertNotIn('Skill tool', (stage / 'vendor/mattpocock-skills/skills' / relative).read_text())
+
+            # Follow the installed entry points, not every inert vendored file.
+            pending = [(stage / 'catalog' / name / 'SKILL.md').resolve() for name in added]
+            reachable = set()
+            while pending:
+                path = pending.pop()
+                if path in reachable:
+                    continue
+                reachable.add(path)
+                body = path.read_text()
+                for obsolete in [
+                    'cursor-team-kit', 'deslop', 'from trunk with read', '/loop 1h',
+                    'a isolated checkout', r'configured [\w-]+ model', r'\bthe store\b',
+                    'with a prompt that runs this tick', 'by store path', 'ledger row',
+                    'Drain the final inbox', 'status page', 'four-column', 'lane VM',
+                    'agent store', r'`decision\.tsv`', 'git show origin/main:', '`swarm workers`',
+                ]:
+                    self.assertNotRegex(body, obsolete, str(path))
+                for target in re.findall(r'\]\(([^)]+)\)', body):
+                    if target.startswith(str(destination) + '/'):
+                        local = (stage / Path(target.split('#', 1)[0]).relative_to(destination)).resolve()
+                        self.assertTrue(local.exists(), (path, target))
+                        if local.is_file():
+                            pending.append(local)
+            checker = (pstack / 'poteto-mode/scripts/check-plan.mjs').resolve()
+            self.assertIn(checker, reachable)
+            self.assertIn((pstack / 'poteto-mode/playbooks/autonomous-run.md').resolve(), reachable)
+            self.assertIn((pstack / 'principle-prove-it-works/SKILL.md').resolve(), reachable)
+            plan = (pstack / 'poteto-mode/playbooks/multi-phase-plan.md').read_text()
+            template = plan.split('````markdown\n', 1)[1].split('\n````', 1)[0]
+            program = template.split('## Program checklist\n', 1)[1].split('## <Task as a verb phrase>', 1)[0]
+            markers = json.loads(re.search(r'const PROGRAM_MARKERS = (\[[^\n]+\]);', checker.read_text()).group(1))
+            self.assertEqual(markers, ['installed adapted', 'sleep 3600', 'status message'])
+            for marker in markers:
+                self.assertIn(marker, program)
+            self.assertIn('Ten lanes on `<resolved worker model>` at the PR head', template)
         self.assertEqual(fingerprint(vendor), before)
 
     def test_pstack_install_retires_previous_engineering_entries(self):

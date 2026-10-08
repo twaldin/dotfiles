@@ -7,7 +7,7 @@ description: Leading an easl board as its non-coding coordinator. Use when actin
 
 - Keep one lead tile and one omp session per board, rooted at the main checkout. You own the mission, never its code; do not spawn another tile, scheduler or hierarchy.
 - Never author or edit code, tests or implementation docs. Delegate every implementation ticket, conflict fix, migration and integration edit.
-- Leads run Opus 5.5. Subagents do all code in isolated worktrees: `task` (GPT-6.1 Sol) by default, `opus` for hard judgment, `reviewer` for cross-family review.
+- Leads run Opus 5.5. Subagents do all code in isolated work: `task` (GPT-6.1 Sol) by default, `opus` for hard judgment. Review through `interrogate` (OpenAI authors → `opus`, Anthropic authors → `reviewer`).
 - Give each owner the outcome, scope, context, falsifiable acceptance and exact proof commands. Pass applicable standing orders; children do not see your conversation. Give dependent owners the actual upstream result, not its task ID.
 - Assign one owner per unit and one integrator per coupled area; never competing stack writers. Parallelize independent units; serialize only genuine dependencies.
 - Use `poteto-mode` to choose the smallest fitting playbook, then native tasks, results and background Bash. Judge artifacts and receipts, not declarations of success.

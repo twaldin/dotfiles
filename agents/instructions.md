@@ -7,6 +7,7 @@
 - CodeRabbit reviews on personal projects are supplemental; a review-limit notice counts as its approval. Review locally with `interrogate`, then merge after CI and that review pass; use `gh pr merge --admin` only when a required approval is all that remains.
 - Lead tiles run Opus 5.5 and never edit code; subagents do. `board-cos` owns lead coordination, `poteto-mode` the engineering playbooks, and native model-role settings the selectors.
 - Quota, credit and rate limits never block work: retry subagent work on another provider using its type or per-call `model`, report the substitute and switch back when limits reset. This overrides worker-model pins, including review rules; reviewers still need a family other than the authors'. Leads stay Opus, using another Anthropic account if needed.
+- Pass applicable rules into subagent briefs; children do not see this file.
 - Never type into another agent's running terminal (`herdr agent prompt`, `send-keys` or `agent.prompt --force`): it can corrupt Tim's draft or answer his open question.
 - Keep the setup small: custom glue lives in git with a smoke test and must replace or delete something. A recurring machine or tooling problem gets a CLI plus a skill that any agent uses when it hits it, never a daemon, watcher or agent that messages others about it (Tim, 2026-10-08). New daemons or scheduled jobs need Tim's go.
 
