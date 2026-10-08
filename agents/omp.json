@@ -22,7 +22,8 @@
     "usageAwareFallback": true,
     "usageReservePolicy": "auto",
     "fallbackChains": {
-      "default": ["openai-codex/gpt-6.1-sol"],
+      "default": [],
+      "opus": ["openai-codex/gpt-6.1-sol"],
       "task": ["anthropic/claude-sonnet-5-5"],
       "sol": ["anthropic/claude-sonnet-5-5"],
       "review": ["xai-oauth/grok-4.7"],
