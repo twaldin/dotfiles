@@ -680,6 +680,15 @@ class Clamp(QueueCase):
     FAMILY = ('echo $$ > child.pid; python3 -c "import os, time\ne = time.time() + 0.3\nwhile time.time() < e: pass\n'
               'while not os.path.exists(\'go\'): time.sleep(0.02)" & echo $! > grandchild.pid; wait')
 
+    def setUp(self):
+        base = os.getpriority(os.PRIO_PROCESS, 0)
+        if platform.system() == 'Darwin' and base != 0:
+            # 2026-10-08 03:13Z: run through the queue, the suite itself was clamped (nice 10, utility QoS), so the
+            # commands it queued measured nice 19 and inherited the utility ceiling even with --p-cores.
+            self.skipTest(f'this test process is clamped already (nice {base}): measure the clamp from an unclamped '
+                          'runner, e.g. machine-ok-queue run --p-cores -- python3 -B -m unittest ...')
+        super().setUp()
+
     def family(self, flags=()):
         p = self.start('sh', '-c', self.FAMILY, flags=flags)
         self.until(lambda: all((self.work / f).exists() and (self.work / f).read_text().strip()
