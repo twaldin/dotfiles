@@ -3379,6 +3379,36 @@ class Guard(unittest.TestCase):
         self.assertTrue(any(p.startswith("window %d of the tree (pid %d) was on Tim's Space 4 at the guard's end" % (wid, probe.pid))
                             for p in result['problems']), result['problems'])
 
+    def test_a_window_gone_before_the_ends_own_sample_of_it_is_on_no_screen(self):
+        # Review 5 (Spec): placed off Tim (10 -> 6), then on screen only on CanvasTest (SkyLight Space 10, display D2)
+        # when the end reads the windows on screen; it closes before the end's own sample of it, which WindowServer
+        # reads as gone (the guard's rig holds between those two reads while final-pass-hold exists, creating
+        # final-pass-held first). Every sample of it was off Tim's screen or gone: the check is clean.
+        wid = 89349
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [110], 'display': 'D2'}})
+        put(root / ('window-%d.json' % wid), json.dumps({'id': wid, 'pid': easl, 'app': 'easl', 'title': 'root', 'space': 10}))
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, True]]))
+        self.send(process, 'window %d' % wid)
+        moved = lines.until(lambda r: r.get('event') == 'window' and r.get('id') == wid, 10)[-1]
+        self.assertEqual((moved['from'], moved['to'], moved['moved']), (10, 6, True))
+        put(root / 'skylight-windows.json', json.dumps({str(wid): {'spaces': [110], 'display': 'D2'}}))
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, True]]))  # the move ordered it off screen
+        time.sleep(0.3)  # several reads of the windows on screen find it there, on CanvasTest only
+        put(root / 'final-pass-hold', '')
+        self.send(process, 'end')
+        deadline = time.monotonic() + 5
+        while not (root / 'final-pass-held').exists():
+            self.assertLess(time.monotonic(), deadline, "the end's read of the windows on screen never happened")
+            time.sleep(0.01)
+        put(root / 'onscreen.json', '[]')
+        put(root / 'skylight-windows.json', '{}')
+        (root / ('window-%d.json' % wid)).unlink()
+        (root / 'final-pass-hold').unlink()
+        lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        self.assertEqual(process.wait(10), 0)
+        result = json.loads((root / 'summary.json').read_text())
+        self.assertEqual(result['problems'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

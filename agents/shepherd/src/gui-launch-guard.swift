@@ -109,7 +109,8 @@
 //     screen when its owner joins the tree (a window on screen whose owner was outside the tree is read again at the
 //     first poll after the tree gains a root or an adoption); at the end, after its last adoption (its own scan), the
 //     windows on screen are read once more and every tree window on them is sighted, and judged then (review 4: before
-//     the final sweep's window list, which may wait while the window closes): one on Tim's screen is a problem (review
+//     the final sweep's window list, which may wait while the window closes): one on Tim's screen is a problem, and one
+//     its own sample shows gone (closed since that read) is on no screen, nothing to judge (review 5) (review
 //     3; a read that fails then is a problem). macOS can show an existing window again (a native tab selected again)
 //     with no create event and no Space change. The guard keeps both yabai's last index and the measured Tim
 //     membership.
@@ -3144,6 +3145,19 @@ func observe(_ pid: pid_t, attempt: Int = 0) {
     return list.compactMap(serverWindow)
 }
 
+/// --rig only: while the file `<name>-hold` exists in the directory of --onscreen's file, waits there (creating
+/// `<name>-held` first), for at most 3 s, so a test can change what the guard reads between two of its reads. Outside
+/// the rig, or without that file: returns at once.
+@Sendable func rigHold(_ name: String) {
+    guard rigTest, let onscreenPath else { return }
+    let dir = (onscreenPath as NSString).deletingLastPathComponent
+    let hold = dir + "/" + name + "-hold"
+    guard FileManager.default.fileExists(atPath: hold) else { return }
+    FileManager.default.createFile(atPath: dir + "/" + name + "-held", contents: nil)
+    let until = uptime() + 3
+    while FileManager.default.fileExists(atPath: hold) && uptime() < until { usleep(10_000) }
+}
+
 /// GR2 (addendum 2): the tree's windows are re-checked whenever one comes on screen: macOS can show an existing window
 /// again (a native tab selected again) on the Space Tim is viewing, with no create event and no Space change (bench's
 /// copy 542d177d: ~20 s on his Space, and the check said ok). Every `interval` the windows on screen are read; a tree
@@ -3183,12 +3197,15 @@ final class ShownWindows {
     /// after the last poll (or by that scan) has windows no poll will read again. A read that fails is a problem.
     /// Review 4: each such window's sample is judged here, before the final sweep's window list (which may wait while
     /// the window closes, and then finds it gone): one on Tim's screen, not exempt, is a problem now (endReported, so
-    /// the final sweep reports no more of it). shownQueue, waited for by the end.
+    /// the final sweep reports no more of it). Review 5: one WindowServer shows gone by its own sample (closed since the
+    /// read of the windows on screen) is on no screen: nothing to judge (the final sweep finds it gone too). The rig
+    /// can hold the pass between those two reads (rigHold "final-pass"). shownQueue, waited for by the end.
     func finalPass() {
         guard let rows = shownWindows() else {
             problem("the windows on screen could not be read at the guard's end: a tree window on Tim's screen whose owner joined the tree late could go unseen")
             return
         }
+        rigHold("final-pass")
         let seen = uptime()
         var member: [pid_t: Bool] = [:]
         for row in rows {
@@ -3197,6 +3214,7 @@ final class ShownWindows {
             guard member[pid] == true else { continue }
             sighted(row.id, at: seen, via: "final-shown")
             let look = WindowLook(row.id)
+            if look.gone { continue }  // closed since the read of the windows on screen: on no screen (review 5)
             if look.exempt == nil && look.onTims && endReported.update({ $0.insert(row.id).inserted }) {
                 problem("window \(row.id) of the tree (pid \(pid)) was on \(look.timLocation) at the guard's end (found by the end's last read of the windows on screen)")
             }

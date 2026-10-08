@@ -110,7 +110,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   that query. A new WindowServer ID gets its own first sighting and park/retry, even with no AX event or yabai row,
   and so does one already on screen when its owner joins the tree (read again once the tree gains a root or an
   adoption). At the end, after the last adoption, the windows on screen are read once more: a tree window on Tim's
-  screen then fails the check at once, before the final window list (which may wait while the window closes).
+  screen then fails the check at once, before the final window list (which may wait while the window closes); one
+  closed since that read (WindowServer shows it gone) is on no screen and is not judged.
   A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
   (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen (every
