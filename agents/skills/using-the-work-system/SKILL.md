@@ -1,13 +1,13 @@
 ---
 name: using-the-work-system
-description: Linear tickets for personal and Lindy work. Use when deciding whether work needs a ticket or writing one. Ordinary efforts need no ticket.
+description: Linear tickets for implementation lanes, personal and Lindy work. Use before dispatching implementation or when deciding whether research or discussion needs a ticket.
 ---
 
-Work starts as an **effort**: a session started from the chief-of-staff (CoS) or a conversation, using subagents freely. An effort needs no ticket.
+Work starts as an **effort** from the board's lead or a conversation. Every implementation lane has a ticket with an owner, scope, acceptance and dependencies before its owner subagent starts isolated work. The ticket records the agreement; it does not authorize dispatch.
 
-## When a ticket earns its place
+## Research and discussion
 
-Create a Linear ticket only when at least one holds:
+Research and conversation need no artificial implementation ticket. Create one when at least one holds:
 
 - someone else must act on it or wait on it;
 - input arrives asynchronously (a reply, a review, an external event);
@@ -15,7 +15,7 @@ Create a Linear ticket only when at least one holds:
 - ownership or decisions must survive a session or machine restart;
 - it is independently reviewable work likely to outlive the current effort.
 
-If none holds, keep the work in the effort.
+If none holds, keep research or discussion in the effort.
 
 ## Workspaces
 

@@ -2,7 +2,7 @@
 
 One maintained skill library, small project guidance, and native harnesses. OMP runs the sessions; Codex can be used entirely on its own.
 
-`skills.json` selects 26 general skills. `vendor/` holds pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. Machine-specific procedure (such as `mac-gui` for Spaces, yabai and virtual screens, `shared-machine` for the heavy-work queue and `machine-health` for diagnosis) lives in skills, not in `instructions.md`, because skill descriptions reach omp subagents and AGENTS.md files do not.
+`skills.json` selects 24 general skills. Pstack is the sole engineering playbook, entered through `poteto-mode`; its playbooks, principles and supporting skills are read on demand, not added to global discovery. `vendor/` holds unchanged pinned upstream sources and licenses; `adapt.py` makes approved changes only in generated copies. `skills/` holds the short local guides. Machine-specific procedure (`mac-gui`, `shared-machine` and `machine-health`) lives in skills, whose descriptions reach omp subagents, not in global instructions.
 
 ## Install and verify
 
@@ -28,7 +28,7 @@ Native project settings and explicit session overrides can supersede the global 
 
 The model-cycle shortcut follows default → fable → slow: Opus 5.5 xhigh, Fable 5.1 xhigh, then GPT-6.1 Sol xhigh. `task` is GPT-6.1 Sol xhigh (since 2026-10-08, to keep subagent work off the scarcer Anthropic quota); `tiny` and `smol` are GLM 5.3 Flash. Failed turns fall back by role (`retry.fallbackChains` in `omp.json`): the default role never changes model, so lead tiles stay on Opus and only rotate between Anthropic accounts (Tim, 2026-10-08). The `opus` subagent role falls back to GPT-6.1 Sol, task and sol to Sonnet 5.5, review to Grok 4.7, tiny to GPT-6 Luna, and any OpenCode Go model to GLM 5.3 Flash. Usage-aware fallback is on with the `auto` reserve policy: before a turn, a session whose coding-plan account is near its limit moves to a healthy account of the same provider, then down its fallback chain, without asking. Cycling changes the active session model; it does not rewrite global role assignments.
 
-The bundled reviewer and security-reviewer use the `review` role (GPT-6 Astra xhigh); scout uses `sol`. The code-review skill picks reviewers from a different family than the author. Selecting an advisor model does not enable the advisor; it remains disabled.
+The bundled reviewer and security-reviewer use the `review` role (GPT-6 Astra xhigh); scout uses `sol`. `interrogate` picks reviewers from a different family than the authors and verifies the resolved model after any fallback. It requires delta re-review after fixes and an acceptance receipt for the exact final head. Grok review is restricted to small, low-risk diffs. Selecting an advisor model does not enable the advisor; it remains disabled.
 
 ## Project scope
 
@@ -50,7 +50,7 @@ The installer backs up every replaced path under `~/.local/state/agent-setup/bac
 
 ## Work system
 
-Efforts start from a board's chief of staff (the `board-cos` skill, on Tim's easl boards) or a conversation. Linear tickets are records that an effort or person owns; the `using-the-work-system` skill says when one earns its place. Nothing dispatches tickets automatically. The home Linear dispatcher was retired on 2026-10-05; its records are archived in `~/archives/meta-audit-2026-10-05/dispatcher/`.
+Efforts start from a board's noncoding lead (`board-cos`) or a conversation. Implementation lanes are ticket-first, with one isolated owner subagent per lane; research and discussion need no artificial ticket. A ticket records ownership and acceptance, not dispatch authorization. Nothing dispatches automatically. The home Linear dispatcher was retired on 2026-10-05.
 
 Work and personal are separate deployments. Lindy code, accounts, project guidance, and sessions stay on work, where the work seat (`~/work-agent-system/SEAT.md` on twaldin-work) creates lanes. Personal projects merge after their checks and reviews pass, unless Tim holds them. For Lindy, the agent that opens a PR against `main` arms auto-merge when it opens, unless Tim holds it or it waits on an open PR; GitHub's required checks and approvals decide the merge.
 
@@ -84,4 +84,14 @@ Machine diagnostics return evidence to their caller, not to another agent. `logo
 
 `shepherd/install.sh` links the scripts into `~/.local/bin`, builds the Swift tools in `src/` (`fsevents-top`; `gui-launch-guard` on twaldin-home), and installs the launchd jobs each host runs; `--check` reports drift. `python3 -m unittest discover -s agents/shepherd/tests` runs one smoke test per script.
 
-Upstream: Matt Pocock skills v1.3.1 at `b40b9b199752462750c56d9a26655981e48a4344`; Vercel references at `063bee94c3f4df8453406c830b0a7df0f2860278`. Source metadata and licenses are retained. Do not run their bulk installers over this selected library.
+Upstream: pstack from `cursor/plugins` at `ccb5507cec1546dc88135c1139c811e6c59115ba` (MIT, Lauren Tan); Matt Pocock skills v1.3.1 at `b40b9b199752462750c56d9a26655981e48a4344`; Vercel references at `063bee94c3f4df8453406c830b0a7df0f2860278`. Source metadata, per-file hashes and licenses are retained. Do not run bulk upstream installers over this selected library.
+
+## Pstack adaptation
+
+The selected entry points are `poteto-mode`, `show-me-your-work`, `figure-it-out`, `unslop` and `interrogate`. Omp discovers these directly. Supporting leaves, including pstack's narrow cheap-repro TDD skill, have resolving file links from the router; they are not another global workflow. Project feature-testing requirements still apply. `interrogate` deliberately synthesizes findings instead of retaining Matt's separate Standards/Spec reports, while its rubric still checks intent and repository standards.
+
+The port uses native task batches, isolated writer outputs, model roles, `agent://` results and `history://` transcripts. Workers read the router in their first brief; only the board lead has the noncoding restriction. Parent todo owns phases, not lane concurrency. Human gates use background `easl ask … --wait`. Omp's `/loop 1h` is a duration deadline, not an hourly timer; a necessary timed re-check is one owned background sleep job that wakes the active lead, not a persistent scheduler.
+
+Orchestrate is a smaller role-for-role interpretation using tickets, native task state, the board's rules and current-head receipt pointers. It does not install `orch`, Graphite, automations, a cloud control plane or a second status database. Optional Autopilot-stack is an operator-landed queue; Autopilot-full still requires merge authority and fresh per-round root verdicts. External Cursor control/deslop dependencies use real project checks, CLI proof and native browser/easl instead. Cleanup preserves shared-machine WIP, explicitly owned paths and processes.
+
+The old globally selected engineering workflows and redundant grilling alias are retired through the existing installer; no old-name skill router remains. The custom hillclimb/review wrappers are deleted. Matt's complete pinned archive stays unchanged and inactive except for deliberately selected capabilities.

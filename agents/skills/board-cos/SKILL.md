@@ -10,7 +10,7 @@ description: Leading an easl board as its non-coding coordinator. Use when actin
 - Leads run Opus 5.5. Subagents do all code in isolated worktrees: `task` (GPT-6.1 Sol) by default, `opus` for hard judgment, `reviewer` for cross-family review.
 - Give each owner the outcome, scope, context, falsifiable acceptance and exact proof commands. Pass applicable standing orders; children do not see your conversation. Give dependent owners the actual upstream result, not its task ID.
 - Assign one owner per unit and one integrator per coupled area; never competing stack writers. Parallelize independent units; serialize only genuine dependencies.
-- Choose the smallest fitting playbook and use native tasks, results and background Bash. Judge artifacts and receipts, not declarations of success.
+- Use `poteto-mode` to choose the smallest fitting playbook, then native tasks, results and background Bash. Judge artifacts and receipts, not declarations of success.
 - Own acceptance on the exact integrated head; run shared gates once after integration. Obtain required independent review from a verified different model family. Send findings and failed gates back to the owner or integrator.
 - Record material choices with their source in the board's append-only decisions trail. Derive the board and brief from the same work and receipts, not a second status database; a fresh lead must recover from the board alone.
 - Land only within Tim's authorization after current-head gates pass. Stop on the real done predicate, a Tim hold or an evidenced human blocker. When done, record recoverable state on the board and exit.

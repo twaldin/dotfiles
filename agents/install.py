@@ -106,20 +106,27 @@ def restore(backup):
 
 
 def stage_runtime(stage, destination):
+    stage = stage.resolve()
     for directory in ['vendor', 'skills']:
         shutil.copytree(SOURCE / directory, stage / directory, symlinks=False,
-                        ignore=shutil.ignore_patterns('._*', '.DS_Store', '.claude-plugin', '.codex-plugin'))
+                        ignore=shutil.ignore_patterns('._*', '.DS_Store', '.claude-plugin', '.codex-plugin', '.cursor-plugin'))
     adapt(stage)
     selection = json.loads((SOURCE / 'skills.json').read_text())['global']
     # Cross-skill links must work even through OMP's traversal-restricted skill:// URI.
-    for path in (stage / 'skills').rglob('*.md'):
+    references = list((stage / 'skills').rglob('*.md'))
+    references.extend((stage / 'vendor/pstack/skills').rglob('*.md'))
+    for path in references:
         def resolve_link(match):
             relative = match.group(1)
+            if relative.startswith(('/', '#')) or ':' in relative:
+                return match.group(0)
+            relative, separator, anchor = relative.partition('#')
             target = (path.parent / relative).resolve()
             if not target.is_relative_to(stage) or not target.exists():
                 raise ValueError(f'Broken local reference in {path}: {relative}')
-            return '](' + str(destination / target.relative_to(stage)) + ')'
-        path.write_text(re.sub(r'\]\((\.\./[^)]+)\)', resolve_link, path.read_text()))
+            return '](' + str(destination / target.relative_to(stage)) + separator + anchor + ')'
+        # Template targets such as "(url)" are not filesystem references.
+        path.write_text(re.sub(r'\]\(([^)]*[/.][^)]*)\)', resolve_link, path.read_text()))
     catalog = stage / 'catalog'
     catalog.mkdir()
     for name, relative in selection.items():

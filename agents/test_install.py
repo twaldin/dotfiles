@@ -1,15 +1,97 @@
+import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import tomllib
 import unittest
 
-from install import fingerprint, read_settings, yaml_value
+from install import SOURCE, fingerprint, read_settings, stage_runtime, yaml_value
 
 
 class SharedInstall(unittest.TestCase):
+    def test_pstack_source_pin_and_generated_runtime(self):
+        vendor = SOURCE / 'vendor/pstack'
+        pin = json.loads((SOURCE / 'vendor/pstack.source.json').read_text())
+        self.assertEqual(pin['repository'], 'https://github.com/cursor/plugins')
+        self.assertEqual(pin['commit'], 'ccb5507cec1546dc88135c1139c811e6c59115ba')
+        self.assertEqual(pin['license'], 'MIT')
+        actual = {str(path.relative_to(vendor)): hashlib.sha256(path.read_bytes()).hexdigest()
+                  for path in vendor.rglob('*') if path.is_file()}
+        self.assertEqual(actual, pin['files_sha256'])
+        self.assertIn('Copyright (c) 2026 Lauren Tan', (vendor / 'LICENSE').read_text())
+        before = fingerprint(vendor)
+        with tempfile.TemporaryDirectory() as scratch:
+            stage = Path(scratch) / 'stage'
+            stage.mkdir()
+            destination = Path(scratch) / 'library'
+            selected = stage_runtime(stage, destination)
+            added = {'poteto-mode', 'show-me-your-work', 'figure-it-out', 'unslop', 'interrogate'}
+            removed = {'autoresearch', 'code-review', 'diagnosing-bugs', 'prototype', 'tdd', 'pr', 'grill-me'}
+            self.assertTrue(added.issubset(selected))
+            self.assertFalse(removed.intersection(selected))
+            self.assertEqual(len(selected), 22)
+            pstack = stage / 'vendor/pstack/skills'
+            for name in added:
+                body = (stage / 'catalog' / name / 'SKILL.md').read_text()
+                self.assertIn(f'name: {name}', body)
+                self.assertNotIn('disable-model-invocation: true', body)
+            router = (pstack / 'poteto-mode/SKILL.md').read_text()
+            for primitive in ['isolated: true', 'agent://', 'history://', 'easl ask', 'async: true']:
+                self.assertIn(primitive, router)
+            for old in ['subagent_type', 'run_in_background', 'pstack-models.mdc']:
+                self.assertNotIn(old, router)
+            self.assertIn('never edits code', router)
+            review = (pstack / 'interrogate/SKILL.md').read_text()
+            for rule in ['GPT-6 Astra', 'agent: "opus"', 'resolved', 'different model family',
+                         'small, low-risk', 'delta', 'exact final head', 'head SHA, command']:
+                self.assertIn(rule, review)
+            for relative in ['scripts/log.sh', 'references/decision-log-template.tsv']:
+                self.assertEqual((pstack / 'show-me-your-work' / relative).read_bytes(),
+                                 (vendor / 'skills/show-me-your-work' / relative).read_bytes())
+            trail = (pstack / 'show-me-your-work/SKILL.md').read_text()
+            self.assertIn('history://<id>', trail)
+            self.assertNotIn('agent-transcripts/', trail)
+            program = (pstack / 'poteto-mode/playbooks/orchestrate.md').read_text()
+            self.assertIn('not maximal Orchestrate', program)
+            self.assertNotIn('orch init', program)
+            cleanup = (pstack / 'poteto-mode/playbooks/worktree-cleanup.md').read_text()
+            self.assertNotIn('remove --force', cleanup)
+            self.assertNotIn('delete all', cleanup)
+            self.assertIn('Unknown ownership is a hold', cleanup)
+            for path in pstack.rglob('*.md'):
+                for target in re.findall(r'\]\(([^)]+)\)', path.read_text()):
+                    if target.startswith(str(destination) + '/'):
+                        self.assertTrue((stage / Path(target.split('#', 1)[0]).relative_to(destination)).exists(),
+                                        (path, target))
+            leaf = destination / 'vendor/pstack/skills/principle-model-the-domain/SKILL.md'
+            self.assertIn(str(leaf), router)
+            rationale = (pstack / 'architect/references/rationale-template.md').read_text()
+            self.assertIn(str(destination / 'vendor/pstack/skills/architect/SKILL.md')
+                          + '#phase-a-ground-the-problem', rationale)
+            template = (pstack / 'why/references/synthesizer-prompt.md').read_text()
+            self.assertIn('[PR #123](url)', template)
+            self.assertIn('poteto-mode', (stage / 'vendor/mattpocock-skills/skills/engineering/wayfinder/SKILL.md').read_text())
+        self.assertEqual(fingerprint(vendor), before)
+
+    def test_pstack_install_retires_previous_engineering_entries(self):
+        removed = {'autoresearch', 'code-review', 'diagnosing-bugs', 'prototype', 'tdd', 'pr', 'grill-me'}
+        with tempfile.TemporaryDirectory() as scratch:
+            home = Path(scratch)
+            for name in removed:
+                old = home / '.agents/skills' / name
+                old.mkdir(parents=True)
+                (old / 'SKILL.md').write_text(f'---\nname: {name}\ndescription: Old workflow\n---\nOld')
+            command = [sys.executable, str(SOURCE / 'install.py'), '--home', str(home), '--library-only']
+            subprocess.run(command + ['--apply'], check=True, capture_output=True)
+            selected = set(json.loads((SOURCE / 'skills.json').read_text())['global'])
+            catalog = home / '.agents/skills'
+            self.assertEqual({path.name for path in catalog.iterdir()}, selected)
+            preview = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+            self.assertIn('0 changes', preview)
+
     def test_shared_omp_roles_replace_stale_roles_and_preserve_local_setup(self):
         with tempfile.TemporaryDirectory() as scratch:
             home = Path(scratch)
