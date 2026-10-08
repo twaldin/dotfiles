@@ -107,4 +107,4 @@ When nothing is left to run, write your state to the board and exit. Reviving th
 
 ## Machines
 
-The shepherd, on the root board, arbitrates shared machine windows across boards: quiet windows and holds (`quiet-window list`), benchmark windows, the one Roblox Studio. Its messages are binding for the window they name; book heavy windows through it, at least 30 minutes ahead. The board's own gates (for example, sky's bench-judge ARMs) still apply inside the board.
+There are no quiet windows, holds or machine bookings (Tim, 2026-10-08). Heavy steps go through `machine-ok-queue run`, which keeps Tim's input responsive; a measured run tolerates a busy machine, repeats, or runs on deckbox. The board's own gates (for example, sky's ARM verdicts) still apply inside the board.
