@@ -2581,6 +2581,7 @@ class Guard(unittest.TestCase):
                 time.sleep(0.2)
                 put(root / 'focused-display.json', '{"index": 2}')
                 put(root / 'display-delay', '1.0')
+                (root / 'displays-asked').unlink(missing_ok=True)  # review 4: acknowledge only this check's read
                 self.send(process, 'activate %d' % thief.pid)
                 deadline = time.monotonic() + 5
                 while not (root / 'displays-asked').exists():
@@ -2614,6 +2615,36 @@ class Guard(unittest.TestCase):
                           'focused': 1, 'ok': True})
         _, result = self.end_rig(process, lines, root)
         self.assertEqual(self.unsupported(result['problems']), [])
+
+    def test_the_checks_own_modal_re_front_is_not_taken_for_tims_takeover(self):
+        # Review 4 (Spec P2): no app of Tim's to give focus back to, a SecurityAgent prompt on screen and yabai's focus
+        # on display 2. The check re-fronts the prompt, then reads the focused display (1 s); macOS reports the prompt
+        # frontmost meanwhile, 5 ms after HID input. That activation is the guard's own re-front, not Tim's choice: the
+        # check goes on and reports the display it cannot give back.
+        thief, _ = self.probe(self.java)
+        agent, _ = self.probe(self.java)
+        process, lines, root = self.rig(onscreen=True)
+        put(root / 'onscreen.json', json.dumps([[77001, agent.pid, 420, 260, True, 'SecurityAgent']]))
+        self.send(process, 'root %d' % thief.pid)
+        time.sleep(0.2)
+        put(root / 'focused-display.json', '{"index": 2}')
+        put(root / 'display-delay', '1.0')
+        (root / 'displays-asked').unlink(missing_ok=True)
+        self.send(process, 'activate %d' % thief.pid)
+        lines.until(lambda row: row.get('event') == 'rig-activate' and row.get('pid') == agent.pid, 10)
+        deadline = time.monotonic() + 5
+        while not (root / 'displays-asked').exists():
+            self.assertLess(time.monotonic(), deadline, 'the focused display was never read')
+            time.sleep(0.01)
+        self.send(process, 'activate %d 5' % agent.pid)  # macOS reports the re-fronted prompt, 5 ms after HID input
+        seen = lines.until(lambda row: row.get('event') in ('display-check', 'display-restore'), 10)
+        (root / 'display-delay').unlink()
+        record = seen[-1]
+        self.assertEqual({k: record.get(k) for k in ('reason', 'focused', 'ok')}, {'reason': None, 'focused': 2, 'ok': False}, record)
+        self.assertFalse([e for e in seen if e.get('event') == 'activation' and e['app']['pid'] == agent.pid and e.get('takeover')],
+                         "the guard's own re-front was taken for Tim's takeover")
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(len(self.unsupported(result['problems'])), 1, result['problems'])
 
     def test_an_unreadable_modal_sample_fronts_nothing_until_a_readable_one_rules_a_modal_out(self):
         # Review 3 (Spec P1): the windows on screen cannot be read, so a SecurityAgent prompt could be up: neither the

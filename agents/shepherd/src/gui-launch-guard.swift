@@ -66,8 +66,10 @@
 //     "display restore unsupported", naming the focus before and after (an app with no window on his display, Finder
 //     with none, leaves the focused display, and his keystrokes, on CanvasTest). The check runs only while Tim has
 //     chosen no app since the theft (his takeover or switch): asked as it begins, after each read that can block, and
-//     in the turn that activates the modal. The before and after focus (front app, focused window or none, focused
-//     display, modal) are focusAtLaunch and focusAtEnd;
+//     in the turn that activates the modal. A modal the guard re-fronts (a revert's or this check's) is registered with
+//     the restore policy in the turn that fronts it: its activation gives focus back, never Tim's takeover (review 4).
+//     The before and after focus (front app, focused window or none, focused display, modal) are focusAtLaunch and
+//     focusAtEnd;
 //   - reads every display directly (SkyLight, the record yabai itself reads): at every Space notification, at each
 //     activation, every 20 ms through each theft and grace window (macOS can report two changes in one
 //     notification), around each Space restore, and once more at the end. Each change of Tim's display is in the
@@ -445,7 +447,8 @@ struct RestorePolicy {
         self.guardUntil = guardUntil
     }
 
-    /// The guard re-fronted system modal `pid` rather than front Tim's app over it.
+    /// The guard re-fronted system modal `pid` rather than front Tim's app over it (a revert, or the display check: GR2
+    /// item 6, review 4). Its activation gives focus back, and is never his takeover.
     mutating func fronted(modal pid: pid_t) { modal = pid }
 
     /// `sinceInput`: seconds from Tim's last HID input to the activation (nil: not known).
@@ -462,8 +465,9 @@ struct RestorePolicy {
             window.resolved(at: t)
             return .restored(latency: t - since)
         }
-        // His takeover: never the app focus goes back to, which the guard's own reverts and restores activate.
-        if pid != userFront, let input = sinceInput, input <= RestorePolicy.userInput {
+        // His takeover: never the app focus goes back to, nor a system modal the guard re-fronted (review 4), which the
+        // guard's own reverts and restores activate.
+        if pid != userFront, modal == nil || pid != modal, let input = sinceInput, input <= RestorePolicy.userInput {
             let inWindow = pendingSince != nil || window.covers(since: t)
             if pendingSince != nil {
                 pendingSince = nil
@@ -3367,7 +3371,11 @@ let modalUnknown = "the windows on screen could not be read, so a system modal c
     case .modal(let pid, let name):
         let turn = DispatchQueue.main.sync { () -> (why: String?, front: Bool, ok: Bool) in
             if let why = wanted() { return (why, false, false) }
+            // Review 4: the guard's own re-front, registered in this turn as finalActivation's is: its activation gives
+            // focus back (reverted, method modal) and is never taken for Tim's takeover, which would stop this check.
+            policy.fronted(modal: pid)
             if frontmost().pid == pid { return (nil, true, false) }
+            lastRestore.update { $0 = ("modal", nil) }
             return (nil, false, activate(pid))
         }
         if let why = turn.why {

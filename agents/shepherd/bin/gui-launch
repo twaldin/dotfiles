@@ -64,7 +64,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   yabai's focused display is read; one that is not his (the display holding Space 1) is a problem, "display restore
   unsupported", naming the focus before and after. Re-activating an app with no window on his display leaves the
   focus, and his keystrokes, on CanvasTest (roblox's runs, 2026-10-07). The check stops, with no problem, once Tim
-  chooses an app himself after the theft. The check's focusBefore and focusAfter record the front app, the focused
+  chooses an app himself after the theft (the guard's own re-front of a modal is never taken for his choice). The
+  check's focusBefore and focusAfter record the front app, the focused
   window (or none), yabai's focused display and any modal ("unreadable" when the windows on screen could not be
   read); a modal the guard found on screen at its end may be frontmost then without that being a change of his app.
   The guard reads every display directly (SkyLight, which yabai reads too) at every Space notification, every 20
