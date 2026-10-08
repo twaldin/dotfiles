@@ -321,7 +321,8 @@ def main():
                 plan(native / 'agents' / agent.name, 'link', agent)
             if not args.library_only:
                 for name in RETIRE_NATIVE:
-                    if name != 'skills':
+                    # The user mcp.json is machine-local: twaldin-home's computer-guest server lives there.
+                    if name not in ('skills', 'mcp.json'):
                         plan(native / name, 'retire')
             # Our message inbox and its sender. Other tools' extensions (herdr, Canvas) stay theirs.
             plan(native / 'extensions' / 'omp-inbox.ts', 'link', SOURCE / 'inbox/omp-inbox.ts')

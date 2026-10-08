@@ -94,7 +94,10 @@ class SharedInstall(unittest.TestCase):
             (home / '.claude/settings.json').write_text(json.dumps({'hooks': {
                 'SessionStart': [{'hooks': [{'command': 'obsolete'},
                                            {'command': 'bash herdr-agent-state.sh session'}]}]}}))
-            before = {p: fingerprint(p) for p in [old, auth, home / '.codex/config.toml', home / '.claude/settings.json']}
+            mcp = home / '.omp/agent/mcp.json'
+            mcp.parent.mkdir(parents=True)
+            mcp.write_text(json.dumps({'mcpServers': {'computer-guest': {'command': '/usr/bin/ssh'}}}))
+            before = {p: fingerprint(p) for p in [old, auth, mcp, home / '.codex/config.toml', home / '.claude/settings.json']}
             command = [sys.executable, str(Path(__file__).with_name('install.py')), '--home', str(home)]
             subprocess.run(command + ['--apply'], check=True, capture_output=True)
             target = (home / '.agents/skills').resolve()
@@ -105,6 +108,7 @@ class SharedInstall(unittest.TestCase):
             self.assertTrue((target / '.system/native/SKILL.md').is_file())
             self.assertTrue((target / 'synced/bucket/docs/SKILL.md').is_file())
             self.assertEqual(fingerprint(auth), before[auth])
+            self.assertEqual(fingerprint(mcp), before[mcp])
             cfg = tomllib.loads((home / '.codex/config.toml').read_text())
             self.assertEqual(set(cfg['mcp_servers']), {'node_repl'})
             hooks = json.loads((home / '.claude/settings.json').read_text())['hooks']
