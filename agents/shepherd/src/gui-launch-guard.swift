@@ -2683,8 +2683,8 @@ let nativePlacements = Locked([Int: [String: Any]]())
     return list.compactMap(serverWindow)
 }
 
-/// A per-window record map, as the summary's list in window order.
-func byWindow(_ rows: [Int: [String: Any]]) -> [[String: Any]] {
+/// A per-window record map, as the summary's list in window order. Callable from concurrent guard callbacks.
+@Sendable func byWindow(_ rows: [Int: [String: Any]]) -> [[String: Any]] {
     rows.sorted { $0.key < $1.key }.map { $0.value }
 }
 
@@ -3287,8 +3287,8 @@ typealias OmittedPark = (id: Int, seen: Double, via: String, latched: Bool)
 let omittedParks = Locked([OmittedPark]())
 
 /// Queues omitted parks on their own serial lane: a slow native query never holds up AX/shown parks on yabaiQueue.
-/// A window already waiting is not queued twice (its latched exposure report is kept).
-func queueOmittedParks(_ parks: [OmittedPark]) {
+/// A window already waiting is not queued twice (its latched exposure report is kept); concurrent callers use the lock.
+@Sendable func queueOmittedParks(_ parks: [OmittedPark]) {
     let begin = omittedParks.update { (waiting: inout [OmittedPark]) -> Bool in
         let idle = waiting.isEmpty
         for park in parks {
