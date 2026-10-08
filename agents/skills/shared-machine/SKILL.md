@@ -5,6 +5,8 @@ description: Heavy or measured work on Tim's shared machines. Use before builds,
 
 Machine load never blocks agent work: queue the heavy process and keep non-heavy work moving. There are no quiet windows or holds. A measured run tolerates load; repeat it or run it on deckbox.
 
+On macOS, never copy or build an executable in a per-test temp dir and delete it afterwards. Make stand-in binaries once per session and keep them until the run ends. If a binary vanishes during Gatekeeper's scan, `syspolicyd` crashes and every non-Apple launch hangs for up to 20 minutes (2026-10-08).
+
 ## twaldin-home and deckbox: the queue
 
 Run every heavy step as `machine-ok-queue run [--gpu] -- <cmd>`. It waits for a host slot and the memory gate, runs the command, and exits with the command's status. On a Mac the default gate is `machine-ok --memory`; deckbox admits by slots alone.
