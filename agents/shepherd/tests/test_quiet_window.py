@@ -69,6 +69,8 @@ if mode == 'fail':
 if args[:1] == ['agent.list']:
     sys.stdout.write('{"agents": [' if mode == 'badjson' else open('@EASL_AGENTS@').read())
 elif args[:1] == ['agent.prompt']:
+    if mode == 'slowprompt':  # the CLI outlives quiet-window's 15 s timeout (it may still have delivered)
+        import time; time.sleep(30)
     sys.stdout.write(json.dumps({'delivery': 'typed' if mode == 'typed' else 'message', 'id': 'msg_1'}))
 '''
 
@@ -837,6 +839,17 @@ class QuietWindow(unittest.TestCase):
         self.qw('tick')
         self.assertEqual(len(self.tile_prompts()), 1, 'never typed into again')
         self.assertIn('skip easl tile obj_render (render): easl typed into it earlier in this window', self.qw_log())
+
+    def test_a_prompt_whose_cli_timed_out_counts_as_sent_and_is_not_sent_again(self):
+        # 2026-10-08 01:2xZ: agent.prompt to hone outlived the 15 s timeout but landed; retried every tick, 7 copies.
+        self.set_easl(mode='slowprompt', tiles=TILES[:1])
+        wid = self.book_window(5, 35)
+        r = self.qw('tick')
+        self.assertEqual([t for t, _ in self.tile_prompts()], ['obj_render'])
+        self.assertIn('quiet-window: easl agent.prompt timed out', r.stderr)
+        self.assertEqual(json.loads(self.state_path.read_text())[wid]['notice_pending'], [])
+        self.qw('tick')
+        self.assertEqual(len(self.tile_prompts()), 1, 'not sent again')
 
     def test_a_failing_easl_cli_leaves_herdr_delivery_intact(self):
         for mode, err in (('fail', 'quiet-window: easl agent.list failed (exit 1: easl: cannot reach easld)'),

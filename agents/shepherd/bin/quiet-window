@@ -138,9 +138,10 @@ def agents():
         return {}
 
 
-def easl(*args):
+def easl(*args, on_timeout=None):
     """stdout of the easl CLI when the switch is on and the call succeeds, else None (one stderr line
-    on failure). The CLI's launcher execs bun, which launchd's PATH lacks."""
+    on failure); `on_timeout` instead when the call timed out. The CLI's launcher execs bun, which launchd's
+    PATH lacks."""
     try:
         with open(EASL_CONF) as f:
             conf = json.load(f)
@@ -152,6 +153,9 @@ def easl(*args):
     try:
         r = subprocess.run([conf.get("cli"), *args], capture_output=True, text=True, timeout=15, env=env)
         err = f"exit {r.returncode}: {' '.join(r.stderr.split())[-160:]}" if r.returncode else None
+    except subprocess.TimeoutExpired:
+        print(f"quiet-window: easl {args[0]} timed out", file=sys.stderr)
+        return on_timeout
     except (OSError, TypeError, ValueError, subprocess.SubprocessError) as e:
         r, err = None, type(e).__name__
     if err:
@@ -242,10 +246,12 @@ def in_trees(pid, roots):
 def easl_prompt(t, text):
     """`agent.prompt` to tile t, addressed by tile id (a bare name can match several tiles). `--when now` steers a
     working agent mid-turn at its next step (`next-turn` waited for its turn to end: hours late). Returns its
-    delivery ("unknown" when the result does not say), or None when the call failed."""
-    out = easl("agent.prompt", "--target", t["tile"], "--text", text, "--from", "shepherd", "--when", "now")
-    if out is None:
-        return None
+    delivery ("unknown" when the result does not say, "timed out" when the CLI gave up: the prompt may have
+    landed, so it is not sent again: 2026-10-08 hone got one notice 7 times), or None when the call failed."""
+    out = easl("agent.prompt", "--target", t["tile"], "--text", text, "--from", "shepherd", "--when", "now",
+               on_timeout="timed out")
+    if out is None or out == "timed out":
+        return out
     try:
         return str(json.loads(out)[DELIVERY])
     except (ValueError, KeyError, TypeError):
