@@ -58,7 +58,7 @@ Record decisions on the brief as they happen. A decision Tim made elsewhere goes
 - **From a script:** `easl tell <name@board> '<text>' --from <label>`. Add `--when next-turn` to avoid steering a running turn.
 - **When delivery fails,** retry after the target's next turn, or ask the root board to restart the target. Only Tim's composer types into a terminal: never fall back to `agent.prompt --force` or typing.
 - **A sender you can't resolve:** act on the content, and tell the root board which tile is mislabelled.
-- **Who talks:** tiles talk lead↔lead (CoS to CoS), lead→meta and lead→Tim. Inside the board you message your own tiles; a second tile messages you only when it is blocked, needs a decision or is ready to rotate. Subagents report through their result. No acks, no cc, no status pings. Tell another board's CoS only when its plan or its gates change.
+- **Who talks:** tiles talk lead↔lead (CoS to CoS), lead→meta and lead→Tim. Inside the board you message your own tiles; a second tile messages you only when it is blocked, needs a decision or is ready to rotate. Subagents report through their result. No acks, no cc, no status pings, no fyi. Tell another board's CoS only when its plan or its gates change. Message meta only for a decision it owns, a blocker outside your board, or machine pressure; progress, receipts and incident notes go on your brief, which meta reads.
 
 ## What reaches Tim
 
