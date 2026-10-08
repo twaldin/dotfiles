@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """Run one Linux-compatible heavy step (test suite, typecheck, headless build) from a home worktree on deckbox.
 
-  offload [--host deckbox] [--cpus 8] [--mem 16G] [--fetch PATH ...] [--setup CMD] -- <command> [args...]
+  offload [--host deckbox] [--cpus 8] [--mem 16G] [--fetch PATH ...] [--setup CMD] [--big] -- <command> [args...]
   offload [--host deckbox] --clean
 
 1. Sync: the worktree's tracked and untracked-but-not-ignored files (`git ls-files -co --exclude-standard`),
@@ -10,6 +10,10 @@
    path)>/. Deletion is limited to synced paths: a path sent before and gone from the worktree now is deleted
    there; ignored directories (node_modules, .venv, target) persist on <host> as that worktree's Linux build
    cache. The paths sent last time are kept in ~/.local/state/offload/manifests/.
+   A dry run first measures the change set (new or changed files vs the remote copy) and prints
+   `offload: syncing N files, X MB`. Home's uplink is about 0.5 MB/s, so more than 200 MB is refused (exit 2)
+   unless --big: ignore build output and media in .gitignore instead. rsync runs with --timeout=120: a sync
+   that moves no data for 120 s is aborted, and offload says the sync stalled.
 2. Run: `ssh -T <host> python3 ~/dotfiles/agents/shepherd/bin/offload-run ...`: <host>'s heavy-work queue, then
    a systemd unit capped at --cpus and --mem, in the same subdirectory you run offload from, --setup first.
    stdout and stderr stream back; the exit status is the command's. stdin is not forwarded. Ctrl-C, SIGTERM or
@@ -26,7 +30,10 @@ offload never syncs .git/, and there is no git sync mode. A step whose text ment
 anything is sent, and a run whose output says "not a git repository" ends with a loud note: such steps run on
 home behind the queue (`machine-ok-queue run -- <command>`).
 --clean deletes this worktree's remote directory by its exact path (do it when the worktree goes).
-Exit status: the command's; 2 for usage errors and refusals; 255 when the sync or ssh fails.
+rsync and ssh run in a process group of their own, which offload kills when the stage ends and when it gets
+SIGINT, SIGTERM or SIGHUP; a guard leading the group kills it within a second if offload itself is SIGKILLed. So
+nothing it started (rsync, the ssh under it, the run's ssh) outlives it.
+Exit status: the command's; 2 for usage errors and refusals; 255 when the sync or ssh fails; 128+N on signal N.
 """
 import argparse
 import datetime as dt
@@ -51,6 +58,10 @@ MANIFESTS = os.path.join(STATE, "manifests")
 DENY = (".env*", "*.pem", "*.key", "*id_rsa*", "*secret*")
 SSH_OPTS = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=4"]
+BIG_MB = 200  # the change set offload sends without --big (home's uplink: ~0.5 MB/s, so 200 MB is ~7 min)
+STALL_S = int(os.environ.get("OFFLOAD_STALL_S", "120"))  # rsync --timeout: this long without data aborts the sync
+GROUPS = set()  # process groups of the running children (each child leads its own)
+STOPPED = []  # signals offload got
 GIT_TEXT = re.compile(r"(?<![\w.-])git(\s|$)")
 GIT_FAILURE = b"not a git repository"
 GIT_NOTE = """offload: ======================================================================
@@ -119,13 +130,15 @@ def ssh_command():
     return "ssh " + " ".join(SSH_OPTS)
 
 
-def sync_argv(host, remote):
+def sync_argv(host, remote, dry_run=False):
+    """The sync; with dry_run, the measurement before it (each file it would send as `<bytes> <path>`, then stats)."""
     return ["rsync", "-a", "--from0", "--files-from=-", "--delete-missing-args", "--mkpath", "--stats",
+            f"--timeout={STALL_S}", *(["--dry-run", "--out-format=%l %n"] if dry_run else []),
             "-e", ssh_command(), "./", f"{host}:{remote}/"]
 
 
 def fetch_argv(host, remote, rel):
-    return ["rsync", "-a", "-R", "-e", ssh_command(), f"{host}:{remote}/./{rel}", "./"]
+    return ["rsync", "-a", "-R", f"--timeout={STALL_S}", "-e", ssh_command(), f"{host}:{remote}/./{rel}", "./"]
 
 
 def helper_args(directory, rel_cwd, cpus, mem, setup, agent, cmd):
@@ -155,6 +168,98 @@ def stats(out):
     return num("Number of regular files transferred"), num("Total bytes sent")
 
 
+def change_set(out):
+    """(files, bytes, the largest files as (bytes, path)) a dry run would send; bytes None if rsync did not say."""
+    m = re.search(r"^Total transferred file size: ([\d,]+)", out, re.M)
+    files = [(int(size), path) for size, path in re.findall(r"^(\d+) (.*[^/])$", out, re.M)]
+    return stats(out)[0], int(m.group(1).replace(",", "")) if m else None, sorted(files, reverse=True)[:5]
+
+
+def stop_group(pgid, sig=signal.SIGTERM):
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def on_signal(sig, _frame):
+    """SIGINT, SIGTERM, SIGHUP: stop every running child's group (SIGKILL 5 s later if any is still there)."""
+    STOPPED.append(sig)
+    for pgid in list(GROUPS):
+        stop_group(pgid)
+        t = threading.Timer(5, stop_group, (pgid, signal.SIGKILL))
+        t.daemon = True
+        t.start()
+
+
+# Leads each child's process group: runs argv in it and mirrors its exit, and when offload dies first (even by
+# SIGKILL, which offload cannot clean up after) its end of the lifeline pipe closes, and the guard kills the group.
+GUARD = r"""
+import os, select, signal, sys, time
+lifeline, argv = int(sys.argv[1]), sys.argv[2:]
+pid = os.fork()
+if pid == 0:
+    os.close(lifeline)
+    try:
+        os.execvp(argv[0], argv)
+    except OSError:
+        os._exit(127)
+while True:
+    done, status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        code = os.waitstatus_to_exitcode(status)
+        if code < 0:  # die the same way, so offload sees what killed its child
+            if -code != signal.SIGKILL:
+                signal.signal(-code, signal.SIG_DFL)
+            os.kill(os.getpid(), -code)
+        sys.exit(code)
+    if select.select([lifeline], [], [], 0.5)[0] and not os.read(lifeline, 1):  # offload is gone
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        os.killpg(0, signal.SIGTERM)
+        end = time.monotonic() + 5
+        while time.monotonic() < end and not os.waitpid(pid, os.WNOHANG)[0]:
+            time.sleep(0.1)
+        os.killpg(0, signal.SIGKILL)
+"""
+
+
+def spawn(argv, **kw):
+    """Popen argv under GUARD in a process group of its own, registered so a signal to offload stops the group: argv
+    and everything it starts (the ssh under an rsync)."""
+    read_end, write_end = os.pipe()  # offload holds the write end until the child ends or offload dies
+    try:
+        proc = subprocess.Popen([sys.executable, "-c", f"exec({GUARD!r})", str(read_end), *argv],  # one ps line
+                                start_new_session=True, pass_fds=(read_end,), **kw)
+    except BaseException:
+        os.close(write_end)
+        raise
+    finally:
+        os.close(read_end)
+    proc.lifeline = write_end
+    GROUPS.add(proc.pid)
+    if STOPPED:  # the signal came while it was starting
+        stop_group(proc.pid)
+    return proc
+
+
+def reap(proc):
+    """After the child ends: kill what is left of its group (an ssh still draining under a timed-out rsync)."""
+    GROUPS.discard(proc.pid)
+    stop_group(proc.pid, signal.SIGKILL)
+    os.close(proc.lifeline)
+
+
+def child(argv, data=None, capture=False, **kw):
+    """Run argv to the end in its own process group; (exit status, stdout, stderr) as bytes when captured."""
+    pipe = subprocess.PIPE if capture else None
+    proc = spawn(argv, stdin=subprocess.PIPE if data is not None else None, stdout=pipe, stderr=pipe, **kw)
+    try:
+        out, err = proc.communicate(data)
+    finally:
+        reap(proc)
+    return proc.returncode, out or b"", err or b""
+
+
 def log(row):
     os.makedirs(STATE, exist_ok=True)
     with open(LOG, "a") as f:
@@ -180,13 +285,15 @@ def parse(argv):
     ap = argparse.ArgumentParser(prog="offload", allow_abbrev=False, description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__.split("\n\n", 1)[1],
                                  usage="offload [--host deckbox] [--cpus 8] [--mem 16G] [--fetch PATH ...] "
-                                       "[--setup CMD] -- <command> [args...]\n       offload [--host deckbox] --clean")
+                                       "[--setup CMD] [--big] -- <command> [args...]\n"
+                                       "       offload [--host deckbox] --clean")
     ap.add_argument("--host", default="deckbox")
     ap.add_argument("--cpus", default="8")
     ap.add_argument("--mem", default="16G")
     ap.add_argument("--fetch", action="append", default=[], metavar="PATH")
     ap.add_argument("--setup", metavar="CMD")
     ap.add_argument("--clean", action="store_true")
+    ap.add_argument("--big", action="store_true", help=f"send a change set over {BIG_MB} MB")
     a = ap.parse_args(argv[:cut])
     a.command = argv[cut + 1:]
     if a.clean and (a.command or a.fetch or a.setup):
@@ -203,8 +310,20 @@ def parse(argv):
     return a
 
 
+def sync_failed(host, remote, what, code, err):
+    sys.stderr.write(err.decode("utf-8", "replace"))
+    if code == 30:  # rsync: timeout in data send/receive
+        say(f"the {what} to {host}:~/{remote} stalled: no data for {STALL_S}s, so rsync gave up (exit 30); "
+            "the step did not run")
+    else:
+        say(f"the {what} to {host}:~/{remote} failed (rsync exit {code}); the step did not run")
+    return 255
+
+
 def main(argv):
     a = parse(argv)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, on_signal)
     cwd = os.path.realpath(os.getcwd())
     root = worktree_root(cwd)
     if not root:
@@ -218,9 +337,11 @@ def main(argv):
         if local:
             say(f"this is {a.host}: offload runs in place here, so there is no remote copy to clean")
             return 0
-        r = subprocess.run(["ssh", *SSH_OPTS, a.host, f'rm -rf -- "$HOME"/offload/{shlex.quote(name)}'])
-        if r.returncode:
-            say(f"removing {a.host}:~/{remote} failed (ssh exit {r.returncode})")
+        code = child(["ssh", *SSH_OPTS, a.host, f'rm -rf -- "$HOME"/offload/{shlex.quote(name)}'])[0]
+        if STOPPED:
+            return 128 + STOPPED[0]
+        if code:
+            say(f"removing {a.host}:~/{remote} failed (ssh exit {code})")
             return 255
         if os.path.exists(manifest):
             os.unlink(manifest)
@@ -256,45 +377,53 @@ def main(argv):
             say(f"not sent (deny-list): {', '.join(deny)}")
         sending = set(send)
         gone = [p for p in read_manifest(manifest) if p not in sending and not os.path.lexists(os.path.join(root, p))]
+        files_from = "\0".join(send + gone).encode("utf-8", "surrogateescape")
         t0 = time.monotonic()
-        r = subprocess.run(sync_argv(a.host, remote), cwd=root, capture_output=True,
-                           input="\0".join(send + gone).encode("utf-8", "surrogateescape"))
+        code, out, err = child(sync_argv(a.host, remote, dry_run=True), files_from, capture=True, cwd=root)
+        if STOPPED:
+            return 128 + STOPPED[0]
+        if code not in (0, 24):  # 24: a file vanished mid-transfer
+            return sync_failed(a.host, remote, "sync's dry run", code, err)
+        files, size, largest = change_set(out.decode("utf-8", "replace"))
+        say(f"syncing {files} files, " + ("size unknown" if size is None else f"{size / 1e6:.1f} MB"))
+        if size is not None and size > BIG_MB * 1e6 and not a.big:
+            say(f"refused: {size / 1e6:.0f} MB is over {BIG_MB} MB, and home's uplink (about 0.5 MB/s) would take "
+                f"about {size / 0.5e6 / 60:.0f} min and clog the link for every agent. Largest files:")
+            for n, path in largest:
+                say(f"    {n / 1e6:9.1f} MB  {path}")
+            say("Ignore build output and media in .gitignore (ignored paths are never sent), or pass --big if the "
+                "step really needs them.")
+            return 2
+        code, out, err = child(sync_argv(a.host, remote), files_from, capture=True, cwd=root)
         sync_s = round(time.monotonic() - t0, 2)
-        out = r.stdout.decode("utf-8", "replace")
-        if r.returncode not in (0, 24):  # 24: a file vanished mid-transfer
-            sys.stderr.write(r.stderr.decode("utf-8", "replace"))
-            say(f"sync to {a.host}:~/{remote} failed (rsync exit {r.returncode})")
-            return 255
+        if STOPPED:
+            return 128 + STOPPED[0]
+        if code not in (0, 24):
+            return sync_failed(a.host, remote, "sync", code, err)
         write_manifest(manifest, [p for p in send if os.path.lexists(os.path.join(root, p))])
-        files, sent = stats(out)
+        files, sent = stats(out.decode("utf-8", "replace"))
         say(f"synced {len(send)} paths ({files} changed, {sent} bytes sent, {len(gone)} deleted) to "
             f"{a.host}:~/{remote} in {sync_s}s")
         argv = run_argv(a.host, remote, rel_cwd, a.cpus, a.mem, a.setup, agent, a.command)
 
     t1 = time.monotonic()
-    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Ending ssh (a signal stops its group) closes the remote stdin; offload-run then stops the unit.
+    proc = spawn(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     seen = threading.Event()
     pumps = [threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, seen)),
              threading.Thread(target=pump, args=(proc.stderr, sys.stderr.buffer, seen))]
     for t in pumps:
         t.start()
-    stopped = []
-
-    def on_signal(sig, _frame):
-        # Ending ssh closes the remote stdin; offload-run then stops the unit.
-        stopped.append(sig)
-        if proc.poll() is None:
-            proc.terminate()
-
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, on_signal)
-    code = proc.wait()
+    try:
+        code = proc.wait()
+    finally:
+        reap(proc)
     for t in pumps:
         t.join()
     proc.stdin.close()
     run_s = round(time.monotonic() - t1, 2)
-    if stopped:
-        code = 128 + stopped[0]
+    if STOPPED:
+        code = 128 + STOPPED[0]
     elif code < 0:  # ssh (or the in-place offload-run) was killed; offload-run stops the unit when its stdin closes
         say(f"{'offload-run' if local else 'ssh to ' + a.host} was killed by signal {-code}; the step is stopped")
         code = 255
@@ -302,13 +431,16 @@ def main(argv):
         say(f"ssh to {a.host} failed or the remote side exited 255")
 
     fetched = []
-    for rel in fetch if not stopped else []:
-        f = subprocess.run(fetch_argv(a.host, remote, rel), cwd=root)
-        fetched.append({"path": rel, "exit": f.returncode})
-        if f.returncode:
-            say(f"fetch {rel} failed (rsync exit {f.returncode})")
+    for rel in fetch:
+        if STOPPED:
+            break
+        f = child(fetch_argv(a.host, remote, rel), cwd=root)[0]
+        fetched.append({"path": rel, "exit": f})
+        if f:
+            say(f"fetch {rel} " + (f"stalled: no data for {STALL_S}s (rsync exit 30)" if f == 30
+                                   else f"failed (rsync exit {f})"))
             if code == 0:
-                code = f.returncode
+                code = f
     if seen.is_set():
         print(GIT_NOTE.format(why="The run failed with \"not a git repository\": nothing under .git/ exists there.",
                               command=shlex.join(a.command)), file=sys.stderr)
@@ -317,12 +449,9 @@ def main(argv):
          "setup": a.setup, "cpus": a.cpus,
          "mem": a.mem, "paths": len(send), "denied": len(deny), "deleted": len(gone), "sync_files": files,
          "sync_bytes": sent, "sync_s": sync_s, "run_s": run_s, "exit": code, "fetch": fetched,
-         "git_needed": seen.is_set(), "signal": stopped[0] if stopped else None})
+         "git_needed": seen.is_set(), "signal": STOPPED[0] if STOPPED else None})
     return code
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except KeyboardInterrupt:  # Ctrl-C before the run started (during the sync)
-        sys.exit(130)
+    sys.exit(main(sys.argv[1:]))

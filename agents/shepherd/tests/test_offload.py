@@ -2,8 +2,9 @@
 
 Stand-ins on PATH: `ssh` either answers canned output and an exit code, or plays a real connection: it runs the
 remote command with `sh -c` in a fake remote HOME (where ~/dotfiles/agents/shepherd/bin is this checkout's bin),
-relays its stdin, and closes the remote stdin when it dies, as sshd does when the connection drops. `rsync`
-either records its arguments and file list, or is the real rsync talking to itself through that ssh.
+in a session of its own as on a real remote host, relays its stdin, and closes the remote stdin when it dies, as
+sshd does when the connection drops; with FAKE_SSH_STALL it connects and then never says a word (a clogged link).
+`rsync` either records its arguments and file list, or is the real rsync talking to itself through that ssh.
 `systemd-run` runs the command in its own process group in --working-directory with --setenv; `systemctl`
 reports agents.slice's CPUs and stops a unit by killing that group. `python3` is /usr/bin/python3 (3.9).
 """
@@ -37,13 +38,17 @@ while argv[i].startswith('-'):
 host, command = argv[i], ' '.join(argv[i + 1:])
 if os.environ.get('FAKE_SSH_KILL'):
     os.kill(os.getpid(), signal.SIGKILL)
+if os.environ.get('FAKE_SSH_STALL'):
+    import time
+    time.sleep(120)
+    sys.exit(255)
 if os.environ.get('FAKE_SSH_EXIT'):
     sys.stdout.write(os.environ.get('FAKE_SSH_STDOUT', ''))
     sys.stderr.write(os.environ.get('FAKE_SSH_STDERR', ''))
     sys.exit(int(os.environ['FAKE_SSH_EXIT']))
 home = os.environ['FAKE_REMOTE_HOME']
 child = subprocess.Popen(['sh', '-c', command], cwd=home, env={**os.environ, 'HOME': home, 'SHEPHERD_HOST': host},
-                         stdin=subprocess.PIPE)
+                         stdin=subprocess.PIPE, start_new_session=True)
 
 def drop(*_):
     child.stdin.close()  # the connection is gone: the remote side reads EOF
@@ -73,7 +78,11 @@ with open(os.path.join(log, 'rsync.jsonl'), 'a') as f:
 if '--files-from=-' in sys.argv:
     with open(os.path.join(log, 'rsync.files'), 'wb') as f:
         f.write(sys.stdin.buffer.read())
-    print('Number of regular files transferred: 2\nTotal bytes sent: 1,234')
+    if '--dry-run' in sys.argv:  # FAKE_RSYNC_DRY: what the measurement prints (each file as `<bytes> <path>`, stats)
+        print(os.environ.get('FAKE_RSYNC_DRY', 'Number of regular files transferred: 2\n'
+                                               'Total transferred file size: 1,234 bytes'))
+    else:
+        print('Number of regular files transferred: 2\nTotal bytes sent: 1,234')
 sys.exit(int(os.environ.get('FAKE_RSYNC_EXIT', '0')))
 '''
 
@@ -175,7 +184,21 @@ class OffloadCase(unittest.TestCase):
                 os.killpg(int(pgid.read_text()), signal.SIGKILL)
             except (ProcessLookupError, PermissionError, ValueError):
                 pass
+        for pid, _, _ in self.strays():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         self.tmp.cleanup()
+
+    def strays(self):
+        """(pid, ppid, command) of every process this test's offload started that is still alive: its rsyncs (their
+        argv name the remote dir) and the stand-ins (their path is under this test's tmp dir)."""
+        ps = subprocess.run(['ps', '-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'command='], capture_output=True,
+                            text=True).stdout
+        rows = [line.split(None, 2) for line in ps.splitlines()]
+        return [(int(r[0]), int(r[1]), r[2]) for r in rows if len(r) == 3 and int(r[0]) != os.getpid()
+                and (self.name() in r[2] or str(self.root) in r[2])]
 
     def git(self, *args):
         subprocess.run(['git', *args], cwd=self.repo, env=self.env, check=True, capture_output=True)
@@ -255,9 +278,12 @@ class Argv(OffloadCase):
                          env={'FAKE_SSH_EXIT': '0', 'EASL_TILE_ID': 'obj_TILE'})
         self.assertEqual(r.returncode, 0, r.stderr)
         ssh_e = 'ssh -T -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4'
-        sync = self.records('rsync.jsonl')[0]
-        self.assertEqual(sync['argv'], ['-a', '--from0', '--files-from=-', '--delete-missing-args', '--mkpath',
-                                        '--stats', '-e', ssh_e, './', f'otherbox:offload/{self.name()}/'])
+        dry, sync = self.records('rsync.jsonl')
+        common = ['-a', '--from0', '--files-from=-', '--delete-missing-args', '--mkpath', '--stats', '--timeout=120']
+        self.assertEqual(dry['argv'], [*common, '--dry-run', '--out-format=%l %n', '-e', ssh_e, './',
+                                       f'otherbox:offload/{self.name()}/'])
+        self.assertEqual(sync['argv'], [*common, '-e', ssh_e, './', f'otherbox:offload/{self.name()}/'])
+        self.assertIn('offload: syncing 2 files, 0.0 MB', r.stderr)
         self.assertEqual(sync['cwd'], os.path.realpath(self.repo))
         ssh = self.records('ssh.jsonl')[0]
         self.assertEqual(ssh[:-1], ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o',
@@ -413,8 +439,33 @@ class ExitAndGit(OffloadCase):
     def test_a_failed_sync_runs_nothing_and_exits_255(self):
         r = self.offload('--', 'true', env={'FAKE_RSYNC_EXIT': '12'})
         self.assertEqual(r.returncode, 255)
-        self.assertIn('sync to deckbox:~/offload/', r.stderr)
+        self.assertIn('the sync\'s dry run to deckbox:~/offload/', r.stderr)
+        self.assertIn('failed (rsync exit 12); the step did not run', r.stderr)
         self.assertEqual(self.records('ssh.jsonl'), [])
+
+    BIG = ('4500000000 media/tiktok.mov\n120000000 media/b-roll.mp4\n12 src/a.ts\n96 src/\n'
+           'Number of regular files transferred: 3\nTotal transferred file size: 4,620,000,012 bytes\n')
+
+    def test_a_change_set_over_200_mb_is_refused_without_big(self):
+        # 2026-10-08: a 4.5 GB media tree went up home's ~0.5 MB/s uplink; the orphaned rsyncs clogged it for 80 min.
+        r = self.offload('--', 'true', env={'FAKE_RSYNC_DRY': self.BIG})
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn('offload: syncing 3 files, 4620.0 MB', r.stderr)
+        self.assertIn('refused: 4620 MB is over 200 MB', r.stderr)
+        self.assertRegex(r.stderr, r'4500\.0 MB  media/tiktok\.mov\n.*120\.0 MB  media/b-roll\.mp4')
+        self.assertIn('--big', r.stderr)
+        self.assertEqual(['--dry-run' in c['argv'] for c in self.records('rsync.jsonl')], [True], 'the dry run only')
+        self.assertEqual(self.records('ssh.jsonl'), [])
+
+    def test_big_sends_it_and_200_mb_or_less_needs_no_flag(self):
+        r = self.offload('--big', '--', 'true', env={'FAKE_RSYNC_DRY': self.BIG, 'FAKE_SSH_EXIT': '0'})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.records('rsync.jsonl')), 2)
+        self.assertEqual(len(self.records('ssh.jsonl')), 1)
+        at_limit = 'Number of regular files transferred: 1\nTotal transferred file size: 200,000,000 bytes\n'
+        r = self.offload('--', 'true', env={'FAKE_RSYNC_DRY': at_limit, 'FAKE_SSH_EXIT': '0'})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('offload: syncing 1 files, 200.0 MB', r.stderr)
 
     def test_outside_a_worktree_and_bad_flags_are_usage_errors(self):
         outside = self.root / 'plain'
@@ -443,6 +494,7 @@ class EndToEnd(OffloadCase):
     def test_run_streams_output_and_propagates_the_exit_code(self):
         r = self.offload('--', 'sh', '-c', 'cat src/a.ts; echo oops >&2; exit 7')
         self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertRegex(r.stderr, r'offload: syncing 3 files, 0\.0 MB\n')  # .gitignore, a.ts, b.ts
         self.assertEqual(r.stdout, 'a\n')
         self.assertIn('oops', r.stderr)
         self.assertEqual((self.remote / 'src' / 'b.ts').read_text(), 'b\n')
@@ -493,6 +545,49 @@ class EndToEnd(OffloadCase):
         self.assertTrue(other.exists())
         self.assertIn(f'rm -rf -- "$HOME"/offload/{self.name()}', self.records('ssh.jsonl')[-1][-1])
         self.assertFalse(any((self.home / '.local' / 'state' / 'offload' / 'manifests').iterdir()))
+
+    def test_a_change_set_over_200_mb_is_measured_by_rsync_and_refused(self):
+        with open(self.repo / 'src' / 'clip.mov', 'wb') as f:
+            f.truncate(201_000_000)  # sparse: the dry run reads its size, nothing reads its blocks
+        r = self.offload('--', 'true')
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertRegex(r.stderr, r'offload: syncing 4 files, 201\.0 MB\n')  # .gitignore, a.ts, b.ts, clip.mov
+        self.assertRegex(r.stderr, r'201\.0 MB  src/clip\.mov')
+        self.assertFalse((self.remote / 'src').exists(), 'a dry run sends nothing')
+
+    def test_a_stalled_sync_is_aborted_and_named(self):
+        r = self.offload('--', 'true', env={'FAKE_SSH_STALL': '1', 'OFFLOAD_STALL_S': '2'}, timeout=30)
+        self.assertEqual(r.returncode, 255, r.stderr)
+        self.assertIn(f"the sync's dry run to deckbox:~/offload/{self.name()} stalled: no data for 2s", r.stderr)
+        self.assertIn('the step did not run', r.stderr)
+        self.assertEqual(len(self.records('ssh.jsonl')), 1, 'the run never started')
+        self.assert_no_strays()
+
+    def assert_no_strays(self):
+        end = time.monotonic() + 10
+        while self.strays() and time.monotonic() < end:
+            time.sleep(0.1)
+        self.assertEqual(self.strays(), [])
+
+    def test_a_killed_offload_leaves_no_rsync_or_ssh_behind(self):
+        # 2026-10-08: killed offloads left their rsyncs (and the ssh under each) running for 80 min. SIGKILL cannot be
+        # trapped: the guard leading each child's group sees offload's lifeline close and kills the group.
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGKILL):
+            with self.subTest(sig=sig.name):
+                (self.log_dir / 'ssh.jsonl').unlink(missing_ok=True)
+                p = subprocess.Popen([PY39, str(OFFLOAD), '--', 'true'], cwd=self.repo, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                     env={**self.env, 'FAKE_SSH_STALL': '1'})
+                self.procs.append(p)
+                end = time.monotonic() + 20
+                while not (self.log_dir / 'ssh.jsonl').exists():  # rsync started its ssh: mid-sync
+                    self.assertLess(time.monotonic(), end, 'the sync never started')
+                    time.sleep(0.05)
+                self.assertTrue(any('rsync' in cmd for _, _, cmd in self.strays()))
+                p.send_signal(sig)
+                p.wait(timeout=20)
+                self.assertEqual(p.returncode, -sig if sig == signal.SIGKILL else 128 + sig)
+                self.assert_no_strays()
 
     def start_long(self, *argv):
         p = subprocess.Popen([PY39, str(OFFLOAD), *argv, '--', 'sh', '-c', 'echo $$ > cmd.pid; exec sleep 60'],
