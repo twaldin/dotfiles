@@ -16,6 +16,7 @@ guard itself through --rig: a stand-in yabai, a file standing in for SkyLight's 
 and macOS's notifications sent on stdin. None of these touches a window.
 """
 import atexit
+import functools
 import hashlib
 import json
 import os
@@ -34,9 +35,10 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
-# Keep compiled Mach-O fixtures until the whole invocation exits: deleting a per-test executable while
-# Gatekeeper scans it can crash syspolicyd and stall every later non-Apple launch on Home.
+# Memoized native fixtures survive class re-entry (including interleaved selectors) until the invocation exits.
+# Deleting or rebuilding a Mach-O while Gatekeeper scans it can crash syspolicyd and stall later non-Apple launches.
 RUN_FILES = tempfile.TemporaryDirectory(prefix='gui-launch-tests-')
 atexit.register(RUN_FILES.cleanup)
 
@@ -233,6 +235,8 @@ case "$2 $3" in
     if [ -f "$dir/time-queries" ]; then '%(python)s' -c 'import time; print(time.clock_gettime(time.CLOCK_MONOTONIC))' >> "$dir/windows-query-times"; fi
     mode="$(cat "$dir/windows-mode")"
     if [ "$mode" = disconnected ]; then echo 'yabai: failed to connect to socket' >&2; exit 1; fi
+    if [ "$mode" = fail ]; then exit 1; fi
+    if [ "$mode" = hang-then-fail ] && [ -z "$4" ]; then echo fail > "$dir/windows-mode"; exec sleep 30; fi
     if [ "$mode" = unreadable-once ] && [ -z "$4" ]; then echo answer > "$dir/windows-mode"; echo 'not json'; exit 0; fi
     if [ "$mode" = hang ]; then [ -n "$5" ] && : > "$dir/window-$5-asked"; exec sleep 30; fi
     if [ "$mode" = hang-once ] && [ -z "$4" ]; then echo answer > "$dir/windows-mode"; exec sleep 30; fi
@@ -321,6 +325,35 @@ def build_c(source, out):
     done = subprocess.run([CC, '-O', '-o', str(out), str(src)], capture_output=True, text=True, timeout=120)
     if done.returncode != 0:
         raise AssertionError('cc failed:\n' + done.stdout + done.stderr)
+
+
+@functools.lru_cache(maxsize=1)
+def sudo_fixture():
+    binary = Path(RUN_FILES.name) / 'sudo'
+    build_c(STUB_SUDO_C, binary)
+    return binary
+
+
+@functools.lru_cache(maxsize=1)
+def guard_fixtures():
+    root = Path(RUN_FILES.name)
+    binary = root / 'gui-launch-guard'
+    build = subprocess.run([SWIFTC, '-O', '-swift-version', '5', '-target', 'arm64-apple-macos13',
+                            '-o', str(binary), str(GUARD_SOURCE)], capture_output=True, text=True, timeout=600)
+    if build.returncode != 0:
+        raise AssertionError('swiftc failed:\n' + build.stdout + build.stderr)
+    # Two executables with the same name, and a link to the first.
+    for d in ('a', 'b', 'c'):
+        (root / d).mkdir()
+    java = root / 'a' / 'java'
+    build_c(PROBE_C, java)
+    other_java = root / 'b' / 'java'
+    shutil.copy2(java, other_java)
+    linked_java = root / 'c' / 'java'
+    linked_java.symlink_to(java)
+    zombies = root / 'zombies'
+    build_c(ZOMBIES_C, zombies)
+    return binary, java, other_java, linked_java, zombies
 
 
 def summary(tree=(500,), front=TERMINAL, user=TERMINAL, reverted=(), **more):
@@ -431,9 +464,7 @@ class Lines:
 class GuiLaunch(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.build = RUN_FILES
-        cls.stub_sudo = Path(cls.build.name) / 'sudo'
-        build_c(STUB_SUDO_C, cls.stub_sudo)
+        cls.stub_sudo = sudo_fixture()
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1060,23 +1091,17 @@ class Guard(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = RUN_FILES
-        root = Path(cls.tmp.name)
-        cls.binary = root / 'gui-launch-guard'
-        build = subprocess.run([SWIFTC, '-O', '-swift-version', '5', '-target', 'arm64-apple-macos13',
-                                '-o', str(cls.binary), str(GUARD_SOURCE)], capture_output=True, text=True, timeout=600)
-        if build.returncode != 0:
-            raise AssertionError('swiftc failed:\n' + build.stdout + build.stderr)
-        # Two executables with the same name, and a link to the first.
-        for d in ('a', 'b', 'c'):
-            (root / d).mkdir()
-        cls.java = root / 'a' / 'java'
-        build_c(PROBE_C, cls.java)
-        cls.other_java = root / 'b' / 'java'
-        shutil.copy2(cls.java, cls.other_java)
-        cls.linked_java = root / 'c' / 'java'
-        cls.linked_java.symlink_to(cls.java)
-        cls.zombies = root / 'zombies'
-        build_c(ZOMBIES_C, cls.zombies)
+        cls.binary, cls.java, cls.other_java, cls.linked_java, cls.zombies = guard_fixtures()
+
+    def test_run_level_native_fixtures_are_not_rebuilt_when_classes_are_reentered(self):
+        GuiLaunch.setUpClass()
+        paths = (self.binary, self.java, self.other_java, self.zombies, GuiLaunch.stub_sudo)
+        before = [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_size) for path in paths]
+        with mock.patch.object(subprocess, 'run', side_effect=AssertionError('run-level native fixtures must not be rebuilt')):
+            for _ in range(2):
+                Guard.setUpClass()
+                GuiLaunch.setUpClass()
+        self.assertEqual([(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_size) for path in paths], before)
 
     def decide(self, header, rows):
         lines = [json.dumps(header)] + [json.dumps(row) for row in rows]
@@ -2971,6 +2996,37 @@ class Guard(unittest.TestCase):
         _, result = self.end_rig(process, lines, root)
         self.assertEqual(result['problems'], [])
 
+    def test_a_list_retry_that_answers_failure_after_a_timeout_is_not_an_exhausted_timeout(self):
+        process, lines, root = self.rig()
+        put(root / 'windows-mode', 'hang-then-fail')
+        self.send(process, 'sweep')
+        seen = lines.until(lambda row: row.get('event') == 'window-list-failed', 8)
+        query = [row for row in seen if row.get('event') == 'yabai-query' and row['args'] == ['query', '--windows']][-1]
+        self.assertEqual((query['ok'], query['retried'], len(query['tries'])), (False, True, 2), query)
+        self.assertIn('did not answer', query['tries'][0]['error'])
+        self.assertEqual(query['tries'][1]['error'], 'yabai -m query --windows exited 1')
+        self.assertEqual(seen[-1]['reason'], 'yabai -m query --windows exited 1')
+        self.assertFalse([row for row in seen if row.get('event') == 'yabai-timeout'], seen)
+        put(root / 'windows-mode', 'answer')
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+
+    def test_an_id_retry_that_answers_untracked_after_a_timeout_is_native_placement_not_an_exhausted_timeout(self):
+        wid = 89423
+        process, lines, root, _ = self.untracked_window_rig(wid, [107], hang_first=True)
+        seen = lines.until(lambda row: row.get('event') == 'placed-native' and row.get('window') == wid, 8)
+        queries = [row for row in seen if row.get('event') == 'yabai-query' and
+                   row['args'] == ['query', '--windows', '--window', str(wid)]]
+        self.assertEqual(len(queries), 1, queries)
+        query = queries[0]
+        self.assertEqual((query['ok'], query['retried'], len(query['tries'])), (False, True, 2), query)
+        self.assertIn('did not answer', query['tries'][0]['error'])
+        self.assertEqual(query['tries'][1]['error'], 'yabai -m query --windows --window %d exited 1' % wid)
+        self.assertFalse([row for row in seen if row.get('event') == 'yabai-timeout'], seen)
+        _, result = self.end_rig(process, lines, root)
+        self.assertEqual(result['problems'], [])
+        self.assertEqual([row['window'] for row in result['nativePlacements']], [wid])
+
     def test_a_timeout_near_shutdown_cap_is_not_erased_by_a_refused_retry(self):
         process, lines, root = self.rig()
         put(root / 'windows-mode', 'hang')
@@ -3013,12 +3069,14 @@ class Guard(unittest.TestCase):
         self.send(process, 'root %d' % probe.pid, 'window %d' % wid)
         message = 'yabai -m query --windows --window %d could not connect to yabai' % wid
         seen = lines.until(lambda row: row.get('event') == 'problem' and row.get('message') == message, 8)
-        self.assertFalse(any(row.get('status') == 'placed-native' for row in seen))
+        self.assertFalse(any(row.get('event') == 'placed-native' and row.get('window') == wid for row in seen))
         query = [row for row in seen if row.get('event') == 'yabai-query' and
                  row['args'] == ['query', '--windows', '--window', str(wid)]][-1]
         self.assertEqual(len(query['tries']), 1, query)
-        put(root / 'windows-mode', 'answer')
-        _, result = self.end_rig(process, lines, root)
+        final_seen, result = self.end_rig(process, lines, root)
+        self.assertFalse(any(row.get('event') == 'placed-native' and row.get('window') == wid
+                             for row in seen + final_seen))
+        self.assertEqual(result['nativePlacements'], [])
         self.assertIn(message, result['problems'])
 
     def test_a_window_missing_from_yabai_is_located_by_its_native_owner(self):
@@ -3038,7 +3096,7 @@ class Guard(unittest.TestCase):
         self.assertFalse(any(w['pid'] == outsider.pid for w in result['nativeWindows']), result['nativeWindows'])
         self.assertEqual(result['problems'], [])
 
-    def untracked_window_rig(self, wid, memberships, shown=1, listed=False):
+    def untracked_window_rig(self, wid, memberships, shown=1, listed=False, hang_first=False):
         """A rig where yabai's id query says it never tracked window `wid` ("could not locate", exit 1), and
         WindowServer (800x600, off screen) and, with `memberships`, SkyLight have it, as a window of a tree process: the
         realistic case is a window yabai omits from its whole list too (`listed` False). `listed` also covers a real
@@ -3050,6 +3108,8 @@ class Guard(unittest.TestCase):
             put(root / 'windows.json', json.dumps([{'id': wid, 'pid': probe.pid, 'app': 'Probe', 'title': '',
                                                    'space': 7, 'display': 1, 'has-focus': False, 'has-ax-reference': False}]))
         put(root / 'onscreen.json', json.dumps([[wid, probe.pid, 800, 600, False, 'Probe']]))
+        if hang_first:
+            put(root / 'window-hang-once', '')
         self.send(process, 'root %d' % probe.pid, 'sweep')
         lines.until(lambda row: row.get('event') == 'window-native-located' and row.get('window') == wid, 8)
         return process, lines, root, probe.pid
@@ -3260,6 +3320,25 @@ class Guard(unittest.TestCase):
         put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False, 'easl']]))
         _, result = self.end_rig(process, lines, root)
         self.assertFalse([p for p in result['problems'] if p.startswith('window %d ' % wid)], result['problems'])
+
+    def test_a_foreground_park_coalesced_with_a_native_query_is_recorded(self):
+        wid = 89542
+        process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [106], 'display': 'D1'}})
+        put(root / ('window-%d-delay' % wid), '30')
+        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False, 'easl']]))
+        self.send(process, 'sweep')
+        deadline = time.monotonic() + 5
+        while not (root / ('window-%d-asked' % wid)).exists():
+            self.assertLess(time.monotonic(), deadline, 'the native park never began its query')
+            time.sleep(0.01)
+        self.send(process, 'window %d' % wid)
+        try:
+            row = lines.until(lambda row: row.get('event') == 'park-coalesced' and row.get('window') == wid, 8)[-1]
+            self.assertEqual((row['via'], row['lane'], row['final']), ('ax-created', 'foreground', False))
+        finally:
+            put(root / ('window-%d-delay' % wid), '0')
+            put(root / 'onscreen.json', '[]')
+            self.end_rig(process, lines, root)
 
     def test_the_final_window_list_gets_one_retry_and_a_list_it_reads_is_no_problem(self):
         # GR2 (item 5): roblox's run saw the final `yabai -m query --windows` miss its 2.0 s once, and the check failed

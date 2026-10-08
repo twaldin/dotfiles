@@ -206,8 +206,9 @@
 // the one locked turn in which the guard's end may signal it, so no released pid is ever signalled.
 // Transient yabai reads get up to two attempts with 50 ms backoff inside one 4 s deadline including cleanup (at most
 // 2 s per reply); definitive id misses are single-try. Restore-owner replies share the caller's 1 s deadline, with
-// bounded cleanup outside it. Mutations are never retried. Recovered reads are no problem; exhausted reads remain
-// fail-closed under the existing owner and window adjudications. Every yabai-query event carries its logical query's
+// bounded cleanup outside it. Mutations are never retried. A retry that answers keeps its exit/diagnostic even after
+// a transient timeout; unanswered or refused exhaustion stays a timeout. Failed answers retain the existing caller
+// adjudications. Every yabai-query event carries its logical query's
 // args, attempts, per-attempt error/latency, total latency and deadline. yabaiQueries retains the first 128 records;
 // yabaiQueryStats preserves total/failed/retried/retained/dropped counts and total/max latency after that cap.
 // The final list also keeps finalWindowList.
@@ -2459,12 +2460,17 @@ let yabaiQueries = Locked(QueryHistory())
 /// misses it falls back to re-activating the app (580 ms there).
 let focusTimeout = 1.0
 
+/// Special failed answers are classified once, for both retry policy and native ownership adjudication.
+enum QueryFailure: Equatable { case untracked, disconnected }
+
 /// A logical read, with each attempt and its latency. A transient timeout is not a problem; exhaustion still is.
+/// The final attempt's answered exit owns adjudication, even after a timeout. An unanswered/refused retry
+/// preserves the prior timeout instead.
 /// The caller may own timeout adjudication (restore-owner checks and the final list). No native fallback can turn
 /// a query that never answers into a successful query. Definitive id misses are single-try; transient reads retry.
 /// `replyUntil`: an owner reply deadline, with bounded cleanup outside it as before; `until` includes cleanup.
 @Sendable func queryReply(_ args: [String], timeout: Double = queryTimeout, ownsTimeout: Bool = false,
-                         until: Double? = nil, replyUntil: Double? = nil) -> (reply: Helpers.Reply, value: Any?, record: [String: Any]) {
+                         until: Double? = nil, replyUntil: Double? = nil) -> (reply: Helpers.Reply, value: Any?, record: [String: Any], failure: QueryFailure?) {
     let began = uptime()
     let replyDeadline = replyUntil ?? until ?? began + queryLimit
     let cleanupDeadline = replyUntil.map { $0 + Child.cleanupAllowance } ?? replyDeadline
@@ -2475,6 +2481,8 @@ let focusTimeout = 1.0
     var ok = false
     var value: Any?
     var timedOut = false
+    var answered = false  // the last attempt, including a nonzero exit or unreadable answer
+    var failure: QueryFailure?
     var connectionFailure: String?
     for n in 1...queryTries {
         let at = uptime()
@@ -2484,23 +2492,29 @@ let focusTimeout = 1.0
         let allowed = replyUntil != nil && n == 1
             ? min(timeout, max(0.001, (available - queryBackoff - 0.05) / 2)) : min(timeout, available)
         reply = helpers.run(yabaiPath, args, timeout: allowed, ownsTimeout: true, until: cleanupDeadline, captureError: true)
+        answered = false
+        failure = nil
         var why: String?
         var retry = true
         switch reply {
         case .exited(0, let data):
+            answered = true
             value = data.isEmpty ? nil : json(data)
             if value != nil { ok = true }
             else { why = "\(what) answered unreadably" }
         case .exited(let code, let data):
+            answered = true
             why = "\(what) exited \(code)"
             if code == 1 {
                 let message = String(decoding: data, as: UTF8.self)
                 if message.contains("failed to connect to socket") {
+                    failure = .disconnected
                     connectionFailure = "\(what) could not connect to yabai"
                     why = connectionFailure
                     retry = false
                 } else if args.count == 4, args[1] == "--windows", args[2] == "--window",
                           message.contains("could not locate window with the specified id") {
+                    failure = .untracked
                     retry = false
                 }
             }
@@ -2517,17 +2531,17 @@ let focusTimeout = 1.0
         guard left > queryBackoff else { break }
         usleep(UInt32(queryBackoff * 1_000_000))
     }
-    if !ok && timedOut { reply = .timedOut(limit) }  // a later refusal must never erase an unanswered attempt
+    if !ok && timedOut && !answered { reply = .timedOut(limit) }  // retain an unanswered/refused attempt, never overwrite an answer
     let elapsed = uptime() - began
     let record: [String: Any] = ["event": "yabai-query", "args": args, "ok": ok, "tries": tries,
                                  "retried": tries.count > 1, "limitS": decimal(limit, 3), "ms": ms(elapsed)]
     yabaiQueries.update { $0.append(record, ok: ok, retry: tries.count > 1, seconds: elapsed) }
     emit(record)  // the stream retains each attempt even after the bounded summary is full
-    if !ok && timedOut && !ownsTimeout {
+    if !ok && timedOut && !answered && !ownsTimeout {
         problems.update { $0.append("\(what) did not answer within \(String(format: "%.1f", limit)) s (bounded query retries exhausted)") }
         emit(["event": "yabai-timeout", "args": args, "timeoutS": decimal(limit, 3)])
     } else if !ok, let connectionFailure { problem(connectionFailure) }
-    return (reply, value, record)
+    return (reply, value, record, failure)
 }
 
 @Sendable func yabaiReply(_ args: [String], timeout: Double = queryTimeout, ownsTimeout: Bool = false,
@@ -2551,9 +2565,8 @@ let focusTimeout = 1.0
     case .exited(0, _):
         if let w = read.value as? [String: Any] { return (w, nil, false) }
         return (nil, "\(what) answered unreadably", false)
-    case .exited(let code, let data):
-        let untracked = code == 1 && String(decoding: data, as: UTF8.self).contains("could not locate window with the specified id")
-        return (nil, "\(what) exited \(code)", untracked)
+    case .exited(let code, _):
+        return (nil, "\(what) exited \(code)", read.failure == .untracked)
     case .timedOut(let allowed): return (nil, "\(what) did not answer within \(String(format: "%.1f", allowed)) s", false)
     case .refused(let why): return (nil, why, false)
     }
@@ -3061,9 +3074,14 @@ let parkingWindows = Locked(Set<Int>())
 /// Tim's display is unplaced (retried, and reported at the end unless placed). `latched`: the sweep already reported
 /// this window's sample on his screen (omittedSample), so this park reports nothing more of that exposure.
 /// `native`: discoveries and their retries stay off the foreground AX/shown queue.
+/// Collisions are recorded as park-coalesced; the holder retains its retry chain and lane.
 func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bool = false, native: Bool = false) {
     tracked("park of window \(id) (\(via))", final: final) {
-        guard parkingWindows.update({ $0.insert(id).inserted }) else { return }
+        guard parkingWindows.update({ $0.insert(id).inserted }) else {
+            emit(["event": "park-coalesced", "window": id, "via": via,
+                  "lane": final ? "final" : native ? "native" : "foreground", "final": final, "latched": latched])
+            return
+        }
         defer { _ = parkingWindows.update { $0.remove(id) } }
         let query = windowQuery(id)
         let found = query.info
