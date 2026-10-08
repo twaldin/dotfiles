@@ -475,6 +475,7 @@ def main():
             plan(path, 'write', text.encode())
 
         print(f'Shared library: {len(selected)} global skills.')
+        print('Selected skills: ' + ', '.join(selected))
         for change in changes:
             print(change['kind'].upper(), change['path'])
         if not args.apply:

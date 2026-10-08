@@ -142,6 +142,10 @@ class SharedInstall(unittest.TestCase):
             self.assertEqual({path.name for path in catalog.iterdir()}, selected)
             preview = subprocess.run(command, check=True, capture_output=True, text=True).stdout
             self.assertIn('0 changes', preview)
+            listing = next(line for line in preview.splitlines() if line.startswith('Selected skills: '))
+            listed = set(listing.removeprefix('Selected skills: ').split(', '))
+            self.assertEqual(listed, selected)
+            self.assertFalse(removed.intersection(listed))
 
     def test_shared_omp_roles_replace_stale_roles_and_preserve_local_setup(self):
         with tempfile.TemporaryDirectory() as scratch:
