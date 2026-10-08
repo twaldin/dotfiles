@@ -18,5 +18,5 @@
 - Kill only processes you can prove are yours by port, cwd or target URL; omp's shared broker makes process trees misleading. Report unfixable pressure with numbers to your lead or Tim; subagents use their result. Never kill system daemons or touch Colima/Docker.
 - Make scratch with `mktemp -d`, record its path and remove exactly that path. Delete only paths you created and recorded; never pattern-delete (`find … -delete`, `-exec rm`, globbed `rm -rf`) in shared roots such as /tmp, `$TMPDIR`, `$HOME`, `~/dev` or `~/worktrees`.
 - Cap each tool's parallelism (`-j`, `--threads`, `--maxWorkers`, `MAGICK_THREAD_LIMIT`) and simultaneous runs. A Lindy vitest worker uses about 2 GB.
-- Before launching, moving, capturing or showing a Mac GUI window, read `mac-gui`; never move a window without its id. Use agent Spaces first, then Tim's Spaces or windows if needed.
-- Use twaldin-home's screen when needed; Tim is usually at work over ssh. Keep displays brief; if his activity disturbs a run, note it and rerun. No gate waits for Tim to be idle.
+- Before launching, moving, capturing or showing a Mac GUI window, or using any `computer-guest` tool, read `mac-gui`; never move a window without its id. GUI tests go to its guest route; the host is only for its listed exceptions, never Tim's Spaces.
+- Only `mac-gui`'s owned, delegated OMP worker calls `computer-guest` tools; seeing them in another session grants no ownership. No host GUI input.

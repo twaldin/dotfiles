@@ -43,5 +43,5 @@ A site that needs Tim's login gets a separate test account or a login he approve
 
 - Tim wants to watch the page: an easl browser tile (easl skill).
 - Deterministic tests and captures (terms capture and e2e, 3d-game Playwright Test) stay on their own libraries; bulk captures run on deckbox through `offload`.
-- A headed browser or desktop GUI runs in a VM, never on a host session: report the need to your lead.
+- For a headed browser or desktop GUI, read `mac-gui` and use its owned guest route; its listed exceptions alone may use isolated host test placement.
 - twaldin-work has no agent-browser: use the harness's browser tool there.

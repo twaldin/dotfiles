@@ -1,0 +1,176 @@
+#!/usr/bin/python3
+"""Run one headless GUI task under a live lease; invoke through machine-ok-queue."""
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+
+class Failure(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+class Guest:
+    def __init__(self, lease):
+        self.lease = lease
+        self.cancelled = 0
+        self.lume = [str(Path.home() / '.local/bin/lume')]
+
+    def cancel(self, sig, _frame):
+        self.cancelled = sig
+
+    def call(self, argv, timeout, capture=False, worker=False, cleanup=False):
+        if self.cancelled and not cleanup:
+            raise Failure('cancelled before starting another command', 128 + self.cancelled)
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE if capture else None,
+                                text=True, start_new_session=True,
+                                pass_fds=(self.lease.fileno(),) if worker else ())
+        try:
+            if worker:
+                self.record(worker_pid=proc.pid)
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    out, _ = proc.communicate(timeout=0.25)
+                    if proc.returncode:
+                        code = proc.returncode if proc.returncode > 0 else 128 - proc.returncode
+                        raise Failure('%s exited %s' % (argv[0], proc.returncode), code)
+                    return out
+                except subprocess.TimeoutExpired:
+                    if self.cancelled and not cleanup:
+                        raise Failure('cancelled; worker reaped before teardown', 128 + self.cancelled)
+                    if time.monotonic() >= deadline:
+                        raise Failure('%s timed out after %ss' % (argv[0], timeout), 124)
+        except BaseException:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
+            raise
+
+    def record(self, **fields):
+        self.owner.update(fields)
+        self.lease.seek(0)
+        self.lease.truncate()
+        json.dump(self.owner, self.lease)
+        self.lease.flush()
+
+    def state(self, cleanup=False):
+        rows = json.loads(self.call(self.lume + ['get', 'agent-gui', '--format', 'json'],
+                                    15, capture=True, cleanup=cleanup))
+        if len(rows) != 1 or rows[0]['status'] not in ('running', 'stopped'):
+            raise Failure('agent-gui has an unexpected Lume state: %s' % rows)
+        return rows[0]['status']
+
+    def stop(self):
+        if self.state(cleanup=True) != 'stopped':
+            self.call(self.lume + ['stop', 'agent-gui'], 60, cleanup=True)
+        if self.state(cleanup=True) != 'stopped':
+            raise Failure('guest teardown did not reach stopped')
+        print('agent-gui: stopped', flush=True)
+
+    def run(self, task):
+        if self.state() == 'running':
+            print('agent-gui: recovering orphaned running guest under the free lease', flush=True)
+            self.stop()
+        try:
+            self.call(self.lume + ['run', 'agent-gui', '--detach', '--display', 'none',
+                                   '--vnc', 'disabled'], 60)
+            print('agent-gui: booted; waiting for signed driver readiness', flush=True)
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                if self.cancelled:
+                    raise Failure('cancelled while waiting for readiness', 128 + self.cancelled)
+                try:
+                    raw = self.call(['/usr/bin/ssh', '-F', str(Path.home() / '.config/agent-gui/ssh_config'),
+                                     '-T', 'agent-gui', '/Users/lume/.local/bin/cua-driver',
+                                     'permissions', 'status', '--json'], min(10, deadline - time.monotonic()),
+                                    capture=True)
+                    grants = json.loads(raw)
+                    if (grants.get('accessibility') and grants.get('screen_recording')
+                            and grants.get('source', {}).get('attribution') == 'driver-daemon'):
+                        break
+                except (Failure, ValueError):
+                    if self.cancelled:
+                        raise Failure('cancelled while waiting for readiness', 128 + self.cancelled)
+                time.sleep(min(2, max(0, deadline - time.monotonic())))
+            else:
+                raise Failure('signed guest driver not ready within 120s', 124)
+            k = self.call([str(Path.home() / '.local/bin/colorsync-k')], 15, capture=True)
+            print('agent-gui: ' + k.strip(), flush=True)
+            if not k.startswith('K=0.0 '):
+                raise Failure('post-boot ColorSync check requires K=0.0')
+            prompt = ('You are the sole GUI worker inside an owned headless agent-gui batch. '
+                      'Only you may call computer-guest tools. Do not boot/stop the VM, acquire/release '
+                      'the lease, spawn workers, launch a viewer, or use host GUI input. '
+                      'Read back actual results and finish all calls before exiting. Task: ' + task)
+            print('agent-gui: starting fresh OMP worker', flush=True)
+            self.call(['omp', '-p', '--no-session', '--no-title', '--no-skills', '--no-rules',
+                       '--no-lsp', '--auto-approve', '--max-time', '10m', '--mode', 'json', prompt],
+                      660, worker=True)
+        finally:
+            self.stop()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    run = commands.add_parser('run', help='claim, recover/boot, run a fresh OMP worker, stop')
+    run.add_argument('--lock-wait', type=float, default=30, metavar='SECONDS',
+                     help='bounded lease wait (default: 30 seconds; 0 is immediate)')
+    run.add_argument('task', nargs='+', help='GUI assignment and readback criteria')
+    args = parser.parse_args(argv)
+    if not 0 <= args.lock_wait <= 300:
+        parser.error('--lock-wait must be between 0 and 300 seconds')
+    if socket.gethostname().split('.')[0] != 'twaldin-home':
+        raise Failure('the retained agent-gui guest exists only on twaldin-home', 2)
+    os.environ['LUME_UPDATE_CHECK'] = 'false'
+    os.environ['OMP_MCP_REQUIRE_READY'] = '1'
+    path = Path.home() / '.cache/agent-gui.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep this inode: unlinking a held lock would let a second taker lock a new file.
+    with path.open('a+') as lease:
+        guest = Guest(lease)
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, guest.cancel)
+        deadline = time.monotonic() + args.lock_wait
+        while True:
+            try:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if guest.cancelled:
+                    raise Failure('cancelled while waiting for the guest lease', 128 + guest.cancelled)
+                if time.monotonic() >= deadline:
+                    lease.seek(0)
+                    raise Failure('guest lease busy after %ss; owner: %s' %
+                                  (args.lock_wait, lease.read() or '(worker retains the lease)'), 75)
+                time.sleep(min(0.25, deadline - time.monotonic()))
+        guest.owner = {'host': socket.gethostname(), 'holder_pid': os.getpid(),
+                       'tile_id': os.environ.get('EASL_TILE_ID'),
+                       'started_utc': dt.datetime.now(dt.timezone.utc).isoformat()}
+        guest.record()
+        print('agent-gui: lease acquired; holder pid=%s' % os.getpid(), flush=True)
+        guest.run(' '.join(args.task))
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (Failure, OSError, ValueError) as exc:
+        print('agent-gui: %s' % exc, file=sys.stderr)
+        sys.exit(exc.code if isinstance(exc, Failure) else 1)

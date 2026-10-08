@@ -25,7 +25,7 @@ swiftc=${SWIFTC:-swiftc}
 
 case "$host" in
   twaldin-home)
-    bins="machine-ok machine-ok-queue offload offload-run machine-watch machine-census omp-update omp-browser-cycle gpu-top colorsync-k cs-measure logout-colorsync-test gui-launch"
+    bins="machine-ok machine-ok-queue offload offload-run machine-watch machine-census omp-update omp-browser-cycle gpu-top colorsync-k cs-measure logout-colorsync-test gui-launch agent-gui"
     tools="fsevents-top gui-launch-guard"
     jobs="net.waldin.omp-browser-cycle net.waldin.omp-update" ;;
   twaldin-work)
