@@ -2,10 +2,11 @@
 """Run one headless GUI task under a live lease; invoke through machine-ok-queue.
 
 Lease: ~/.cache/agent-gui.lock (retain its inode). A dedicated keeper holds the
-lease while OMP runs; OMP and its shell children receive no lease descriptor.
+lease until OMP exits (660s keeper deadline); shell children receive no lease fd.
 An orphaned running guest is stopped under a free lease before a new boot.
+Before teardown, the holder terminates the keeper's remaining process group.
 Teardown stops directly, without another queue or memory-gate wait.
-Busy diagnostics include recorded ownership and lsof's current file holders.
+Busy diagnostics show recorded owners confirmed by lsof, excluding waiters.
 
 Exit codes: 0 success; 2 usage/unsupported host; 75 lease busy (retry later);
 124 readiness/command deadline; 128+N cancellation by signal N; other nonzero
@@ -23,13 +24,41 @@ import subprocess
 import sys
 import time
 
-KEEPER = 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:], close_fds=True))'
+KEEPER = '''
+import os,signal,subprocess,sys
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(sig, lambda *_: None)
+p = subprocess.Popen(sys.argv[1:], close_fds=True)
+try:
+    rc = p.wait(timeout=660)
+except subprocess.TimeoutExpired:
+    os.killpg(os.getpgrp(), signal.SIGKILL)
+sys.exit(128 - rc if rc < 0 else rc)
+'''
 
 
 class Failure(Exception):
     def __init__(self, message, code=1):
         super().__init__(message)
         self.code = code
+
+
+def empty_group(pgid):
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 class Guest:
@@ -69,13 +98,23 @@ class Guest:
                         raise Failure('%s timed out after %ss' % (argv[0], timeout), 124)
         except BaseException:
             if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     proc.communicate(timeout=5)
                 except subprocess.TimeoutExpired:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     proc.communicate()
             raise
+        finally:
+            if worker:
+                # Even a keeper killed alone may leave its OMP child alive.
+                empty_group(proc.pid)
 
     def record(self, **fields):
         self.owner.update(fields)
@@ -178,14 +217,25 @@ def main(argv=None):
                     raise Failure('cancelled while waiting for the guest lease', 128 + guest.cancelled)
                 if time.monotonic() >= deadline:
                     lease.seek(0)
+                    owner = lease.read() or '(no record)'
                     try:
-                        holders = subprocess.run(['/usr/sbin/lsof', '-t', str(path)],
-                                                 stdin=subprocess.DEVNULL, capture_output=True,
-                                                 text=True, timeout=5).stdout.strip() or '(none visible)'
+                        record = json.loads(owner)
+                    except ValueError:
+                        record = {}
+                    if not isinstance(record, dict):
+                        record = {}
+                    candidates = {str(record.get(key)) for key in ('holder_pid', 'keeper_pid')}
+                    candidates.discard(str(os.getpid()))
+                    try:
+                        opened = subprocess.run(['/usr/sbin/lsof', '-t', str(path)],
+                                                stdin=subprocess.DEVNULL, capture_output=True,
+                                                text=True, timeout=5).stdout.splitlines()
+                        holders = ' '.join(pid for pid in opened if pid in candidates)
+                        holders = holders or '(no recorded owner visible)'
                     except (OSError, subprocess.TimeoutExpired) as exc:
                         holders = '(lsof unavailable: %s)' % exc
-                    raise Failure('guest lease busy after %ss; owner: %s; lsof holders: %s' %
-                                  (args.lock_wait, lease.read() or '(no record)', holders), 75)
+                    raise Failure('guest lease busy after %ss; owner: %s; lsof recorded owners: %s' %
+                                  (args.lock_wait, owner, holders), 75)
                 time.sleep(min(0.25, deadline - time.monotonic()))
         guest.owner = {'host': socket.gethostname(), 'holder_pid': os.getpid(),
                        'tile_id': os.environ.get('EASL_TILE_ID'),
