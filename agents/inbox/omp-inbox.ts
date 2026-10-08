@@ -3,8 +3,8 @@
 // agent, without adding tools:
 // - Outbound: when a native `write agent://<name>` fails with "Unknown agent", deliver through
 //   agent-msg instead (an easl tile's omp by its name or `name@board`, a herdr agent by name,
-//   `<name>@<host>` on another machine over ssh) and report success. In an easl tile, easl's own
-//   extension handles easl addresses, so this only adds the herdr agents.
+//   `<name>@<host>` on another machine over ssh) and report success. Reuse easl's message id
+//   when its earlier attempt timed out: that prompt may still have reached the recipient.
 // - Inbound (herdr panes only; tiles get easl's): messages land in this session's inbox and arrive
 //   as one card per drain: easl's own `easl:message` custom message, drawn as omp draws its IRC
 //   messages and recorded as a custom message, never as a user prompt, so transcripts and retros
@@ -23,6 +23,8 @@ const ROOT = path.join(os.homedir(), ".local/state/omp-inbox");
 const SENDER = path.join(os.homedir(), ".local/bin/agent-msg");
 const HOST = os.hostname().split(".")[0];
 const PEER = /^agent:\/\/([A-Za-z0-9_.-]+)(?:@([A-Za-z0-9_.-]+))?\/?$/;
+// easl's agent.prompt message id rule, shared with an earlier attempt at this write.
+const MESSAGE_ID = /^msg_[A-Za-z0-9_-]{8,64}$/;
 // Bounds a wake loop between two agents: past this many wakes per sender per hour, messages
 // still arrive but wait for the recipient's next turn instead of starting one.
 const WAKES_PER_HOUR = 20;
@@ -161,25 +163,34 @@ export default function (pi) {
     if (!native.includes("Unknown agent")) return;
     const [, name, host] = match;
     const target = host !== undefined && host !== HOST ? `${name}@${host}` : name;
+    // A timed-out easl prompt may still queue. Every easl attempt at this write uses one id.
+    const given = event.details?.easl?.message;
+    const messageId = typeof given === "string" && MESSAGE_ID.test(given) ? given : `msg_${crypto.randomUUID().replaceAll("-", "")}`;
+    const details = { ...event.details, easl: { ...event.details?.easl, message: messageId } };
     // From a tile, agent-msg names this tile by its easl address itself, and gets the address as
     // written: easl's extension can't read `name@<this host>` (it takes `@<host>` for a board).
     const args = inHerdr
       ? [target, text, "--from", await selfAddress(ctx)]
       : [host !== undefined ? `${name}@${host}` : name, text];
+    args.push("--message", messageId);
     const sent = await run(SENDER, args);
     if (/agent-msg: (queued for|typed into)/.test(sent.out)) {
       // The IRC card renders from the native receipts, so mark them delivered too.
       const message = event.details?.message;
-      const details = Array.isArray(message?.receipts)
-        ? { ...event.details, message: { ...message, receipts: message.receipts.map((r) => ({ to: r.to, outcome: "injected" })) } }
-        : event.details;
+      const deliveredDetails = Array.isArray(message?.receipts)
+        ? { ...details, message: { ...message, receipts: message.receipts.map((r) => ({ to: r.to, outcome: "injected" })) } }
+        : details;
       return {
         isError: false,
-        details,
+        details: deliveredDetails,
         content: [{ type: "text", text: `Delivered to ${target}, an agent in another session. It arrives at that agent's next step; replies come back as messages from ${target}.` }],
       };
     }
-    return { content: [{ type: "text", text: `${native}\nNo cross-session delivery to ${target}: ${sent.out || "no response"}` }] };
+    return {
+      isError: true,
+      details,
+      content: [{ type: "text", text: `${native}\nNo cross-session delivery to ${target}: ${sent.out || "no response"}` }],
+    };
   });
 
   let dir: string | undefined;

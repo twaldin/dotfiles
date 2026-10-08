@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Message an omp agent, in a herdr pane or an easl tile, without typing into its terminal.
 
-    agent-msg <agent>[@<host or board>] <text...> [--from NAME]
+    agent-msg <agent>[@<host or board>] <text...> [--from NAME] [--message ID]
 
 Agents with the omp-inbox extension use `write agent://<name>[@<host>]`, which runs this.
 Shell scripts, and panes started before the extension, call it directly.
@@ -58,10 +58,12 @@ def easl_address(agents, name, board):
     return found[0] if found else None
 
 
-def tell(cli, address, text, origin):
+def tell(cli, address, text, origin, message=None):
     command = [cli, 'tell', address, text]
     if origin:
         command += ['--from', origin]
+    if message:
+        command += ['--message', message]
     r = subprocess.run(command, capture_output=True, text=True)
     if r.returncode:
         sys.exit(f'agent-msg: easl tell {address} failed: {(r.stderr or r.stdout).strip()}')
@@ -129,9 +131,12 @@ def sender():
     return f'shell@{host}'
 
 
-def remote(host, name, text, origin):
+def remote(host, name, text, origin, message=None):
     # Tailscale SSH on the Macs drops the remote exit status, so judge by the output.
-    command = ' '.join(shlex.quote(part) for part in [name, text, '--from', origin])
+    parts = [name, text, '--from', origin]
+    if message:
+        parts += ['--message', message]
+    command = ' '.join(shlex.quote(part) for part in parts)
     r = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', host,
                         f'"$HOME"/.local/bin/agent-msg {command}'], capture_output=True, text=True)
     out = (r.stdout + r.stderr).strip()
@@ -146,9 +151,9 @@ def main():
     parser.add_argument('agent')
     parser.add_argument('text', nargs='+')
     parser.add_argument('--from', dest='sender')
+    # Reuse the id of an easl prompt that timed out but may still have queued.
+    parser.add_argument('--message', help='easl message id shared by every attempt at this message')
     # Ignored. omp-inbox loaded in tiles before 2026-10-07 passes it; drop it once those tiles restart.
-    # omp chains tool_result handlers, so whichever of easl's extension and omp-inbox delivers first
-    # clears the error and the other never runs: trying easl here can't deliver twice.
     parser.add_argument('--herdr-only', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     text = ' '.join(args.text).strip()
@@ -162,11 +167,11 @@ def main():
     if address:
         # From a tile, easl names the calling tile itself, with a reply address.
         from_tile = args.sender is None and tile_address(agents)
-        tell(cli, address, text, None if from_tile else args.sender or sender())
+        tell(cli, address, text, None if from_tile else args.sender or sender(), args.message)
     origin = args.sender or tile_address(agents) or sender()
     if host and host != local:
         # A tile's `name@board` means nothing on another machine: name this host, where a reply lands.
-        remote(host, name, text, origin if args.sender else f"{origin.partition('@')[0]}@{local}")
+        remote(host, name, text, origin if args.sender else f"{origin.partition('@')[0]}@{local}", args.message)
     info = agent(name)
     inbox = live_inbox(info)
     if inbox:
