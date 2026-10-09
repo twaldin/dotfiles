@@ -2946,9 +2946,9 @@ let endReported = Locked(Set<Int>())
 }
 
 /// At the guard's end (after the final sweep), each tree window still unknown, or unresolved and gone, is a problem
-/// unless every read of it showed it off Tim's screen. A counting stretch with no placement or exempt sample is
-/// never-placed evidence too, even when the end skipped its queued park. Merge it into any unresolved entry first
-/// so earlier off-Tim reads cannot excuse it.
+/// unless every read of it showed it off Tim's screen. Counted-on-Tim stretches remain evidence until placement,
+/// even after an exempt sample or when the end skipped their queued park. Merge that evidence into any unresolved
+/// entry first so earlier off-Tim reads cannot excuse it.
 @Sendable func reportUnplacedAtEnd() {
     let unknown = windowsUnknown.value
     var open = unresolved.value
@@ -2970,8 +2970,8 @@ let endReported = Locked(Set<Int>())
         problem("window \(id) of the tree could not be located at the guard's end: \(why)")
     }
     for (id, u) in open.sorted(by: { $0.key < $1.key }) where unknown[id] == nil && !u.offTims {
-        let afterOffTim = merged.contains(id) || closed.contains(id)
-        let evidence = afterOffTim ? "a sample counted it on Tim's screen after reads that showed it off" : "nothing showed it off Tim's screen"
+        let evidence = merged.contains(id) ? "a sample counted it on Tim's screen after reads that showed it off"
+            : closed.contains(id) ? "a sample counted it on Tim's screen" : "nothing showed it off Tim's screen"
         problem("window \(id) of the tree (reported by \(u.via)) was never placed before it went: \(u.why); \(evidence), so its time there cannot be bounded")
     }
     let end = uptime()

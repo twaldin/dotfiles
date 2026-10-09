@@ -202,8 +202,9 @@ and/or guards one that something else starts, then checks that nothing took it.
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
-space-unrestorable, window, window-unknown, window-located, window-exposure, window-native-located, placed-native, window-exempt,
-window-list-failed, window-off-target, final-window-list, display-check, yabai-query, yabai-timeout,
+space-unrestorable, window, window-unknown, window-located, window-exposure, window-native-located,
+placed-native, window-exempt, window-list-failed, window-off-target, final-window-list, display-check,
+yabai-query, yabai-timeout,
 problem, fault, guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
 previousFront (the app frontmost before it: in the tree or not, for how long, quit or hidden; whether it just closed
 its last window is not known): diagnostics only. The launched program's own output
