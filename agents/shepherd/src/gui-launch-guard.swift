@@ -161,8 +161,9 @@
 //     the first sample that finds it counting (parked, window-counted; its exposure starts there); one gone is dropped.
 //     That counted stretch is evidence until a placement judges it: if the window closes unplaced, it is never-placed
 //     evidence (the sample showed it on his screen); if a sample finds it exempt again first, it counts as on his
-//     screen for all the time from the counting sample to that exempt one, recorded as onTimSpaceMs. A sweep's
-//     sample of a window yabai's list omits ends it at that sample, before the window's own query.
+//     screen for all the time from the counting sample to that exempt one, recorded as onTimSpaceMs. Until placed,
+//     that stretch is also never-placed evidence if the window is ever unresolved. A sweep's sample of a window
+//     yabai's list omits ends it at that sample, before the window's own query.
 //     A stretch no sample judged by the end counts until the end. Its window was never placed, a problem at any
 //     duration. An unresolved entry is merged with it first, so earlier off-Tim reads do not excuse it.
 //     A final exemption is not permanent: after this guard exits, the wrapper's fresh window list is checked against
@@ -2812,6 +2813,8 @@ let exemptRecords = Locked([[String: Any]]())
 /// The stretch each tree window has counted in, unbroken by an exempt sample: since when (uptime), and whether it was
 /// on Tim's screen then (false: not known before yabai's answer).
 let countingSince = Locked([Int: (at: Double, onTims: Bool)]())
+/// Closed on-Tim counting stretches remain unplaced evidence until a placement, even before an unresolved entry exists.
+let closedOnTims = Locked(Set<Int>())
 /// Review 4: the tree windows the end's last read of the windows on screen (ShownWindows.finalPass) found on Tim's
 /// screen, a problem reported then, before the final sweep's window list: the final sweep reports no more of them.
 let endReported = Locked(Set<Int>())
@@ -2862,7 +2865,7 @@ let endReported = Locked(Set<Int>())
     let exposed = stretch.flatMap { $0.onTims && windowSpaces.value[id] == nil ? sampled - $0.at : nil }
     if let exposed {
         recordExposure(exposed)
-        unresolved.update { $0[id]?.offTims = false }
+        _ = closedOnTims.update { $0.insert(id) }
     }
     windowsUnknown.update { $0[id] = nil }
     guard fresh || final else { return }
@@ -2909,7 +2912,7 @@ let endReported = Locked(Set<Int>())
 /// native state no off-Tim sample excuses (an unmapped membership, the assigned Space on Tim's display): the end
 /// reports the window unless it is placed, however it was sampled.
 @Sendable func unplacedAt(_ id: Int, _ look: WindowLook, seen: Double, via: String, why: String, reported: Bool, excusable: Bool = true) {
-    let countedOnTims = countingSince.value[id]?.onTims == true
+    let countedOnTims = countingSince.value[id]?.onTims == true || closedOnTims.value.contains(id)
     let off = excusable && firstSightings.value[id]?.onTims == false && !countedOnTims && (look.gone || !look.onTims)
     unresolved.update { (list: inout [Int: Unresolved]) -> Void in
         let known = list[id]
@@ -2951,10 +2954,14 @@ let endReported = Locked(Set<Int>())
     var open = unresolved.value
     let placed = windowSpaces.value
     let counted = countingSince.value.filter { $0.value.onTims && placed[$0.key] == nil }
+    let closed = closedOnTims.value
     var merged = Set<Int>()
     for id in counted.keys where open[id]?.offTims == true {
         open[id]?.offTims = false
         merged.insert(id)
+    }
+    for id in closed where open[id]?.offTims == true {
+        open[id]?.offTims = false
     }
     for id in unknown.keys where open[id] != nil && WindowLook(id).onTims {
         open[id]?.offTims = false  // on his screen, or SkyLight names no place for it
@@ -2963,7 +2970,7 @@ let endReported = Locked(Set<Int>())
         problem("window \(id) of the tree could not be located at the guard's end: \(why)")
     }
     for (id, u) in open.sorted(by: { $0.key < $1.key }) where unknown[id] == nil && !u.offTims {
-        let afterOffTim = merged.contains(id) || firstSightings.value[id]?.onTims == false
+        let afterOffTim = merged.contains(id) || closed.contains(id)
         let evidence = afterOffTim ? "a sample counted it on Tim's screen after reads that showed it off" : "nothing showed it off Tim's screen"
         problem("window \(id) of the tree (reported by \(u.via)) was never placed before it went: \(u.why); \(evidence), so its time there cannot be bounded")
     }
@@ -3027,6 +3034,7 @@ let endReported = Locked(Set<Int>())
     }
     windowOnTims.update { $0[id] = false }
     let resolved = unresolved.update { $0.removeValue(forKey: id) }
+    _ = closedOnTims.update { $0.remove(id) }
     let exposed = before == nil && stretch.onTims ? queried - stretch.at : nil
     var placed = firstFields(id).merging(look.fields) { $1 }
     placed.merge(["event": "placed-native", "window": id, "pid": Int(pid), "app": app, "space": space,
@@ -3085,6 +3093,7 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
             windowsUnknown.update { $0[id] = nil }
             unresolved.update { $0[id] = nil }
             countingSince.update { $0[id] = nil }  // not the tree's: no evidence of it (review 3)
+            _ = closedOnTims.update { $0.remove(id) }
             return
         }
         let look = WindowLook(id)
@@ -3150,6 +3159,7 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
         let leftUnseen = before == nil && !onTims && stretch.onTims ? queried - start : nil
         if let leftUnseen { recordExposure(leftUnseen) }
         let resolved = unresolved.update { $0.removeValue(forKey: id) }
+        _ = closedOnTims.update { $0.remove(id) }
         if let resolved, resolved.reported {
             var located: [String: Any] = firstFields(id).merging([
                 "event": "window-located", "window": id, "pid": Int(pid), "app": app, "space": from, "via": via,
@@ -3366,6 +3376,7 @@ func sweep(_ via: String, final: Bool = false) {
                 windowsUnknown.update { $0[id] = nil }
                 unresolved.update { $0[id] = nil }
                 countingSince.update { $0[id] = nil }
+                _ = closedOnTims.update { $0.remove(id) }
             } else if let latched = omittedSample(id, look, at: sampled, seen: seen, via: via, final: final) {
                 omitted.append((id: id, seen: unresolved.value[id]?.seen ?? seen, via: via, latched: latched))
             }
@@ -3375,6 +3386,7 @@ func sweep(_ via: String, final: Bool = false) {
                 windowsUnknown.update { $0[w.id] = nil }
                 unresolved.update { $0[w.id] = nil }
                 countingSince.update { $0[w.id] = nil }
+                _ = closedOnTims.update { $0.remove(w.id) }
                 continue
             }
             sighted(w.id, at: seen, via: via)

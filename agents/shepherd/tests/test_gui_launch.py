@@ -3878,41 +3878,64 @@ class Guard(unittest.TestCase):
         self.assertEqual([p for p in result['problems'] if p.startswith('window %d ' % wid)], [])
         self.assertEqual(result['maxOnTimScreenMs'], exempt['onTimSpaceMs'])
 
-    def test_a_closed_counting_stretch_preserves_older_unplaced_evidence_after_an_exempt_sample(self):
-        wid, blocker = 89348, 89349
-        places = {wid: {'spaces': [110], 'display': 'D2'}, blocker: {'spaces': [106], 'display': 'D1'}}
-        process, lines, root, easl = self.late_rig(onscreen=True, skylight=places)
-        blocking_row = [blocker, easl, 800, 600, False]
-        put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False], blocking_row]))
-        self.send(process, 'window %d' % wid)
-        time.sleep(0.3)
-        put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False], blocking_row]))
-        lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid, 10)
-        put(root / ('window-%d.json' % blocker), json.dumps({'id': blocker, 'pid': easl, 'app': 'easl', 'space': 6}))
-        put(root / ('window-%d-delay' % blocker), '1.5')
-        self.send(process, 'window %d' % blocker)
-        deadline = time.monotonic() + 5
-        while not (root / ('window-%d-asked' % blocker)).exists():
-            self.assertLess(time.monotonic(), deadline, 'the blocking park never asked yabai')
-            time.sleep(0.01)
-        places[wid] = {'spaces': [104], 'display': 'D1'}
-        put(root / 'skylight-windows.json', json.dumps(places))
-        put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False], blocking_row]))
-        self.send(process, 'poll')
-        lines.until(lambda r: r.get('event') == 'rig-polled', 5)
-        time.sleep(0.35)
-        put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False], blocking_row]))
-        exempt = lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid and
-                             'onTimSpaceMs' in r, 10)[-1]
-        self.assertGreaterEqual(exempt['onTimSpaceMs'], 300)
-        put(root / ('window-%d-delay' % blocker), '0')
-        put(root / 'onscreen.json', json.dumps([blocking_row]))
-        del places[wid]
-        put(root / 'skylight-windows.json', json.dumps(places))
-        _, result = self.end_rig(process, lines, root)
-        self.assertTrue(any(p.startswith('window %d of the tree (reported by ax-created) was never placed before it went' % wid)
-                            and "a sample counted it on Tim's screen" in p for p in result['problems']), result['problems'])
-        self.assertGreaterEqual(result['maxOnTimScreenMs'], exempt['onTimSpaceMs'])
+    def test_closed_counting_stretches_preserve_unplaced_evidence_until_a_placement(self):
+        for initial in ('unplaced', 'exempt', 'placed-after-exempt'):
+            with self.subTest(initial=initial):
+                wid, blocker = 89348, 89349
+                first_space = 110 if initial == 'unplaced' else 104
+                places = {wid: {'spaces': [first_space], 'display': 'D2' if first_space == 110 else 'D1'},
+                          blocker: {'spaces': [106], 'display': 'D1'}}
+                process, lines, root, easl = self.late_rig(onscreen=True, skylight=places)
+                blocking_row = [blocker, easl, 800, 600, False]
+                bounds = 800 if initial == 'unplaced' else 1
+                put(root / 'onscreen.json', json.dumps([[wid, easl, bounds, bounds, False], blocking_row]))
+                self.send(process, 'window %d' % wid)
+                if initial == 'unplaced':
+                    time.sleep(0.3)
+                    put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False], blocking_row]))
+                lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid, 10)
+                put(root / ('window-%d.json' % blocker), json.dumps({'id': blocker, 'pid': easl, 'app': 'easl', 'space': 6}))
+                put(root / ('window-%d-delay' % blocker), '1.5')
+                self.send(process, 'window %d' % blocker)
+                deadline = time.monotonic() + 5
+                while not (root / ('window-%d-asked' % blocker)).exists():
+                    self.assertLess(time.monotonic(), deadline, 'the blocking park never asked yabai')
+                    time.sleep(0.01)
+                places[wid] = {'spaces': [104], 'display': 'D1'}
+                put(root / 'skylight-windows.json', json.dumps(places))
+                put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False], blocking_row]))
+                self.send(process, 'poll')
+                lines.until(lambda r: r.get('event') == 'rig-polled', 5)
+                time.sleep(0.35)
+                put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False], blocking_row]))
+                exempt = lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid and
+                                     'onTimSpaceMs' in r, 10)[-1]
+                self.assertEqual(exempt['via'], 'window-counted', exempt)
+                self.assertGreaterEqual(exempt['onTimSpaceMs'], 300)
+                put(root / ('window-%d-delay' % blocker), '0')
+                if initial == 'placed-after-exempt':
+                    places[wid] = {'spaces': [106], 'display': 'D1'}
+                    put(root / 'skylight-windows.json', json.dumps(places))
+                    put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False], blocking_row]))
+                    self.send(process, 'poll')
+                    lines.until(lambda r: r.get('event') == 'placed-native' and r.get('window') == wid, 10)
+                if initial != 'unplaced':
+                    places[wid] = {'spaces': [110], 'display': 'D2'}
+                    put(root / 'skylight-windows.json', json.dumps(places))
+                    put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False], blocking_row]))
+                    self.send(process, 'poll', 'window %d' % wid)
+                    lines.until(lambda r: r.get('event') == 'window-unknown' and r.get('window') == wid, 10)
+                put(root / 'onscreen.json', json.dumps([blocking_row]))
+                del places[wid]
+                put(root / 'skylight-windows.json', json.dumps(places))
+                _, result = self.end_rig(process, lines, root)
+                mine = [p for p in result['problems'] if p.startswith('window %d ' % wid)]
+                if initial == 'placed-after-exempt':
+                    self.assertEqual(result['problems'], [])
+                else:
+                    self.assertTrue(any('was never placed before it went' in p and
+                                        "a sample counted it on Tim's screen" in p for p in mine), result['problems'])
+                self.assertGreaterEqual(result['maxOnTimScreenMs'], exempt['onTimSpaceMs'])
 
     def test_a_counted_stretch_merges_into_an_older_off_tim_unresolved_entry_when_the_end_skips_its_park(self):
         # Review 4 (both axes): yabai never places the window. Its first reads find it on CanvasTest (off Tim's screen),

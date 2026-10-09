@@ -142,7 +142,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   orders in or grows past 2x2 px from the first sample that finds it counting. That counted stretch stays evidence
   until judged: closed unplaced, it is never-placed evidence (also when the guard's end skipped its park, and also
   when earlier reads had shown it off his screen); exempt again before any placement, the whole time from
-  that sample to the exempt one is recorded as onTimSpaceMs, without a duration limit. Both exemptions require
+  that sample to the exempt one is recorded as onTimSpaceMs, without a duration limit. Until placed, that stretch
+  is also never-placed evidence if the window is ever unresolved. Both exemptions require
   readable membership and bounds and WindowServer presence; an incomplete sample counts, never exempts.
   A window yabai will not place or name the owner of, a window list
   that fails, and a tree window still off the target after its move are recorded as they happen; the tree's
@@ -201,7 +202,7 @@ and/or guards one that something else starts, then checks that nothing took it.
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
-space-unrestorable, window, window-unknown, window-located, window-native-located, placed-native, window-exempt,
+space-unrestorable, window, window-unknown, window-located, window-exposure, window-native-located, placed-native, window-exempt,
 window-list-failed, window-off-target, final-window-list, display-check, yabai-query, yabai-timeout,
 problem, fault, guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
 previousFront (the app frontmost before it: in the tree or not, for how long, quit or hidden; whether it just closed
