@@ -34,7 +34,7 @@ Per repository:
 
 ## 4. Restart affected leads
 
-For each lead whose behavior the change affects (`easl agent.list`): `easl agent.restart --target <tile> --mode resume`. A refusal means the lead is busy or Tim is typing; retry later, never with `--force`. Then send that lead one message saying what changed: `easl tell <name>@<board> "<what changed and why>"`. Beyond restart announcements, message leads only on Tim's instruction.
+For each lead whose behavior the change affects (`easl agent.list`): `easl agent.restart --target <tile> --mode resume`. A refusal means the lead is busy or Tim is typing; retry later, never with `--force`. Then send that lead one message saying what changed: `easl tell <address> "<what changed and why>"`, with the lead's `address` from `easl agent.list`. Beyond restart announcements, message leads only on Tim's instruction.
 
 ## 5. Close
 

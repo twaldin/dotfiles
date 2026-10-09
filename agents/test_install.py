@@ -58,9 +58,14 @@ class SharedInstall(unittest.TestCase):
                     self.assertNotIn(false_claim, body, path)
             babysit = (pstack / 'poteto-mode/playbooks/babysit.md').read_text()
             for rule in ['~/agent-system/bin/watch-pr <url> --until event --state', 'watch-pr --ack',
-                         '`async: true`, `timeout: 0`', 'command -v lindyctl', 'lindyctl pr wait',
-                         'until the PR merges or closes']:
+                         '`async: true`, `timeout: 0`', 'lindyctl pr wait --help', 'until the PR merges or closes',
+                         'report merge-ready with its head SHA and keep the loop running']:
                 self.assertIn(rule, babysit)
+            autopilot = (pstack / 'poteto-mode/playbooks/autopilot-full.md').read_text()
+            self.assertIn('babysit reports merge-ready; its watch loop keeps running', autopilot)
+            for relative in ['poteto-mode/SKILL.md', 'poteto-mode/playbooks/autonomous-run.md',
+                             'poteto-mode/playbooks/babysit.md', 'poteto-mode/references/bugbot-triage.md']:
+                self.assertIn("to Tim's outer loop", (pstack / relative).read_text(), relative)
             opening = (pstack / 'poteto-mode/playbooks/opening-a-pr.md').read_text()
             self.assertIn('One PR per effort, based on trunk.', opening)
             self.assertIn('Opening a PR starts its watch loop in the opening session', opening)

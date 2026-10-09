@@ -5,7 +5,7 @@ description: Starting a project repository and graduating it to PRs. Use when cr
 
 ## Day one
 
-1. `git init`, commit the first files, then create the private remote and push: `gh repo create <name> --private --source . --push`.
+1. `git init -b main`, commit the first files, then create the private remote and push: `gh repo create <name> --private --source . --push`.
 2. Open the project's board (`easl board.open --root <dir>`; it prints the board id) and ask Tim for its goal note: `easl ask "Goal note for <name>: outcome, output metric, current milestone, non-goals, where to look?" --board <board> --wait` as a background bash job (`async: true`, `timeout: 0`). With no options, his answer is a note. Create the note from his words verbatim: `easl object.upsert --board <board> --key goal --type note --json '{"props":{"title":"goal","markdown":"…"}}'`. From then on only Tim edits it.
 
 ## Push to main
