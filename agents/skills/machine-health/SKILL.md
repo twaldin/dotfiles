@@ -16,7 +16,7 @@ Pick the probe for the symptom and run it once. `machine-watch` schedules nothin
 
 - `colorsync-k [periods=12]`: K, the number of WindowServer ColorSync chains, from display-info requests over about 60 s; each chain costs one synchronous request and one ~57 ms frame hitch every ~5.03 s. Read-only.
 - `cs-measure [secs=60]`: request rate, K, displays per request, request service-time median/p90/max, and ColorSync and WindowServer CPU over 5 s. Both tools read the log through `sudo -n`; without it a zero rate is a missing measurement.
-- `logout-colorsync-test baseline`: read-only K, screens and the Agent-p2N identity. After Tim's logout and login, `logout-colorsync-test post --no-send` writes the readout locally before any agent touches a screen; without `--no-send` it messages sky-lead and bench-judge.
+- `logout-colorsync-test baseline`: read-only K, screens and the Agent-p2N identity. After Tim's logout and login, `logout-colorsync-test post` writes the readout to `~/.local/state/machine-shepherd/k-readout.txt` before any agent touches a screen; read it there.
 - Steps `a`/`b`/`c` change Tim's displays; run them only when Tim asks, and run `logout-colorsync-test` with no arguments for the procedure.
 
 Report the numbers that matched the symptom (CPU idle, free, compressed and swap memory, owner and pid, event or GPU rate, ColorSync K and timing). Reclaim only processes you can prove are yours, and queue the next heavy run through `shared-machine`.

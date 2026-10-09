@@ -19,7 +19,7 @@ If none holds, keep research or discussion in the effort.
 
 ## Workspaces
 
-- **Personal (`twaldin`, TWA team).** A ticket is a record. The effort or person working on it owns it: link the PR and move the status yourself. Nothing picks tickets up automatically; work starts when Tim or the CoS starts an effort.
+- **Personal (`twaldin`, TWA team).** A ticket is a record. The effort or person working on it owns it: link the PR and move the status yourself. Nothing picks tickets up automatically; work starts when Tim or a board lead starts an effort.
 - **Lindy (work).** Linear is team truth and the work seat on twaldin-work creates lanes. Follow `~/work-agent-system/SEAT.md` on twaldin-work.
 
 ## Writing a ticket

@@ -16,7 +16,9 @@
     "frontend": "skills/frontend",
     "writing": "skills/writing",
     "using-the-work-system": "skills/using-the-work-system",
-    "board-cos": "skills/board-cos",
+    "board-lead": "skills/board-lead",
+    "new-project": "skills/new-project",
+    "outer-loop": "skills/outer-loop",
     "shared-machine": "skills/shared-machine",
     "machine-health": "skills/machine-health",
     "poteto-mode": "vendor/pstack/skills/poteto-mode",
@@ -95,6 +97,7 @@
     "gen-objectid",
     "setup-pre-commit",
     "compaction",
-    "spawn-workflow"
+    "spawn-workflow",
+    "board-cos"
   ]
 }
