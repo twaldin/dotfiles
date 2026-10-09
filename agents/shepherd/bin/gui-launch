@@ -101,9 +101,11 @@ and/or guards one that something else starts, then checks that nothing took it.
   screen every 100 ms: macOS can show an existing window again, a native tab selected again, on the Space Tim is
   viewing with no create event and no Space change). A tree window found on Tim's screen (Spaces 1-4, or the Space
   his display shows, unless that is the target) after the guard saw it elsewhere, or at the guard's end, fails the
-  check, created or not. A new window's first moments there, where macOS opens it, are a move whose onTimSpaceMs
-  counts from its first sighting: past 250 ms that fails the check regardless of the move's destination or caller
-  placement. At that sighting the guard reads the window's Spaces and display from SkyLight (firstSpace, firstDisplay,
+  check, created or not. A new window's first exposure there, where macOS opens it, is recorded as onTimSpaceMs
+  from its first sighting until placement or a sample finds it elsewhere. Duration is an observation, not a problem.
+  window-exposure records a window found elsewhere before placement and conservative end bounds marked upperBound.
+  maxOnTimScreenMs is the largest recorded exposure or upper bound, or zero if none counted, null from an older guard.
+  At that sighting the guard reads the window's Spaces and display from SkyLight (firstSpace, firstDisplay,
   firstAt). Every membership in a Tim Space counts, even when yabai's one index is the target. Each sweep samples
   both listed and all known IDs, including omitted windows after their 3 s retries end, and judges an omitted
   window's sample before its own yabai query: back on his screen after a placement left it off, or there at the
@@ -125,8 +127,8 @@ and/or guards one that something else starts, then checks that nothing took it.
   owner/bounds and complete SkyLight memberships proving the window already on its assigned agent Space and on
   no Tim/Tim-visible Space, is real placement: placed-native (untracked by yabai), recorded in nativePlacements.
   No native move is made. A membership yabai's map cannot name, or Tim's visible assigned Space, is unplaced like
-  any other reason (retried, window-unknown, a problem at the end unless placed); timed-out queries and earlier
-  counted exposure fail closed too; native location alone excuses none of these.
+  any other reason (retried, window-unknown, a problem at the end unless placed); timed-out queries fail
+  closed; native location alone excuses none of these.
   A window yabai will not place
   is asked about every 50 ms for 3 s and moved once yabai lists it; then window-unknown until placed
   (window-located); one never placed fails the check unless SkyLight always showed it off Tim's screen (every
@@ -140,8 +142,9 @@ and/or guards one that something else starts, then checks that nothing took it.
   orders in or grows past 2x2 px from the first sample that finds it counting. That counted stretch stays evidence
   until judged: closed unplaced, it is never-placed evidence (also when the guard's end skipped its park, and also
   when earlier reads had shown it off his screen); exempt again before any placement, the whole time from
-  that sample to the exempt one counts as on his screen (past 250 ms, a problem). Both exemptions require readable
-  membership and bounds and WindowServer presence; an incomplete sample counts, never exempts.
+  that sample to the exempt one is recorded as onTimSpaceMs, without a duration limit. Until placed, that stretch
+  is also never-placed evidence if the window is ever unresolved. Both exemptions require
+  readable membership and bounds and WindowServer presence; an incomplete sample counts, never exempts.
   A window yabai will not place or name the owner of, a window list
   that fails, and a tree window still off the target after its move are recorded as they happen; the tree's
   windows the final sweep cannot locate are a problem, and so is a tree window still off the target after its move
@@ -199,8 +202,9 @@ and/or guards one that something else starts, then checks that nothing took it.
 stdout carries only JSON lines: `sudo` (the exact command that starts the guard), the guard's events (guard,
 launched or guarding, attached, dropped, activation, restore-call, reverted, owner-query-timeout, restore-target,
 restore-target-dropped, display-space, user-space, user-space-revoked, space-breach, space-unseen, space-restored,
-space-unrestorable, window, window-unknown, window-located, window-native-located, placed-native, window-exempt,
-window-list-failed, window-off-target, final-window-list, display-check, yabai-query, yabai-timeout,
+space-unrestorable, window, window-unknown, window-located, window-exposure, window-native-located,
+placed-native, window-exempt, window-list-failed, window-off-target, final-window-list, display-check,
+yabai-query, yabai-timeout,
 problem, fault, guard-end), then `check`; `error` before exit 2. Each activation and reverted event carries sinceInputMs and
 previousFront (the app frontmost before it: in the tree or not, for how long, quit or hidden; whether it just closed
 its last window is not known): diagnostics only. The launched program's own output
@@ -687,6 +691,7 @@ def main():
           'windowFaults': summary.get('windowFaults') or [], 'exemptWindows': summary.get('exemptWindows') or [],
           'yabaiQueries': summary.get('yabaiQueries') or [], 'yabaiQueryStats': summary.get('yabaiQueryStats') or {},
           'nativeWindows': summary.get('nativeWindows') or [], 'nativePlacements': summary.get('nativePlacements') or [],
+          'maxOnTimScreenMs': summary.get('maxOnTimScreenMs'),
           'placement': 'caller' if args.allow_caller_placement else 'target',
           'finalWindowList': summary.get('finalWindowList'), 'exemptionProbe': probe})
     if found:

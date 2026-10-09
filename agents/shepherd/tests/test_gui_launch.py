@@ -1049,7 +1049,7 @@ class GuiLaunch(unittest.TestCase):
         placements = [dict(native[0], event='placed-native', space=7, placement='placed-native (untracked by yabai)')]
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app),
                                      summary=summary(finalWindowList=retried, yabaiQueries=queries, yabaiQueryStats=query_stats,
-                                                     nativeWindows=native, nativePlacements=placements))
+                                                     nativeWindows=native, nativePlacements=placements, maxOnTimScreenMs=620.5))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         check = self.check_event(result)
         self.assertEqual(check['finalWindowList'], retried)
@@ -1057,6 +1057,7 @@ class GuiLaunch(unittest.TestCase):
         self.assertEqual(check['yabaiQueryStats'], query_stats)
         self.assertEqual(check['nativeWindows'], native)
         self.assertEqual(check['nativePlacements'], placements)
+        self.assertEqual(check['maxOnTimScreenMs'], 620.5)
         result = self.run_gui_launch('--space', '7', '--', '-a', str(self.app), summary=summary(finalWindowList=None))
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.check_event(result)['problems'], ["the guard recorded no final read of the tree's windows: they cannot be vouched for"])
@@ -3220,10 +3221,8 @@ class Guard(unittest.TestCase):
         _, result = self.end_rig(process, lines, root)
         self.assertEqual([p for p in result['problems'] if 'all-window list' in p], [found['message']])
 
-    def test_a_window_on_tims_space_that_native_proof_later_places_still_fails_for_its_exposure(self):
-        # P2-1(d): window 89460 is on Tim's Space 4 (SkyLight) for 0.6 s while yabai says it never tracked it, then SkyLight
-        # puts it on the assigned Space 6: placed-native, and the 0.6 s on his screen still fails the check (more than
-        # 250 ms). Green at the frozen head (a new control: the proof never excuses exposure already counted).
+    def test_a_window_on_tims_space_that_native_proof_later_places_records_exposure_without_a_problem(self):
+        # Native placement after 0.6 s on Tim's Space keeps that duration as an observation.
         wid = 89460
         process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
         put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False, 'easl']]))
@@ -3233,10 +3232,8 @@ class Guard(unittest.TestCase):
         placed = lines.until(lambda row: row.get('event') == 'placed-native' and row.get('window') == wid, 8)[-1]
         self.assertGreaterEqual(placed['onTimSpaceMs'], 500)
         _, result = self.end_rig(process, lines, root)
-        slow = [p for p in result['problems'] if p.startswith('window %d ' % wid)]
-        self.assertEqual(len(slow), 1, result['problems'])
-        self.assertRegex(slow[0], r"^window 89460 of the tree \(easl, pid %d\) was on Tim's screen for \d+\.\d ms before the guard "
-                                  r"placed it \(more than 250 ms\)$" % easl)
+        self.assertEqual(result['problems'], [])
+        self.assertGreaterEqual(result['maxOnTimScreenMs'], placed['onTimSpaceMs'])
         self.assertEqual([w['window'] for w in result['nativePlacements']], [wid])
 
     def test_an_id_query_that_never_answers_is_no_native_placement_though_skylight_shows_the_assigned_space(self):
@@ -3393,8 +3390,7 @@ class Guard(unittest.TestCase):
         return process, lines, root, easl.pid
 
     def test_a_window_yabai_lists_late_is_moved_once_listed_and_its_time_on_tims_space_counts_from_first_sight(self):
-        # GR2: asked about every 50 ms for 3 s, moved as soon as yabai lists it (1.4 s here); SkyLight's read at its first
-        # sighting puts it on Tim's Space 4, so its time there counts from then: more than 250 ms, a problem.
+        # SkyLight's first sighting starts the observation even when yabai lists the window 1.4 s later.
         process, lines, root, easl = self.late_rig(onscreen=True, skylight={89243: {'spaces': [104], 'display': 'D1'}})
         put(root / 'onscreen.json', json.dumps([[89243, easl, 800, 600, False]]))
         self.send(process, 'window 89243')
@@ -3408,10 +3404,34 @@ class Guard(unittest.TestCase):
                           'firstDisplay': 'D1', 'firstOnTimsScreen': True})
         self.assertGreaterEqual(moved['onTimSpaceMs'], 1300)
         _, result = self.end_rig(process, lines, root)
-        slow = [p for p in result['problems'] if p.startswith('window 89243 ')]
-        self.assertEqual(len(slow), 1, result['problems'])
-        self.assertRegex(slow[0], r"^window 89243 of the tree \(easl, pid %d\) was on Tim's screen for \d+\.\d ms before the guard "
-                                  r"placed it \(more than 250 ms\)$" % easl)
+        self.assertEqual(result['problems'], [])
+        self.assertGreaterEqual(result['maxOnTimScreenMs'], moved['onTimSpaceMs'])
+
+    def test_first_sighting_exposure_is_recorded_when_the_first_yabai_answer_finds_it_elsewhere(self):
+        for destination in (6, 10):
+            with self.subTest(destination=destination):
+                wid = 89244
+                process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
+                put(root / 'onscreen.json', json.dumps([[wid, easl, 800, 600, False]]))
+                put(root / ('window-%d.json' % wid), json.dumps({'id': wid, 'pid': easl, 'app': 'easl', 'space': destination}))
+                put(root / ('window-%d-delay' % wid), '0.6')
+                self.send(process, 'window %d' % wid)
+                deadline = time.monotonic() + 5
+                while not (root / ('window-%d-asked' % wid)).exists():
+                    self.assertLess(time.monotonic(), deadline, 'the first park never asked yabai')
+                    time.sleep(0.01)
+                put(root / 'skylight-windows.json', json.dumps({str(wid): {'spaces': [100 + destination],
+                                                                         'display': 'D1' if destination == 6 else 'D2'}}))
+                exposure = lines.until(lambda r: r.get('event') == 'window-exposure' and r.get('window') == wid, 10)[-1]
+                self.assertEqual((exposure['firstSpace'], exposure['firstOnTimsScreen'], exposure['space']), (4, True, destination))
+                self.assertGreaterEqual(exposure['onTimSpaceMs'], 500)
+                put(root / ('window-%d-delay' % wid), '0')
+                if destination != 6:
+                    moved = lines.until(lambda r: r.get('event') == 'window' and r.get('id') == wid, 10)[-1]
+                    self.assertEqual((moved['from'], moved['to'], moved['moved']), (10, 6, True))
+                _, result = self.end_rig(process, lines, root)
+                self.assertEqual(result['problems'], [])
+                self.assertEqual(result['maxOnTimScreenMs'], exposure['onTimSpaceMs'])
 
     def test_a_window_yabai_never_lists_that_skylight_shows_on_display_2_is_no_problem(self):
         # GR2: SkyLight proves where it was: Space 10, on display D2, never on Tim's screen.
@@ -3543,9 +3563,8 @@ class Guard(unittest.TestCase):
         self.assertIn("window 89270 of the tree (easl, pid %d) was on Tim's Space 2 at the guard's end" % easl, result['problems'])
 
     def test_a_window_whose_bounds_or_spaces_cannot_be_read_counts(self):
-        # What cannot be read counts as on Tim's screen: window 89275 is on screen with bounds WindowServer cannot give
-        # (and, the second time, no SkyLight read of its Spaces); yabai lists it on Tim's Space 4 0.5 s after
-        # Accessibility reported it: its time there counts from that sighting, a problem.
+        # Unreadable bounds or membership cannot prove the window left Tim's screen after its move.
+        # Exposure is recorded from its first sighting.
         for skylight in ({89275: {'spaces': [104], 'display': 'D1'}}, {}):
             with self.subTest(skylight=skylight):
                 process, lines, root, easl = self.late_rig(onscreen=True, skylight=skylight)
@@ -3557,8 +3576,9 @@ class Guard(unittest.TestCase):
                 self.assertNotIn('window-exempt', [e.get('event') for e in seen])
                 self.assertGreaterEqual(seen[-1]['onTimSpaceMs'], 450)
                 _, result = self.end_rig(process, lines, root)
-                self.assertTrue(any(p.startswith("window 89275 of the tree (easl, pid %d) was on Tim's screen for " % easl)
-                                    for p in result['problems']), result['problems'])
+                self.assertTrue(any(p.startswith("window 89275 of the tree (easl, pid %d) is still on " % easl) and
+                                    "after the guard's move" in p for p in result['problems']), result['problems'])
+                self.assertGreaterEqual(result['maxOnTimScreenMs'], seen[-1]['onTimSpaceMs'])
 
     def test_incomplete_samples_never_exempt_tiny_or_ordered_out_windows(self):
         # Review 1: tiny bounds do not excuse unreadable membership, nor does an empty Space list excuse unreadable bounds.
@@ -3593,11 +3613,11 @@ class Guard(unittest.TestCase):
         self.assertEqual((moved['firstExempt'], moved['firstOnTimsScreen']), ('2x2 px or less', False))
         self.assertGreater(moved['onTimSpaceMs'], 800, moved)
         _, result = self.end_rig(process, lines, root)
-        self.assertTrue(any(p.startswith('window %d ' % wid) and 'more than 250 ms' in p for p in result['problems']),
-                        result['problems'])
+        self.assertEqual(result['problems'], [])
+        self.assertGreaterEqual(result['maxOnTimScreenMs'], moved['onTimSpaceMs'])
 
-    def test_slow_exposure_is_a_problem_even_when_caller_placement_lands_on_another_off_tim_space(self):
-        # Review 1: a move to Space 7 instead lands on CanvasTest's Space 10, but only after >250 ms on Tim's Space.
+    def test_exposure_is_an_observation_when_caller_placement_lands_on_another_off_tim_space(self):
+        # Caller placement on another off-Tim Space records the 0.4 s exposure.
         wid = 89320
         probe, _ = self.probe(self.java)
         process, lines, root = self.rig(onscreen=True, skylight={wid: {'spaces': [102], 'display': 'D1'}},
@@ -3616,8 +3636,8 @@ class Guard(unittest.TestCase):
         offs = [r for r in result['windowFaults'] if r.get('event') == 'window-off-target' and r['window'] == wid]
         self.assertTrue(offs, result)
         self.assertTrue(all(r['excused'] == 'caller placement' for r in offs), offs)
-        self.assertTrue(any(p.startswith('window %d ' % wid) and 'more than 250 ms' in p for p in result['problems']),
-                        result['problems'])
+        self.assertEqual(result['problems'], [])
+        self.assertGreaterEqual(result['maxOnTimScreenMs'], moved['onTimSpaceMs'])
 
     def test_every_skylight_membership_counts_even_when_yabai_reports_the_target_or_caller_space(self):
         # Review 1: >2x2 sticky/all-Spaces window in both Space 7 (or caller Space 6) and Tim's Space 2.
@@ -3755,9 +3775,15 @@ class Guard(unittest.TestCase):
                 time.sleep(1.2)  # the first reply, then the window-counted park
                 _, result = self.end_rig(process, lines, root)
                 mine = [p for p in result['problems'] if p.startswith('window %d ' % wid)]
-                self.assertTrue(mine, result['problems'])
                 if ending == 'shrinks':
-                    self.assertTrue(any('more than 250 ms' in p for p in mine), mine)
+                    self.assertEqual(result['problems'], [])
+                    exposures = [r['onTimSpaceMs'] for r in result['exemptWindows']
+                                 if r['window'] == wid and 'onTimSpaceMs' in r]
+                    self.assertEqual(len(exposures), 1, result['exemptWindows'])
+                    self.assertGreaterEqual(exposures[0], 350)
+                    self.assertGreaterEqual(result['maxOnTimScreenMs'], exposures[0])
+                else:
+                    self.assertTrue(any('was never placed before it went' in p for p in mine), result['problems'])
 
     def test_a_window_on_screen_before_its_owner_joins_the_tree_is_sighted_once_it_joins(self):
         # Review 2 STANDARDS: WindowServer shows the window while its owner is outside the tree (as before the scan or a
@@ -3801,11 +3827,15 @@ class Guard(unittest.TestCase):
         self.send(process, 'end')
         time.sleep(0.3)  # the end has begun: nothing queued runs now
         (root / 'windows-hold').unlink()
-        lines.until(lambda row: row.get('event') == 'guard-end', 20)
+        seen = lines.until(lambda row: row.get('event') == 'guard-end', 20)
         self.assertEqual(process.wait(10), 0)
         result = json.loads((root / 'summary.json').read_text())
-        self.assertTrue(any(p.startswith('window %d of the tree counted on Tim\'s screen for up to ' % wid) and 'more than 250 ms' in p
-                            for p in result['problems']), result['problems'])
+        self.assertIn("window %d of the tree was never placed, and no sample judged it before the guard's end" % wid,
+                      result['problems'])
+        self.assertGreaterEqual(result['maxOnTimScreenMs'], 450)
+        exposure = next(r for r in seen if r.get('event') == 'window-exposure' and r.get('window') == wid)
+        self.assertTrue(exposure['upperBound'])
+        self.assertEqual(result['maxOnTimScreenMs'], exposure['onTimSpaceMs'])
 
     def test_a_window_on_screen_whose_owner_joins_the_tree_as_the_guard_ends_is_judged_at_the_end(self):
         # (R2 partial) WindowServer shows the window while its owner is outside the tree; the owner joins in the
@@ -3824,11 +3854,8 @@ class Guard(unittest.TestCase):
                             for p in result['problems']), result['problems'])
 
     def test_a_counted_stretch_ends_at_the_sweeps_exempt_sample_not_at_its_slow_query(self):
-        # (P2) the 1x1 helper on Tim's Space 4 grows while a sweep's window list waits; a poll finds it counting; it is
-        # 1x1 again before the list answers. The sweep's own sample, before its 1.5 s query about the helper, ends that
-        # stretch, well under 250 ms: no problem. Review 4: the rig's `poll` acknowledges the counting sample on every
-        # guard this runs against (the failing-first baseline gets the same rig-only command), and the stimulus is
-        # checked to stay under 250 ms before the verdict is compared.
+        # A helper grows while a sweep waits, then shrinks before the list answers.
+        # Its exposure ends at the exempt sample, before the helper's 1.5 s query.
         wid = 89346
         process, lines, root, easl = self.late_rig(onscreen=True, skylight={wid: {'spaces': [104], 'display': 'D1'}})
         put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
@@ -3837,20 +3864,78 @@ class Guard(unittest.TestCase):
         time.sleep(0.2)  # its first park found it exempt too
         self.hold_a_sweep(process, root)
         put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False]]))
-        grown = time.monotonic()  # no sample can count it before this
         self.send(process, 'poll')
         lines.until(lambda r: r.get('event') == 'rig-polled', 5)
         put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False]]))
         put(root / 'window-delay', '1.5')
         (root / 'windows-hold').unlink()
-        released = time.monotonic()  # the sweep's next native sample, exempt, follows the list it releases at once
-        self.assertLess(released - grown, 0.15, 'the stimulus itself would be over 250 ms: no valid control')
         exempt = lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid, 10)[-1]
         self.assertEqual(exempt['final'], False)
+        self.assertLess(exempt['onTimSpaceMs'], 500, exempt)
         time.sleep(1.8)  # the sweep's query about the helper answers
         put(root / 'window-delay', '0')
         _, result = self.end_rig(process, lines, root)
         self.assertEqual([p for p in result['problems'] if p.startswith('window %d ' % wid)], [])
+        self.assertEqual(result['maxOnTimScreenMs'], exempt['onTimSpaceMs'])
+
+    def test_closed_counting_stretches_preserve_unplaced_evidence_until_a_placement(self):
+        for initial in ('unplaced', 'exempt', 'placed-after-exempt'):
+            with self.subTest(initial=initial):
+                wid, blocker = 89348, 89349
+                first_space = 110 if initial == 'unplaced' else 104
+                places = {wid: {'spaces': [first_space], 'display': 'D2' if first_space == 110 else 'D1'},
+                          blocker: {'spaces': [106], 'display': 'D1'}}
+                process, lines, root, easl = self.late_rig(onscreen=True, skylight=places)
+                blocking_row = [blocker, easl, 800, 600, False]
+                bounds = 800 if initial == 'unplaced' else 1
+                put(root / 'onscreen.json', json.dumps([[wid, easl, bounds, bounds, False], blocking_row]))
+                self.send(process, 'window %d' % wid)
+                if initial == 'unplaced':
+                    time.sleep(0.3)
+                    put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False], blocking_row]))
+                lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid, 10)
+                put(root / ('window-%d.json' % blocker), json.dumps({'id': blocker, 'pid': easl, 'app': 'easl', 'space': 6}))
+                put(root / ('window-%d-delay' % blocker), '1.5')
+                self.send(process, 'window %d' % blocker)
+                deadline = time.monotonic() + 5
+                while not (root / ('window-%d-asked' % blocker)).exists():
+                    self.assertLess(time.monotonic(), deadline, 'the blocking park never asked yabai')
+                    time.sleep(0.01)
+                places[wid] = {'spaces': [104], 'display': 'D1'}
+                put(root / 'skylight-windows.json', json.dumps(places))
+                put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False], blocking_row]))
+                self.send(process, 'poll')
+                lines.until(lambda r: r.get('event') == 'rig-polled', 5)
+                time.sleep(0.35)
+                put(root / 'onscreen.json', json.dumps([[wid, easl, 1, 1, False], blocking_row]))
+                exempt = lines.until(lambda r: r.get('event') == 'window-exempt' and r.get('window') == wid and
+                                     'onTimSpaceMs' in r, 10)[-1]
+                self.assertEqual(exempt['via'], 'window-counted', exempt)
+                self.assertGreaterEqual(exempt['onTimSpaceMs'], 300)
+                put(root / ('window-%d-delay' % blocker), '0')
+                if initial == 'placed-after-exempt':
+                    places[wid] = {'spaces': [106], 'display': 'D1'}
+                    put(root / 'skylight-windows.json', json.dumps(places))
+                    put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False], blocking_row]))
+                    self.send(process, 'poll')
+                    lines.until(lambda r: r.get('event') == 'placed-native' and r.get('window') == wid, 10)
+                if initial != 'unplaced':
+                    places[wid] = {'spaces': [110], 'display': 'D2'}
+                    put(root / 'skylight-windows.json', json.dumps(places))
+                    put(root / 'onscreen.json', json.dumps([[wid, easl, 500, 500, False], blocking_row]))
+                    self.send(process, 'poll', 'window %d' % wid)
+                    lines.until(lambda r: r.get('event') == 'window-unknown' and r.get('window') == wid, 10)
+                put(root / 'onscreen.json', json.dumps([blocking_row]))
+                del places[wid]
+                put(root / 'skylight-windows.json', json.dumps(places))
+                _, result = self.end_rig(process, lines, root)
+                mine = [p for p in result['problems'] if p.startswith('window %d ' % wid)]
+                if initial == 'placed-after-exempt':
+                    self.assertEqual(result['problems'], [])
+                else:
+                    self.assertTrue(any('was never placed before it went' in p and
+                                        "a sample counted it on Tim's screen" in p for p in mine), result['problems'])
+                self.assertGreaterEqual(result['maxOnTimScreenMs'], exempt['onTimSpaceMs'])
 
     def test_a_counted_stretch_merges_into_an_older_off_tim_unresolved_entry_when_the_end_skips_its_park(self):
         # Review 4 (both axes): yabai never places the window. Its first reads find it on CanvasTest (off Tim's screen),
