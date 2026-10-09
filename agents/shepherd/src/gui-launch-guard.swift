@@ -119,8 +119,9 @@
 //     Any of a window's SkyLight memberships in Tim's Spaces counts, even when yabai reports the target. A window
 //     found on his screen after an off-Tim sample, or there at the final sweep, is a
 //     problem, created or not. A new window's first exposure on Tim's screen is recorded as onTimSpaceMs from its
-//     first sighting to its placement or the sample that finds it elsewhere. Transient exposure is an observation,
-//     not a problem. maxOnTimScreenMs summarizes the longest observed stretch, or zero if none counted.
+//     first sighting to its placement or the sample that finds it elsewhere. Duration is an observation, not a problem.
+//     maxOnTimScreenMs is the largest recorded exposure or conservative upper bound, or zero if none counted.
+//     window-exposure records a window found elsewhere before placement and end bounds marked upperBound.
 //     At first sight each tree window's Spaces and display are read from SkyLight directly, no yabai
 //     (firstSpace, firstDisplay, firstAt on its records). A read of the windows on screen that fails is a problem.
 //     A window yabai will not place (no answer, or one
@@ -144,7 +145,7 @@
 //     placed-native (untracked by yabai), recorded in nativePlacements, with no move and no yabai row. A membership
 //     yabai's map cannot name, or Tim's visible assigned Space, is unplaced like any other reason (asked again every
 //     50 ms for 3 s, then window-unknown) and fails closed at the end if nothing places it, whatever else excuses a
-//     window; query timeouts still fail closed; no native move is made.
+//     window; query timeouts fail closed; no native move is made.
 //     Helper windows (GR2, bench's ruling, GR1 addendum 4 note 3; every easl launch has a 1×1 window on screen for
 //     ~1 s that yabai never lists, and 500×500 ones ordered out): "on Tim's screen" means ordered in on one of his
 //     Spaces (SkyLight) with WindowServer bounds larger than 2×2 px. Each park samples the window so, directly, no
@@ -162,9 +163,8 @@
 //     evidence (the sample showed it on his screen); if a sample finds it exempt again first, it counts as on his
 //     screen for all the time from the counting sample to that exempt one, recorded as onTimSpaceMs. A sweep's
 //     sample of a window yabai's list omits ends it at that sample, before the window's own query.
-//     A stretch no sample judged by the end counts until the end. Its window was never placed, which remains a
-//     problem regardless of duration. An unresolved entry is merged with it first, so earlier off-Tim reads no
-//     longer excuse that never-placed window.
+//     A stretch no sample judged by the end counts until the end. Its window was never placed, a problem at any
+//     duration. An unresolved entry is merged with it first, so earlier off-Tim reads do not excuse it.
 //     A final exemption is not permanent: after this guard exits, the wrapper's fresh window list is checked against
 //     fresh WindowServer/SkyLight samples (--window-look, read-only, no activation or AppKit loop). A grown/ordered-in
 //     window is judged by all its current memberships; any unreadable exemption proof fails the check.
@@ -2851,8 +2851,7 @@ let endReported = Locked(Set<Int>())
 /// A sample (`look`, taken at `sampled`) found tree window `id` exempt (`reason`): it is recorded (window-exempt, at
 /// the first sample of each exempt stretch and at the final sweep), never moved, never a problem, and not unknown;
 /// it counts again only from a sample that finds it so. `found`: yabai's answer about it (nil: none, `why`). The
-/// stretch it counted in until now is recorded as onTimSpaceMs if no placement recorded it. Its duration is an
-/// observation, not a problem.
+/// stretch it counted in on Tim's screen, if no placement ended it, is recorded as onTimSpaceMs.
 @Sendable func exempted(_ id: Int, _ look: WindowLook, at sampled: Double, reason: String, via: String, found: [String: Any]?,
                         why: String?, final: Bool) {
     let fresh = exemptNow.update { (now: inout [Int: Double]) -> Bool in
@@ -2861,7 +2860,10 @@ let endReported = Locked(Set<Int>())
     }
     let stretch = countingSince.update { $0.removeValue(forKey: id) }
     let exposed = stretch.flatMap { $0.onTims && windowSpaces.value[id] == nil ? sampled - $0.at : nil }
-    if let exposed { _ = exposureMs(exposed) }
+    if let exposed {
+        recordExposure(exposed)
+        unresolved.update { $0[id]?.offTims = false }
+    }
     windowsUnknown.update { $0[id] = nil }
     guard fresh || final else { return }
     var record = look.fields
@@ -2943,7 +2945,7 @@ let endReported = Locked(Set<Int>())
 /// At the guard's end (after the final sweep), each tree window still unknown, or unresolved and gone, is a problem
 /// unless every read of it showed it off Tim's screen. A counting stretch with no placement or exempt sample is
 /// never-placed evidence too, even when the end skipped its queued park. Merge it into any unresolved entry first
-/// so earlier off-Tim reads cannot excuse it. Exposure duration is recorded independently of these safety problems.
+/// so earlier off-Tim reads cannot excuse it.
 @Sendable func reportUnplacedAtEnd() {
     let unknown = windowsUnknown.value
     var open = unresolved.value
@@ -2961,14 +2963,19 @@ let endReported = Locked(Set<Int>())
         problem("window \(id) of the tree could not be located at the guard's end: \(why)")
     }
     for (id, u) in open.sorted(by: { $0.key < $1.key }) where unknown[id] == nil && !u.offTims {
-        let evidence = merged.contains(id) ? "a sample counted it on Tim's screen after reads that showed it off" : "nothing showed it off Tim's screen"
+        let afterOffTim = merged.contains(id) || firstSightings.value[id]?.onTims == false
+        let evidence = afterOffTim ? "a sample counted it on Tim's screen after reads that showed it off" : "nothing showed it off Tim's screen"
         problem("window \(id) of the tree (reported by \(u.via)) was never placed before it went: \(u.why); \(evidence), so its time there cannot be bounded")
     }
     let end = uptime()
-    for stretch in counted.values { _ = exposureMs(end - stretch.at) }
-    for id in counted.keys.sorted()
-        where unknown[id] == nil && open[id] == nil {
-        problem("window \(id) of the tree was never placed, and no sample judged it before the guard's end")
+    for (id, stretch) in counted.sorted(by: { $0.key < $1.key }) {
+        let exposure = end - stretch.at
+        recordExposure(exposure)
+        emit(firstFields(id).merging(["event": "window-exposure", "window": id, "via": "final",
+                                     "onTimSpaceMs": ms(exposure), "upperBound": true]) { $1 })
+        if unknown[id] == nil && open[id] == nil {
+            problem("window \(id) of the tree was never placed, and no sample judged it before the guard's end")
+        }
     }
 }
 
@@ -3026,16 +3033,17 @@ let endReported = Locked(Set<Int>())
                   "source": "CGWindowList+SkyLight", "placement": "placed-native (untracked by yabai)",
                   "via": via, "at": decimal(queried - t0, 3)]) { $1 }
     if let resolved { placed["unknownMs"] = ms(queried - resolved.seen) }
-    if let exposed { placed["onTimSpaceMs"] = exposureMs(exposed) }
+    if let exposed {
+        recordExposure(exposed)
+        placed["onTimSpaceMs"] = ms(exposed)
+    }
     recordNative(placed, id: id, pid: pid, in: nativePlacements)
 }
 
-let maxOnTimScreenMs = Locked(0.0)
+let maxOnTimScreenSeconds = Locked(0.0)
 
-@Sendable func exposureMs(_ seconds: Double) -> NSDecimalNumber {
-    let duration = ms(seconds)
-    maxOnTimScreenMs.update { $0 = max($0, duration.doubleValue) }
-    return duration
+@Sendable func recordExposure(_ seconds: Double) {
+    maxOnTimScreenSeconds.update { $0 = max($0, seconds) }
 }
 
 /// Native discovery cannot hold up AX/shown parks; both lanes share one in-flight owner of each window id.
@@ -3055,10 +3063,10 @@ let parkingWindows = Locked(Set<Int>())
 /// and measured Tim membership are kept (windowSpaces, windowOnTims); all memberships count, not only yabai's index.
 /// A window back on Tim's screen after an off-Tim sample, or there at the final sweep, is a problem, created or not.
 /// Its first exposure is recorded as onTimSpaceMs from the start of its counting stretch to the move or the sample
-/// that found it elsewhere. Duration alone is no problem. An id yabai says it never tracked is placed-native only when
-/// WindowServer and SkyLight prove it on the assigned Space and on no Tim Space; an unmapped membership or the assigned Space on
-/// Tim's display is unplaced (retried, and reported at the end unless placed). `latched`: the sweep already reported
-/// this window's sample on his screen (omittedSample), so this park reports nothing more of that exposure.
+/// that found it elsewhere. An id yabai says it never tracked is placed-native only when WindowServer and SkyLight
+/// prove it on the assigned Space and on no Tim Space; an unmapped membership or the assigned Space on Tim's display
+/// is unplaced (retried, and reported at the end unless placed). `latched`: the sweep already reported this window's
+/// sample on his screen (omittedSample), so this park reports no further problem for that sample.
 /// `native`: discoveries and their retries stay off the foreground AX/shown queue.
 /// Collisions are recorded as park-coalesced; the holder retains its retry chain and lane.
 func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bool = false, native: Bool = false) {
@@ -3140,7 +3148,7 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
         }
         let start = stretch.at
         let leftUnseen = before == nil && !onTims && stretch.onTims ? queried - start : nil
-        if let leftUnseen { _ = exposureMs(leftUnseen) }
+        if let leftUnseen { recordExposure(leftUnseen) }
         let resolved = unresolved.update { $0.removeValue(forKey: id) }
         if let resolved, resolved.reported {
             var located: [String: Any] = firstFields(id).merging([
@@ -3149,6 +3157,10 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
             ]) { $1 }
             if let leftUnseen { located["onTimSpaceMs"] = ms(leftUnseen) }
             emit(located)
+        }
+        if let leftUnseen, resolved?.reported != true {
+            emit(firstFields(id).merging(["event": "window-exposure", "window": id, "pid": Int(pid), "app": app,
+                                         "space": from, "via": via, "onTimSpaceMs": ms(leftUnseen)]) { $1 })
         }
         if from == space && !onTims { return }
         if from == 0 {
@@ -3167,7 +3179,8 @@ func park(_ id: Int, seen: Double, via: String, final: Bool = false, latched: Bo
         ]) { $1 }
         if onTims {
             let exposure = done - (before == nil ? start : seen)
-            record["onTimSpaceMs"] = exposureMs(exposure)
+            recordExposure(exposure)
+            record["onTimSpaceMs"] = ms(exposure)
         }
         if back, let before { record["seenBefore"] = before }
         if let after { windowSpaces.update { $0[id] = after } }
@@ -4554,7 +4567,7 @@ func conclude(_ reason: String, orphaned: Bool, focusAtEnd: [String: Any]) {  //
         "nativeWindows": byWindow(nativeWindows.value),
         "nativePlacements": byWindow(nativePlacements.value),
         "exemptWindows": exemptRecords.value,
-        "maxOnTimScreenMs": maxOnTimScreenMs.value,
+        "maxOnTimScreenMs": ms(maxOnTimScreenSeconds.value),
         "timSpace": ["atLaunch": timSpaceAtLaunch ?? NSNull(), "expected": spacePolicy.value.expected.map(spaceField) ?? NSNull()] as [String: Any],
     ]
     if orphaned { unlink(summaryPath) }  // gui-launch is gone: nobody reads it
