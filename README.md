@@ -17,6 +17,7 @@ my dotfiles: raw nvim on native vim.pack, zsh, tmux, Ghostty, native macOS windo
 | `sketchybar/` | pinned SbarLua bar, static calendar status, supported status and control surfaces |
 | `scripts/` | tmux-sessionizer, Ghostty base16 theme switcher, Claude statusline |
 | `zen/` | zen browser userChrome.css + mods export |
+| `agents/` | the old agent setup; each machine drops it when it moves to tstack (below) |
 
 ## nvim
 
@@ -51,6 +52,18 @@ ln -sfn "$PWD/yabai/launch-agents/com.koekeishiya.skhd.plist" "$HOME/Library/Lau
 ```
 
 tmux plugins need [tpm](https://github.com/tmux-plugins/tpm); nvim pulls its own plugins on first launch.
+
+agents run on [tstack](https://github.com/twaldin/tstack) (the engine) plus my private instance. on a new box, once `gh`, Python 3.9+, omp and easl are installed and `gh auth login` is done:
+
+```sh
+gh repo clone twaldin/tstack ~/tstack
+gh repo clone twaldin/agents ~/agents
+~/tstack/bin/tstack setup --dry-run   # add --machine <name> if `hostname -s` isn't a dir in ~/agents/machines
+~/tstack/bin/tstack setup             # add --timers on macOS for the hourly update and liveness jobs
+~/tstack/bin/tstack check --smoke
+```
+
+after that, `tstack update` keeps `~/tstack`, `~/agents` and this repo current every hour.
 
 passwordless sudo for every command (same drop-in on every machine; `$USER` is `twaldin` on the Macs, `tim` on deckbox):
 
