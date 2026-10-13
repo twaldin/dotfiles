@@ -53,7 +53,7 @@ ln -sfn "$PWD/yabai/launch-agents/com.koekeishiya.skhd.plist" "$HOME/Library/Lau
 
 tmux plugins need [tpm](https://github.com/tmux-plugins/tpm); nvim pulls its own plugins on first launch.
 
-agents run on [tstack](https://github.com/twaldin/tstack) (the engine) plus my private instance. on a new box, once `gh`, Python 3.9+, omp and easl are installed and `gh auth login` is done:
+agents run on [tstack](https://github.com/twaldin/tstack) (the engine) plus my private instance. on a new box, once `gh`, Python 3.9+, omp and easl are installed and `gh auth login` and `omp login` are done:
 
 ```sh
 gh repo clone twaldin/tstack ~/tstack
@@ -63,7 +63,7 @@ gh repo clone twaldin/agents ~/agents
 ~/tstack/bin/tstack check --smoke
 ```
 
-after that, `tstack update` keeps `~/tstack`, `~/agents` and this repo current every hour.
+after that, `tstack update` keeps `~/tstack`, `~/agents` and this repo current every hour on Linux, or on macOS if setup ran with `--timers`.
 
 passwordless sudo for every command (same drop-in on every machine; `$USER` is `twaldin` on the Macs, `tim` on deckbox):
 
