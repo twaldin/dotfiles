@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
-"""Update omp and resume idle easl leads, without messages or fresh sessions.
+"""Update omp and roll named easl coordinators at safe points.
 
-The newest release published on both GitHub and npm for at least 3 hours wins,
-excluding blocked_versions; hosts may hold_below a version. Install in canary
-order deckbox -> work -> home, never downgrade, and restart older launchd omp
-services. Remote hosts run this same script over ssh.
-
-Named easl omp tiles resume in place only for an older binary or RSS > 1.5 GB.
-Never touch Tim's unnamed tiles or report_only names (including lindy-seat).
-Working/blocked, closed boards, restored lifecycle, unseen/unknown done, focus or
-draft unknown/present, child work and in-process subagents prevent a restart.
-Recheck immediately before acting; non-forced easl conflicts (including pending
-prompts/messages) are skips. Require a session on disk and omp on easl's zsh PATH.
-Within 60 seconds verify the same session, a new pid, protocol >= 1 and model.
-Errors are logged, end that host and make the run exit nonzero; other hosts
-continue unless a target install or observed resume verification fails. Only
-protocol/model failures can block a version later hosts lack. No messages are sent.
+Keep release selection, canary install order and broker restarts independent of
+seat rollout. Never force a restart or touch Tim's unnamed tiles. Wait at most
+five minutes for working seats, then report them to assistant@agents on deckbox.
+Verify PID, session, protocol and model, then send one integration-only re-arm
+prompt and require its first completed assistant turn within three minutes.
+An errored turn gets one safe fresh restart; another failure stops the rollout.
 
 Config: ~/.config/omp-update/config.json; local easl opt-in:
 ~/.config/machine-shepherd/easl.json {"enabled": true, "cli": ".../bin/easl"}.
@@ -54,9 +45,12 @@ ORDER = ("deckbox", "work", "home")
 MAX_RSS_MB = 1536
 VERIFY_S = 60
 SUBAGENT_FRESH_S = 180
+SAFE_POINT_S = 300
+TURN_VERIFY_S = 180
 DEFAULT_CONFIG = {
     "hosts": {
-        "deckbox": {"ssh": "tim@deckbox", "python": "python3"},
+        "deckbox": {"ssh": "tim@deckbox", "python": "python3",
+                    "easl": "/home/tim/.local/bin/easl"},
         "work": {"ssh": "twaldin-work", "python": "/usr/bin/python3",
                  "easl": "/Applications/easl.app/Contents/Resources/bin/easl"},
         "home": {"ssh": None, "services": [
@@ -66,7 +60,7 @@ DEFAULT_CONFIG = {
              "health": "http://twaldin-home:4000/healthz"}]},
     },
     "min_age_hours": 3,
-    "report_only": {"names": ["lindy-seat"]},
+    "report_only": {"names": []},
     "blocked_versions": {},
 }
 HOST_KEYS = ("ssh", "python", "easl", "services", "hold_below", "hold_note")
@@ -74,6 +68,8 @@ HOST_KEYS = ("ssh", "python", "easl", "services", "hold_below", "hold_note")
 TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner(-\d+)?/")
 SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|pyright|langserver|language-server|languageserver|"
                         r"tsserver|rust-analyzer|gopls|clangd|sourcekit-lsp|lsp-mux|biome lsp|ruff server")
+PASSIVE_WAIT = re.compile(r"(?:^|/)(?:sleep \d+(?:\.\d+)?$|lane wait |"
+                          r"watch-pr .* --until (?:change|merge)\b|vuln-feed .* --wait(?: |$))")
 
 
 def sh(cmd, timeout=120, check=False, **kw):
@@ -255,7 +251,7 @@ def live_children(pid, procs):
     while stack:
         c = stack.pop()
         cmd = procs[c]["cmd"]
-        if SUBTREE_OK.search(cmd):
+        if SUBTREE_OK.search(cmd) or PASSIVE_WAIT.search(cmd):
             continue
         if not TRANSPARENT.search(cmd):
             found.append(f"{c} {cmd[:70]}")
@@ -330,6 +326,8 @@ def tile_session(cli, tile, timeout=60):
 
 def easl_finds_omp(cli, procs):
     """Check the app's zsh environment, not this launchd job's augmented PATH."""
+    if not MAC:
+        return
     app = cli.split("/Contents/")[0] + "/Contents/MacOS/"
     env = {"HOME": HOME, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
     pid = next((p for p, i in procs.items() if i["cmd"].startswith(app)), None)
@@ -351,10 +349,8 @@ def idle_gate(a, procs, session):
     lc = a.get("lifecycle") or {}
     if lc.get("restored"):
         return "lifecycle restored after an app restart, unconfirmed"
-    if lc.get("state") not in ("idle", "done"):
+    if lc.get("state") not in ("idle", "waiting", "done"):
         return str(lc.get("state") or "unknown")
-    if lc["state"] == "done" and lc.get("seen") is not True:
-        return "done, answer not seen by Tim"
     for key in ("focused", "draft"):
         if a.get(key) is not False:
             return f"{key} present or unknown"
@@ -366,14 +362,52 @@ def idle_gate(a, procs, session):
     return "live child work or subagents: " + "; ".join(busy[:4]) if busy else None
 
 
-def restart_tile(row, a):
-    """Non-forced resume is easl's atomic gate for pending prompts/messages too."""
+def restart_tile(row, a, actions, installed):
+    """Non-forced restart is easl's atomic gate for pending prompts/messages too."""
     row["mem_before_mb"] = mem_mb(row["pid"])
-    try:
-        easl(a["cli"], "agent.restart", "--target", a["tile"], "--mode", "resume", timeout=120)
-    except EaslConflict as e:
-        row["action"] = f"skip: easl refused: {e}"
-        return
+    for mode in ("resume", "fresh"):
+        step = {"kind": "tile-step", "tile": a["tile"], "name": a["name"], "mode": mode}
+        baseline = os.path.getsize(row["session"]) if mode == "resume" else 0
+        lifecycle = a.get("lifecycle") or {}
+        actions.append(dict(step, ts=stamp(), step="restart"))
+        try:
+            easl(a["cli"], "agent.restart", "--target", a["tile"], "--mode", mode, timeout=120)
+        except EaslConflict as e:
+            if mode == "fresh":
+                raise RuntimeError(f"fresh recovery refused: {e}")
+            row["action"] = f"skip: easl refused: {e}"
+            return
+        now, session = verify_restart(row, a, mode)
+        actions.append(dict(step, ts=stamp(), step="ready", pid=now["pid"], session=session))
+        prompt = easl(a["cli"], "agent.prompt", "--target", a["tile"],
+                      "--text", f"You were restarted onto omp {installed} by the updater. Re-arm your own background jobs from your state.",
+                      "--from", "omp-update", "--when", "next-turn")
+        if prompt.get("delivery") != "message":
+            raise RuntimeError("re-arm prompt was not delivered through the integration")
+        actions.append(dict(step, ts=stamp(), step="re-arm", message=prompt.get("message")))
+        result = verify_turn(a, now["pid"], session, baseline, lifecycle, installed)
+        actions.append(dict(step, ts=stamp(), step="first-turn", **result))
+        row.update(first_turn=result, restart_mode=mode)
+        if result["ok"]:
+            row.pop("verification_failure", None)
+            row["action"] = "restarted"
+            return
+        row["verification_failure"] = result["reason"]
+        if mode == "fresh" or not result.get("turn_error"):
+            raise RuntimeError(f"{mode} first turn: {result['reason']}")
+        a = tile_get(a["cli"], a["tile"]) or {}
+        if (a.get("pid") != row["new_pid"] or a.get("name") != now.get("name")
+                or a.get("model") != now.get("model")
+                or tile_session(now["cli"], now["tile"]) != session):
+            raise RuntimeError("tile changed before fresh recovery")
+        a["cli"] = now["cli"]
+        skip = idle_gate(a, ps_table(), session)
+        if skip:
+            raise RuntimeError(f"fresh recovery unsafe: {skip}")
+        row["pid_before_fresh"] = a["pid"]
+
+
+def verify_restart(row, a, mode):
     deadline, last, probe_error = time.time() + VERIFY_S, None, None
     while time.time() < deadline:
         try:
@@ -383,10 +417,12 @@ def restart_tile(row, a):
             session = tile_session(a["cli"], a["tile"], timeout=deadline - time.time())
             last = now, session
             new, proto = now.get("pid"), now.get("protocol")
-            if (time.time() <= deadline and new and new != row["pid"] and session == row["session"]
+            valid_session = session == row["session"] if mode == "resume" else (
+                session and session != row["session"] and os.path.isfile(session))
+            if (time.time() <= deadline and new and new != a["pid"] and valid_session
                     and isinstance(proto, (int, float)) and proto >= 1 and now.get("model") == a["model"]):
-                row.update(new_pid=new, session_unchanged=True, mem_after_mb=mem_mb(new), action="restarted")
-                return
+                row.update(new_pid=new, session_unchanged=session == row["session"], mem_after_mb=mem_mb(new))
+                return now, session
         except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as e:
             probe_error = str(e)
         time.sleep(min(2, max(0, deadline - time.time())))
@@ -399,6 +435,49 @@ def restart_tile(row, a):
     row["protocol_model_failure"] = bool(now.get("pid") and now["pid"] != row["pid"]
         and (not isinstance(proto, (int, float)) or proto < 1 or now.get("model") != a["model"]))
     raise RuntimeError(f"{problem}; original session: {row['session']}")
+
+
+def verify_turn(a, pid, session, offset, previous, installed):
+    deadline = time.time() + TURN_VERIFY_S
+    started = False
+    with open(session) as f:
+        f.seek(offset)
+        while time.time() < deadline:
+            now = tile_get(a["cli"], a["tile"], timeout=deadline - time.time()) or {}
+            if now.get("pid") != pid:
+                return {"ok": False, "reason": "tile changed during first turn"}
+            lc = now.get("lifecycle") or {}
+            started = started or lc.get("state") == "working"
+            new_error = lc.get("errorCount", 0) > previous.get("errorCount", 0) or (
+                lc.get("errorSince") and lc.get("errorSince") != previous.get("errorSince"))
+            if new_error or (started and lc.get("error")):
+                return {"ok": False, "turn_error": True, "reason": lc.get("error") or "lifecycle error"}
+            while True:
+                pos = f.tell()
+                line = f.readline()
+                if not line or not line.endswith("\n"):
+                    f.seek(pos)
+                    break
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                message = entry.get("message") or {}
+                if entry.get("type") != "message" or message.get("role") != "assistant":
+                    continue
+                stop = message.get("stopReason")
+                if stop not in ("stop", "length", "error", "aborted"):
+                    continue
+                version = (entry.get("runtime") or {}).get("version")
+                result = {"ok": stop == "stop", "stopReason": stop, "version": version,
+                          "entry": entry.get("id"), "session": session}
+                if version and version != installed:
+                    return dict(result, ok=False, reason=f"turn ran omp {version}, expected {installed}")
+                if not result["ok"]:
+                    result.update(turn_error=True, reason=message.get("errorMessage") or stop)
+                return result
+            time.sleep(min(2, max(0, deadline - time.time())))
+    return {"ok": False, "reason": f"no completed assistant turn within {TURN_VERIFY_S} s"}
 
 
 def restart_services(services, installed, dry, pending, res):
@@ -474,6 +553,7 @@ def host_main(params):
         ez = params.get("easl")
         tiles = tile_agents(ez["cli"]) if ez else []
         checked_path = False
+        safe_deadline = time.time() + SAFE_POINT_S
         for a in tiles:
             row = {"tile": a["tile"], "name": a.get("name"), "pid": a.get("pid"), "status": (a.get("lifecycle") or {}).get("state")}
             res["tiles"].append(row)
@@ -509,6 +589,21 @@ def host_main(params):
                     if not session or not session.endswith(".jsonl") or not os.path.isfile(session):
                         row["action"] = "skip: no session file on disk to resume"
                         continue
+                    if (a.get("lifecycle") or {}).get("state") == "working" and not dry:
+                        res["actions"].append({"kind": "tile-step", "tile": a["tile"], "step": "wait-safe-point",
+                                               "ts": stamp(), "bound_s": SAFE_POINT_S})
+                        while time.time() < safe_deadline:
+                            time.sleep(min(2, max(0, safe_deadline - time.time())))
+                            now = tile_get(a["cli"], a["tile"])
+                            if not now or now.get("pid") != a["pid"]:
+                                break
+                            if (now.get("lifecycle") or {}).get("state") != "working":
+                                a = now
+                                break
+                        if (a.get("lifecycle") or {}).get("state") == "working":
+                            row["stalled"] = True
+                            row["wait_bound_s"] = SAFE_POINT_S
+                        procs = ps_table()
                     skip = idle_gate(a, procs, session)
                     if not skip and not a.get("model"):
                         skip = "model unknown"
@@ -529,9 +624,11 @@ def host_main(params):
                     elif dry:
                         row["action"] = "would restart"
                     else:
-                        restart_tile(row, now)
+                        restart_tile(row, now, res["actions"], installed)
             except Exception as e:
                 row["action"] = f"failed: {e}"
+                if row.get("new_pid"):
+                    row["verification_failure"] = str(e)
                 res["errors"].append(f"{a['tile']}: {e}")
                 break
             finally:
@@ -624,10 +721,37 @@ def load_config():
     raw = raw_config()
     base = copy.deepcopy(DEFAULT_CONFIG)
     cfg = {**base, **{k: v for k, v in raw.items() if k in DEFAULT_CONFIG}}
-    cfg["hosts"] = {h: {k: v for k, v in raw.get("hosts", {}).get(h, defaults).items() if k in HOST_KEYS}
-                    for h, defaults in base["hosts"].items()}
-    cfg["report_only"] = {"names": sorted(set(cfg["report_only"].get("names", [])) | {"lindy-seat"})}
+    cfg["hosts"] = {h: {**defaults, **{k: v for k, v in raw.get("hosts", {}).get(h, {}).items()
+                                     if k in HOST_KEYS}} for h, defaults in base["hosts"].items()}
+    names = set(cfg["report_only"].get("names", [])) - {"lindy-seat"}
+    cfg["report_only"] = {"names": sorted(names)}
     return cfg
+
+
+def notify_assistant(cfg, res, dry):
+    stalled = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("stalled")]
+    failed = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("verification_failure")]
+    recovered = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"]
+                 if t.get("restart_mode") == "fresh" and t.get("action") == "restarted"]
+    if not (stalled or failed or recovered):
+        return
+    text = (f"omp-update {res['host']}: working past {SAFE_POINT_S}s (not forced): {stalled}; "
+            f"rollout stopped after verification failure: {failed}; fresh recovery: {recovered}. "
+            "See ~/.local/state/omp-update/last-run.json on home.")
+    act = {"kind": "notify", "target": "assistant@agents", "text": text, "dry_run": dry}
+    res["actions"].append(act)
+    if dry:
+        return
+    hc = cfg["hosts"]["deckbox"]
+    cmd = [hc["easl"], "tell", "assistant@agents", text, "--from", "omp-update"]
+    try:
+        if hc.get("ssh"):
+            cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", hc["ssh"], shlex.join(cmd)]
+        sh(cmd, timeout=60, check=True)
+        act["action"] = "sent"
+    except Exception as e:
+        act["action"] = f"failed: {e}"
+        res["errors"].append(f"assistant notification: {e}")
 
 
 def run_host(name, hc, params):
@@ -687,6 +811,7 @@ def main_run(args):
                 res = {"host": name, "actions": [], "tiles": [], "unmanaged": [], "errors": [str(e)]}
             res.update(target=params["target"], hold_below=hc.get("hold_below"))
             record["results"].append(res)
+            notify_assistant(cfg, res, args.dry_run)
             if res.get("install_failure") or any(t.get("verification_failure") for t in res["tiles"]):
                 version = res.get("installed_after")
                 later = ORDER[ORDER.index(name) + 1:]

@@ -62,6 +62,9 @@ class Sandbox(unittest.TestCase):
         self.mod.ps_table = lambda: copy.deepcopy(self.procs)
         self.mod.sh = mock.Mock(side_effect=self.command)
         self.list_count, self.on_list, self.after_restart = 0, {}, {}
+        self.turns = ['stop']
+        self.prompt_delivery = 'message'
+        self.mod.MAC = True
         self.new_pid, self.new_session, self.pending = True, None, False
         self.zsh_finds_omp, self.app_env = True, {}
         self.cli = '/Applications/easl.app/Contents/Resources/bin/easl'
@@ -128,13 +131,31 @@ class Sandbox(unittest.TestCase):
                 if self.new_pid:
                     a['pid'] += 100000
                 a.update(self.after_restart)
+                self.procs[a['pid']] = {'ppid': 1, 'age_s': 1, 'rss_mb': 400, 'cmd': self.mod.OMP}
+                a['lifecycle'] = {'state': 'idle', 'seen': True}
+                if cmd[-1] == 'fresh':
+                    path = self.root / f"fresh-{a['pid']}.jsonl"
+                    path.write_text('{"type":"session"}\n')
+                    self.sessions[a['tile']] = str(path)
                 if self.new_session:
                     self.sessions[a['tile']] = None if self.new_session == 'gone' else self.new_session
                 out = {'agent': copy.deepcopy(a)}
+            elif method == 'agent.prompt':
+                a = next(a for a in self.tiles if a['tile'] == cmd[3])
+                stop = self.turns.pop(0) if len(self.turns) > 1 else self.turns[0]
+                if stop:
+                    entry = {'type': 'message', 'id': 'turn-' + str(a['pid']),
+                             'runtime': {'version': self.installed},
+                             'message': {'role': 'assistant', 'stopReason': stop}}
+                    with open(self.sessions[a['tile']], 'a') as f:
+                        f.write(json.dumps(entry) + '\n')
+                out = {'delivery': self.prompt_delivery, 'message': 'msg_rearm'}
             else:
                 self.unexpected.append(list(cmd))
                 raise AssertionError(f'unexpected mutating easl command {cmd}')
             return subprocess.CompletedProcess(cmd, 0, json.dumps(out), '')
+        if cmd[0] == 'ssh' and 'tell assistant@agents' in cmd[-1]:
+            return subprocess.CompletedProcess(cmd, 0, '{"delivery":"message"}', '')
         if cmd[:2] == ['/bin/ps', '-E']:
             return subprocess.CompletedProcess(cmd, 0, ' '.join(f'{k}={v}' for k, v in self.app_env.items()), '')
         if cmd[0] == '/usr/bin/env':
@@ -204,18 +225,6 @@ class ReleasePolicy(Sandbox):
         self.assertEqual(self.mod.host_target(info, {'hold_below': '18.8.0'}), '18.7.0')
         self.assertEqual(self.mod.host_target(info, {'hold_below': '18.6.1'}), '0')
         self.assertEqual(self.mod.host_target(info, {}), '18.8.0')
-
-    def test_config_retains_only_supported_keys_and_lindy_is_always_report_only(self):
-        self.mod.load_config()['blocked_versions']['test'] = {}
-        self.assertEqual(self.mod.load_config()['blocked_versions'], {})
-        self.write_config({'notify': ['unused'], 'max_session_mb': 100, 'max_uptime_hours': 12,
-                           'max_rss_mb': 1, 'opt_in': ['lindy-seat'], 'skip_panes': [], 'extensions_pins': {},
-                           'order': ['home'], 'hosts': {'work': {'ssh': 'twaldin-work', 'manage_panes': False}},
-                           'report_only': {'names': [], 'panes': ['old']}})
-        cfg = self.mod.load_config()
-        self.assertEqual(set(cfg), set(self.mod.DEFAULT_CONFIG))
-        self.assertEqual(cfg['report_only'], {'names': ['lindy-seat']})
-        self.assertNotIn('manage_panes', cfg['hosts']['work'])
 
     def test_hourly_job_still_calls_run(self):
         plist = plistlib.loads((OMP_UPDATE.parent.parent / 'launchd' / 'net.waldin.omp-update.plist').read_bytes())
@@ -392,8 +401,9 @@ class TileResume(Sandbox):
                 self.assertFalse(any('session' in t or 'up ' in t or 'extensions' in t for t in row['triggers']))
 
     def test_unnamed_tiles_and_report_only_names_never_restart(self):
+        self.write_config({'report_only': {'names': ['custom']}})
         self.mod.running_version = mock.Mock(side_effect=RuntimeError('probe failed'))
-        for name, action in ((None, "skip: Tim's tile"), ('', "skip: Tim's tile"), ('lindy-seat', 'report: seat/front door (owner decides)')):
+        for name, action in ((None, "skip: Tim's tile"), ('', "skip: Tim's tile"), ('custom', 'report: seat/front door (owner decides)')):
             with self.subTest(name=name):
                 self.tiles.clear()
                 self.place(name=name)
@@ -404,8 +414,7 @@ class TileResume(Sandbox):
 
     def test_every_lifecycle_focus_and_draft_gate(self):
         cases = [({'state': 'working'}, 'working'), ({'state': 'blocked'}, 'blocked'),
-                 ({'state': 'unknown'}, 'unknown'), ({'state': 'done', 'seen': False}, 'answer not seen'),
-                 ({'state': 'done', 'seen': MISSING}, 'answer not seen'), ({'open': False}, 'board closed'),
+                 ({'state': 'unknown'}, 'unknown'), ({'open': False}, 'board closed'),
                  ({'open': MISSING}, 'board closed'),
                  ({'restored': True}, 'restored'), ({'focused': True}, 'focused'),
                  ({'focused': MISSING}, 'focused'), ({'draft': True}, 'draft'), ({'draft': MISSING}, 'draft'),
@@ -602,6 +611,149 @@ class TileResume(Sandbox):
         self.assertEqual(self.mod.host_easl({'ssh': 'twaldin-work', 'easl': self.cli})['cli'], self.cli)
         self.assertIsNone(self.mod.host_easl({'ssh': 'tim@deckbox'}))
 
+class FirstTurn(Sandbox):
+    def test_old_error_is_not_the_restarted_turn_and_tool_use_is_not_completion(self):
+        a = self.place(state='done', seen=False)
+        path = Path(self.sessions[a['tile']])
+        path.write_text(json.dumps({'type': 'message', 'message': {
+            'role': 'assistant', 'stopReason': 'error'}}) + '\n')
+        self.turns = ['toolUse']
+        def finish():
+            with path.open('a') as f:
+                f.write(json.dumps({'type': 'message', 'message': {
+                    'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+        self.on_list[5] = finish
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+
+    def test_error_gets_one_fresh_restart_then_remaining_seats_continue(self):
+        self.place()
+        self.place(tile='obj_second', name='second')
+        self.turns = ['error', 'stop', 'stop']
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual([c[-1] for c in self.restarts()], ['resume', 'fresh', 'resume'])
+        self.assertEqual(self.row(res)['restart_mode'], 'fresh')
+        self.assertFalse(self.row(res)['session_unchanged'])
+        self.assertEqual([s['stopReason'] for s in res['actions'] if s.get('step') == 'first-turn'],
+                         ['error', 'stop', 'stop'])
+        self.assertFalse(any('--force' in c for c in self.restarts()))
+
+    def test_second_error_stops_remaining_seats(self):
+        self.place()
+        self.place(tile='obj_second', name='second')
+        self.turns = ['error', 'error']
+        res = self.host()
+        self.assertEqual([c[-1] for c in self.restarts()], ['resume', 'fresh'])
+        self.assertIn('fresh first turn', res['errors'][0])
+        self.assertIn('verification_failure', self.row(res))
+        self.assertEqual(self.tiles[1]['pid'], 500001)
+
+    def test_no_completed_turn_times_out_without_unsafe_fresh_restart(self):
+        self.place()
+        self.turns = [None]
+        started = self.now
+        res = self.host()
+        self.assertEqual(self.now - started, self.mod.TURN_VERIFY_S)
+        self.assertIn('no completed assistant turn', res['errors'][0])
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_new_lifecycle_error_counter_catches_error_even_if_cleared_before_poll(self):
+        a = self.place()
+        self.turns = [None]
+        self.on_list[4] = lambda: a['lifecycle'].update(errorCount=1, errorSince=123)
+        self.on_list[5] = lambda: a.update(draft=True)
+        res = self.host()
+        self.assertIn('fresh recovery unsafe', res['errors'][0])
+        self.assertEqual(self.row(res)['first_turn']['reason'], 'lifecycle error')
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_fresh_recovery_refuses_a_new_draft(self):
+        a = self.place()
+        self.turns = ['error']
+        self.on_list[5] = lambda: a.update(draft=True)
+        res = self.host()
+        self.assertIn('draft', res['errors'][0])
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_non_message_prompt_delivery_stops_rollout(self):
+        self.place()
+        self.prompt_delivery = 'not-delivered'
+        res = self.host()
+        self.assertIn('integration', res['errors'][0])
+        self.assertIn('verification_failure', self.row(res))
+
+    def test_working_seat_can_reach_safe_point_but_never_forces_stalled_seat(self):
+        a = self.place(state='working')
+        self.on_list[3] = lambda: a['lifecycle'].update(state='done', seen=False)
+        res = self.host()
+        self.assertEqual(self.row(res)['action'], 'restarted')
+        self.assertEqual(res['errors'], [])
+        self.tiles.clear()
+        self.calls.clear()
+        self.on_list.clear()
+        self.place(state='working')
+        res = self.host()
+        self.assertTrue(self.row(res)['stalled'])
+        self.assertEqual(self.row(res)['wait_bound_s'], self.mod.SAFE_POINT_S)
+        self.assertEqual(self.restarts(), [])
+
+    def test_dry_run_never_restarts_or_prompts_and_does_not_wait(self):
+        self.place()
+        self.place(tile='obj_working', state='working')
+        before = self.now
+        res = self.host(dry=True)
+        self.assertEqual(self.row(res)['action'], 'would restart')
+        self.assertEqual(self.now, before)
+        self.assertFalse(any(c[1] in ('agent.restart', 'agent.prompt') for c in self.calls))
+
+    def test_linux_does_not_require_macos_zsh(self):
+        self.mod.MAC = False
+        self.place()
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['version'], self.installed)
+        self.assertFalse(any(c[0] == '/usr/bin/env' for c in self.calls))
+
+    def test_existing_configuration_gains_deckbox_and_retargets_work_front_door(self):
+        self.write_config({'hosts': {'deckbox': {'ssh': 'tim@deckbox', 'python': 'python3'}},
+                           'report_only': {'names': ['lindy-seat', 'custom']}})
+        cfg = self.mod.load_config()
+        self.assertEqual(cfg['report_only']['names'], ['custom'])
+        self.assertEqual(self.mod.host_easl(cfg['hosts']['deckbox'])['cli'], '/home/tim/.local/bin/easl')
+        self.place(name='lindy-coordinator')
+        self.assertEqual(self.row(self.host())['action'], 'restarted')
+
+    def test_completed_seat_with_passive_waits_rolls_but_build_work_is_protected(self):
+        a = self.place(state='done', seen=False)
+        self.child(a['pid'], 'sleep 1800')
+        self.child(a['pid'], 'python3 /home/tim/.local/bin/lane wait another-lane --seat /home/tim/agents')
+        self.child(a['pid'], 'python3 /home/tim/.local/bin/watch-pr twaldin/easl#210 --until change')
+        res = self.host()
+        self.assertEqual(self.row(res)['action'], 'restarted')
+        self.tiles.clear()
+        a = self.place(state='done')
+        self.child(a['pid'], 'make build')
+        self.assertIn('live child', self.row(self.host())['action'])
+
+    def test_turn_on_wrong_version_stops_remaining_seats(self):
+        a = self.place()
+        self.place(tile='obj_second', name='second')
+        def replace_version():
+            path = Path(self.sessions[a['tile']])
+            lines = path.read_text().splitlines()
+            entry = json.loads(lines[-1])
+            entry['runtime']['version'] = '1.2.2'
+            lines[-1] = json.dumps(entry)
+            path.write_text('\n'.join(lines) + '\n')
+        self.on_list[4] = replace_version
+        res = self.host()
+        self.assertIn('expected 1.2.3', res['errors'][0])
+        self.assertEqual(len(self.restarts()), 1)
+        self.assertEqual(self.tiles[1]['pid'], 500001)
+
+
 
 class Services(Sandbox):
     def test_only_older_services_restart_and_health_or_kickstart_failure_stops_host(self):
@@ -671,6 +823,33 @@ class Rollout(Sandbox):
                 self.assertEqual(self.log()[-1]['error'], reason)
                 self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
         self.assertFalse(any(e['kind'] == 'notify' for e in self.log()))
+    def test_first_turn_failure_stops_other_hosts_and_tells_assistant_on_deckbox(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [
+            {'name': 'security-coordinator', 'verification_failure': 'fresh turn failed'}]}
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        notification = next(c for c in self.calls if c[0] == 'ssh')
+        self.assertIn('tim@deckbox', notification)
+        self.assertIn('tell assistant@agents', notification[-1])
+        self.assertIn('security-coordinator', notification[-1])
+        self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
+
+    def test_stalled_seats_are_logged_and_notified_without_stopping_other_hosts(self):
+        self.results['deckbox'] = {'tiles': [{'name': 'assistant', 'stalled': True}]}
+        self.assertEqual(self.run_once(), 0)
+        record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
+        self.assertTrue(record['results'][0]['tiles'][0]['stalled'])
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertTrue(any(e['kind'] == 'notify' and e['action'] == 'sent' for e in self.log()))
+
+    def test_dry_notifications_and_delivery_failures_remain_visible(self):
+        self.results['deckbox'] = {'tiles': [{'name': 'assistant', 'stalled': True}]}
+        self.assertEqual(self.run_once(dry=True), 0)
+        self.assertEqual(self.calls, [])
+        self.assertTrue(any(e['kind'] == 'notify' and e['dry_run'] for e in self.log()))
+        self.mod.sh.side_effect = RuntimeError('deckbox unreachable')
+        self.assertEqual(self.run_once(), 1)
+        self.assertIn('assistant notification', self.log()[-1]['error'])
 
     def test_failed_target_install_stops_rollout_without_blocking_version(self):
         self.results['deckbox'] = {'errors': ['install failed'], 'install_failure': True}
@@ -679,13 +858,13 @@ class Rollout(Sandbox):
         self.assertEqual(self.log()[-1]['error'], 'install failed')
         self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
 
-    def test_canary_verification_failure_blocks_new_release_without_notifications(self):
+    def test_canary_verification_failure_blocks_new_release_and_notifies(self):
         self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{'verification_failure': 'protocol missing', 'protocol_model_failure': True}]}
         self.assertEqual(self.run_once(), 1)
         cfg = json.loads(Path(self.mod.CONFIG).read_text())
         self.assertEqual(cfg['blocked_versions']['18.8.0']['host'], 'deckbox')
         self.assertEqual(cfg['blocked_versions']['18.8.0']['reason'], 'protocol missing')
-        self.assertFalse(self.mod.sh.called)
+        self.assertTrue(any(e['kind'] == 'notify' and e['action'] == 'sent' for e in self.log()))
 
     def test_canary_already_on_newer_version_blocks_it_only_when_later_hosts_lack_it(self):
         for later, blocked in (('18.7.0', True), ('18.8.0', False)):
