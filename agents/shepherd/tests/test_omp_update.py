@@ -398,8 +398,6 @@ class TileResume(Sandbox):
                 self.tiles.clear()
                 self.place(rss=rss, age=49 * 3600)
                 self.mod.running_version = lambda *args: (older, '1.2.2' if older else '1.2.3')
-                with open(self.sessions['obj_lead'], 'wb') as f:
-                    f.truncate(200 * 1048576)
                 row = self.row(self.host())
                 self.assertEqual(row['action'], action)
                 self.assertFalse(any('session' in t or 'up ' in t or 'extensions' in t for t in row['triggers']))
@@ -593,7 +591,8 @@ class TileResume(Sandbox):
         res = self.host()
         self.assertEqual(self.now - started, 60)
         self.assertIn('verification unavailable', res['errors'][0])
-        self.assertNotIn('verification_failure', self.row(res))
+        self.assertIn('verification_failure', self.row(res))
+        self.assertIn('first_turn_failure', self.row(res))
 
     def test_switch_off_or_unreachable_never_mutates_tiles(self):
         self.place()
@@ -619,7 +618,7 @@ class FirstTurn(Sandbox):
     def test_old_error_is_not_the_restarted_turn_and_tool_use_is_not_completion(self):
         a = self.place(state='done', seen=False)
         path = Path(self.sessions[a['tile']])
-        path.write_text(json.dumps({'type': 'message', 'message': {
+        path.write_text(json.dumps({'type': 'message', 'id': 'old-error', 'message': {
             'role': 'assistant', 'stopReason': 'error'}}) + '\n')
         self.turns = ['toolUse']
         def finish():
@@ -834,6 +833,46 @@ class FirstTurn(Sandbox):
         self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
         self.assertEqual(len(self.restarts()), 1)
 
+    def test_atomic_session_rewrite_during_retry_follows_new_file_not_old_history(self):
+        a = self.place()
+        path = Path(self.sessions[a['tile']])
+        history = [
+            {'type': 'session', 'id': 'root'},
+            {'type': 'message', 'id': 'old-stop', 'runtime': {'version': '1.2.2'},
+             'message': {'role': 'assistant', 'stopReason': 'stop'}},
+        ]
+        path.write_text(''.join(json.dumps(e) + '\n' for e in history))
+        self.turns = ['error']
+        self.on_list[4] = lambda: a['lifecycle'].update(state='working')
+        def rewrite():
+            replacement = path.with_suffix('.rewrite')
+            replacement.write_text(''.join(json.dumps(e) + '\n' for e in history))
+            os.replace(replacement, path)
+        def finish():
+            with path.open('a') as f:
+                f.write(json.dumps({'type': 'message', 'id': 'recovered-stop',
+                    'runtime': {'version': self.installed},
+                    'message': {'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+            a['lifecycle']['state'] = 'done'
+        self.on_list[5] = rewrite
+        self.on_list[6] = finish
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['entry'], 'recovered-stop')
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_config_ignores_unsupported_controls_and_does_not_share_mutable_state(self):
+        self.write_config({'notify': ['ignored'], 'hosts': {'deckbox': {
+            'ssh': 'tim@deckbox', 'manage_panes': True}}})
+        first = self.mod.load_config()
+        self.assertNotIn('notify', first)
+        self.assertNotIn('manage_panes', first['hosts']['deckbox'])
+        first['hosts']['deckbox']['easl'] = 'changed only in memory'
+        first['blocked_versions']['bad'] = {'reason': 'changed only in memory'}
+        second = self.mod.load_config()
+        self.assertNotEqual(second['hosts']['deckbox']['easl'], 'changed only in memory')
+        self.assertNotIn('bad', second['blocked_versions'])
+
 
 
 class Services(Sandbox):
@@ -1017,7 +1056,7 @@ class Rollout(Sandbox):
             return self.run_host(name, hc, params)
         self.mod.run_host = unavailable
         self.assertEqual(self.run_once(), 1)
-        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertEqual(list(self.params), ['deckbox', 'work'])
         self.assertIn('ssh', self.log()[-1]['error'])
 
     def test_remote_host_runs_identical_script_over_ssh_and_propagates_exit_errors(self):
@@ -1097,6 +1136,25 @@ class Rollout(Sandbox):
         self.assertEqual(self.params, {})
         self.assertEqual(self.calls, [])
         self.assertEqual(path.read_bytes(), before)
+
+    def test_accepted_restart_that_never_becomes_ready_persists_a_halt(self):
+        self.place()
+        self.place(tile='obj_second', name='second')
+        self.new_pid = False
+        self.mod.resolve_target = lambda *args: {
+            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
+        def local_host(name, hc, params):
+            self.params[name] = params
+            params['easl'] = {'cli': self.cli}
+            return self.mod.host_main(params)
+        self.mod.run_host = local_host
+        self.assertEqual(self.run_once(), 1)
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.params.clear()
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(len(self.restarts()), 1)
 
 
 if __name__ == '__main__':

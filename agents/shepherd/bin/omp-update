@@ -362,10 +362,20 @@ def restart_tile(row, a, actions, installed):
     row["mem_before_mb"] = mem_mb(row["pid"])
     for mode in ("resume", "fresh"):
         step = {"kind": "tile-step", "tile": a["tile"], "name": a["name"], "mode": mode}
-        baseline = os.path.getsize(row["session"]) if mode == "resume" else 0
+        baseline = set()
+        if mode == "resume":
+            with open(row["session"], "rb") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if entry.get("id"):
+                        baseline.add(entry["id"])
         actions.append(dict(step, ts=stamp(), step="restart"))
         try:
             easl(a["cli"], "agent.restart", "--target", a["tile"], "--mode", mode, timeout=120)
+            row["verification_stage"] = "restart"
         except EaslConflict as e:
             if mode == "fresh":
                 raise RuntimeError(f"fresh recovery refused: {e}")
@@ -398,7 +408,6 @@ def restart_tile(row, a, actions, installed):
                 or a.get("model") != now.get("model")
                 or tile_session(now["cli"], now["tile"]) != session):
             raise RuntimeError("tile changed before fresh recovery")
-        a["cli"] = now["cli"]
         skip = idle_gate(a, ps_table(), session)
         if skip:
             raise RuntimeError(f"fresh recovery unsafe: {skip}")
@@ -435,33 +444,40 @@ def verify_restart(row, a, mode):
     raise RuntimeError(f"{problem}; original session: {row['session']}")
 
 
-def verify_turn(a, pid, session, offset, previous, installed):
+def verify_turn(a, pid, session, baseline, previous, installed):
     deadline, pending_error = time.time() + TURN_VERIFY_S, None
-    with open(session) as f:
-        f.seek(offset)
-        while time.time() < deadline:
-            try:
-                now = tile_get(a["cli"], a["tile"], timeout=deadline - time.time()) or {}
-            except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
-                time.sleep(min(2, max(0, deadline - time.time())))
-                continue
-            if now.get("pid") != pid:
-                return {"ok": False, "reason": "tile changed during first turn"}
-            lc = now.get("lifecycle") or {}
-            new_error = lc.get("errorCount", 0) > previous.get("errorCount", 0) or (
-                lc.get("errorSince") and lc.get("errorSince") != previous.get("errorSince"))
-            if new_error:
-                pending_error = {"ok": False, "turn_error": True,
-                                 "reason": lc.get("error") or "lifecycle error"}
+    identity, position = None, 0
+    while time.time() < deadline:
+        try:
+            now = tile_get(a["cli"], a["tile"], timeout=deadline - time.time()) or {}
+        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
+            time.sleep(min(2, max(0, deadline - time.time())))
+            continue
+        if now.get("pid") != pid:
+            return {"ok": False, "reason": "tile changed during first turn"}
+        lc = now.get("lifecycle") or {}
+        new_error = lc.get("errorCount", 0) > previous.get("errorCount", 0) or (
+            lc.get("errorSince") and lc.get("errorSince") != previous.get("errorSince"))
+        if new_error:
+            pending_error = {"ok": False, "turn_error": True,
+                             "reason": lc.get("error") or "lifecycle error"}
+        with open(session, "rb") as f:
+            stat = os.fstat(f.fileno())
+            current = stat.st_dev, stat.st_ino
+            if identity == current and stat.st_size >= position:
+                f.seek(position)
+            identity = current
             while True:
                 pos = f.tell()
                 line = f.readline()
-                if not line or not line.endswith("\n"):
+                if not line or not line.endswith(b"\n"):
                     f.seek(pos)
                     break
                 try:
                     entry = json.loads(line)
                 except ValueError:
+                    continue
+                if entry.get("id") in baseline:
                     continue
                 message = entry.get("message") or {}
                 if entry.get("type") != "message" or message.get("role") != "assistant":
@@ -477,9 +493,10 @@ def verify_turn(a, pid, session, offset, previous, installed):
                 if result["ok"]:
                     return result
                 pending_error = dict(result, turn_error=True, reason=message.get("errorMessage") or stop)
-            if pending_error and lc.get("state") in ("idle", "done"):
-                return pending_error
-            time.sleep(min(2, max(0, deadline - time.time())))
+            position = f.tell()
+        if pending_error and lc.get("state") in ("idle", "done"):
+            return pending_error
+        time.sleep(min(2, max(0, deadline - time.time())))
     return pending_error or {"ok": False, "reason": f"no completed assistant turn within {TURN_VERIFY_S} s"}
 
 
@@ -635,10 +652,9 @@ def host_main(params):
                         restart_tile(row, now, res["actions"], installed)
             except Exception as e:
                 row["action"] = f"failed: {e}"
-                if row.get("new_pid"):
+                if row.get("verification_stage"):
                     row["verification_failure"] = str(e)
-                    if row.get("verification_stage") == "first-turn":
-                        row["first_turn_failure"] = str(e)
+                    row["first_turn_failure"] = str(e)
                 res["errors"].append(f"{a['tile']}: {e}")
                 break
             finally:
@@ -862,7 +878,8 @@ def main_run(args):
             try:
                 res = run_host(name, hc, params)
             except Exception as e:
-                res = {"host": name, "actions": [], "tiles": [], "unmanaged": [], "errors": [str(e)]}
+                res = {"host": name, "actions": [], "tiles": [], "unmanaged": [],
+                       "host_result_lost": True, "errors": [str(e)]}
             res.update(target=params["target"], hold_below=hc.get("hold_below"))
             record["results"].append(res)
             failure = next((t for t in res["tiles"] if t.get("first_turn_failure")), None)
@@ -880,6 +897,8 @@ def main_run(args):
             if notify_assistant(cfg, res, args.dry_run, halt) and halt and not args.dry_run:
                 halt["notified_at"] = stamp()
                 save_ledger(ledger)
+            if res.get("host_result_lost"):
+                break
             if res.get("install_failure") or any(t.get("verification_failure") for t in res["tiles"]):
                 version = res.get("installed_after")
                 later = ORDER[ORDER.index(name) + 1:]
