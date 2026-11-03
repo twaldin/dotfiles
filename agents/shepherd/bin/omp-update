@@ -810,12 +810,13 @@ def run_host(name, hc, params):
                            capture_output=True, text=True, timeout=5400, env=ENV)
     line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("RESULT ")), None)
     if not line:
-        started = "STARTED" in r.stdout.splitlines()
+        started = "STARTED" in r.stdout
         pre_execution = re.search(
             r"Permission denied|Could not resolve hostname|connect to host .* port \d+:|"
             r"banner exchange|kex_exchange_identification:|Host key verification failed|"
             r"Too many authentication failures", r.stderr, re.IGNORECASE)
-        error = HostNotStarted if not started and (pre_execution or not hc.get("ssh")) else RuntimeError
+        not_started = not started and (pre_execution or 0 <= r.returncode < 255 or not hc.get("ssh"))
+        error = HostNotStarted if not_started else RuntimeError
         raise error(f"host run failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}")
     res = json.loads(line[7:])
     if r.returncode and not res["errors"]:

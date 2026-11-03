@@ -1299,6 +1299,33 @@ class Rollout(Sandbox):
         record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
         self.assertTrue(any('ledger reload failed' in e for e in record['results'][0]['errors']))
 
+    def test_remote_interpreter_failure_before_marker_does_not_halt_later_hosts(self):
+        def with_broken_interpreter(name, hc, params):
+            self.params[name] = params
+            if name == 'work':
+                return self.real_run_host(name, hc, params)
+            return self.run_host(name, hc, params)
+        self.mod.run_host = with_broken_interpreter
+        response = subprocess.CompletedProcess([], 1, '', 'xcrun: error: invalid active developer path')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertFalse((Path(self.mod.STATE) / 'rollout-ledger.json').exists())
+
+    def test_start_marker_glued_to_shell_output_still_makes_result_loss_a_halt(self):
+        response = subprocess.CompletedProcess([], 1, 'shell bannerSTARTED\n', 'worker failed')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            with self.assertRaises(RuntimeError) as error:
+                self.real_run_host('work', {'ssh': 'twaldin-work'}, {})
+        self.assertNotIsInstance(error.exception, self.mod.HostNotStarted)
+
+    def test_ssh_killed_by_signal_without_marker_remains_ambiguous(self):
+        response = subprocess.CompletedProcess([], -9, '', '')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            with self.assertRaises(RuntimeError) as error:
+                self.real_run_host('work', {'ssh': 'twaldin-work'}, {})
+        self.assertNotIsInstance(error.exception, self.mod.HostNotStarted)
+
 
 if __name__ == '__main__':
     unittest.main()
