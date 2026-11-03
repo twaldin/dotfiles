@@ -35,9 +35,12 @@ class Readiness(unittest.TestCase):
             with self.subTest(completion=completion), self.assertRaises(ValueError):
                 row = {**self.row, 'completion': completion}
                 gate.validate({**self.result, 'credentials': [row]}, self.url, self.identity)
+
+    def test_usage_rate_limit_does_not_override_successful_completion(self):
         for ok in (None, False):
-            with self.subTest(ok=ok), self.assertRaises(ValueError):
-                gate.validate({**self.result, 'credentials': [{**self.row, 'ok': ok}]}, self.url, self.identity)
+            with self.subTest(ok=ok):
+                result = {**self.result, 'credentials': [{**self.row, 'ok': ok}]}
+                self.assertIs(gate.validate(result, self.url, self.identity)['ok'], True)
 
     def test_fallback_provider_api_key_or_wrong_identity_fails(self):
         for change in ({'provider': 'other'}, {'type': 'api_key'}, {'email': 'other@example.org'},

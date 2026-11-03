@@ -1107,6 +1107,20 @@ class Rollout(Sandbox):
                 self.assertEqual(self.log()[-1]['error'], reason)
                 self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
         self.assertFalse(any(e['kind'] == 'notify' for e in self.log()))
+
+    def test_deckbox_auth_service_failure_stops_later_hosts_only_after_cutover(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.params.clear()
+                self.write_config({'deckbox_auth_broker': enabled})
+                self.results['deckbox'] = {
+                    'actions': [{'kind': 'service', 'label': 'omp-auth-broker.service',
+                                 'pids': [123], 'action': 'failed: restart failed'}],
+                    'errors': ['broker restart failed']}
+                self.assertEqual(self.run_once(), 1)
+                self.assertEqual(list(self.params), ['deckbox'] if enabled else ['deckbox', 'work', 'home'])
+                self.assertIn('broker restart failed', self.log()[-1]['error'])
+
     def test_first_turn_failure_stops_other_hosts_and_tells_assistant_on_deckbox(self):
         self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [
             {'name': 'security-coordinator', 'verification_failure': 'fresh turn failed',

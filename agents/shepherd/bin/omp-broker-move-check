@@ -23,7 +23,7 @@ def validate(result, url, identity):
             or row.get('orgId') != identity['orgId']):
         raise ValueError('wrong OAuth identity or organization')
     completion = row.get('completion') or {}
-    if row.get('ok') is not True or completion.get('ok') is not True:
+    if completion.get('ok') is not True:
         raise ValueError('unknown, skipped, or failed completion')
     return {'email': row['email'], 'orgId': row['orgId'], 'ok': True,
             'model': completion.get('modelId'), 'latencyMs': completion.get('latencyMs')}
@@ -41,19 +41,18 @@ def main():
     expected = json.loads(Path(args.expected).read_text())
     if set(expected) != set(ACCOUNTS):
         raise ValueError('expected identities must name all four accounts')
-    keys = []
-    for identity in expected.values():
+    keys = {}
+    for name, identity in expected.items():
         if not all(isinstance(identity.get(k), str) and identity[k].strip() for k in ('email', 'orgId')):
             raise ValueError('missing expected email or organization')
-        keys.append('email:' + identity['email'].strip().lower() + '|org:' + identity['orgId'])
-    if len(set(keys)) != len(ACCOUNTS):
+        keys[name] = 'email:' + identity['email'].strip().lower() + '|org:' + identity['orgId']
+    if len(set(keys.values())) != len(ACCOUNTS):
         raise ValueError('expected accounts must be distinct')
     for name in args.account or ACCOUNTS:
         identity = expected[name]
-        key = 'email:' + identity['email'].strip().lower() + '|org:' + identity['orgId']
         with tempfile.TemporaryDirectory(prefix='broker-pin-') as directory:
             pool = Path(directory) / 'pool.json'
-            pool.write_text(json.dumps({'*': False, 'anthropic': {'accounts': [key], 'apiKeys': False}}))
+            pool.write_text(json.dumps({'*': False, 'anthropic': {'accounts': [keys[name]], 'apiKeys': False}}))
             pool.chmod(0o600)
             env = dict(os.environ, OMP_PROFILE=args.profile, OMP_AUTH_BROKER_ACCOUNT_POOL_FILE=str(pool))
             if not args.discover:

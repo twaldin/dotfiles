@@ -989,6 +989,12 @@ def main_run(args):
                 mark_halt_notified(halt["id"])
             if res.get("host_result_lost"):
                 break
+            if (cfg["deckbox_auth_broker"] and name == "deckbox"
+                    and any(a["kind"] == "service"
+                            and a.get("label") in ("omp-auth-broker.service", "omp-auth-gateway.service")
+                            and a.get("action", "").startswith("failed:")
+                            for a in res["actions"])):
+                break
             if res.get("install_failure") or any(t.get("verification_failure") for t in res["tiles"]):
                 version = res.get("installed_after")
                 later = ORDER[ORDER.index(name) + 1:]
