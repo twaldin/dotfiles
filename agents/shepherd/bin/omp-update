@@ -757,10 +757,9 @@ def load_config():
 
 def notify_assistant(cfg, res, dry, halt=None):
     stalled = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("stalled")]
-    failed = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("verification_failure")]
     recovered = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"]
                  if t.get("restart_mode") == "fresh" and t.get("action") == "restarted"]
-    if not (halt or stalled or failed or recovered):
+    if not (halt or stalled or recovered):
         return
     if halt:
         if halt.get("notified_at"):
@@ -771,8 +770,6 @@ def notify_assistant(cfg, res, dry, halt=None):
                 "~/.local/state/omp-update/rollout-ledger.json on home.")
     else:
         text = f"omp-update {res['host']}."
-        if failed:
-            text += f" Rollout stopped after verification failure: {failed}."
     if stalled:
         text += f" Working past the {SAFE_POINT_S}s safe-point window (not forced): {stalled}."
     if recovered:
@@ -797,6 +794,10 @@ def notify_assistant(cfg, res, dry, halt=None):
         res["errors"].append(f"assistant notification: {e}")
 
 
+class HostNotStarted(RuntimeError):
+    pass
+
+
 def run_host(name, hc, params):
     if hc.get("ssh"):
         with open(os.path.abspath(__file__)) as f:
@@ -809,7 +810,13 @@ def run_host(name, hc, params):
                            capture_output=True, text=True, timeout=5400, env=ENV)
     line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("RESULT ")), None)
     if not line:
-        raise RuntimeError(f"host run failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}")
+        started = "STARTED" in r.stdout.splitlines()
+        pre_execution = re.search(
+            r"Permission denied|Could not resolve hostname|connect to host .* port \d+:|"
+            r"banner exchange|kex_exchange_identification:|Host key verification failed|"
+            r"Too many authentication failures", r.stderr, re.IGNORECASE)
+        error = HostNotStarted if not started and (pre_execution or not hc.get("ssh")) else RuntimeError
+        raise error(f"host run failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}")
     res = json.loads(line[7:])
     if r.returncode and not res["errors"]:
         res["errors"].append(f"host exited {r.returncode}")
@@ -896,7 +903,7 @@ def main_run(args):
                 res = run_host(name, hc, params)
             except Exception as e:
                 res = {"host": name, "actions": [], "tiles": [], "unmanaged": [],
-                       "host_result_lost": True, "errors": [str(e)]}
+                       "host_result_lost": not isinstance(e, HostNotStarted), "errors": [str(e)]}
             res.update(target=params["target"], hold_below=hc.get("hold_below"))
             record["results"].append(res)
             failure = next((t for t in res["tiles"] if t.get("first_turn_failure")), None)
@@ -911,6 +918,10 @@ def main_run(args):
                         "stalled": [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("stalled")],
                         "recovered": [t.get("name") or t.get("tile", "unknown") for t in res["tiles"]
                                       if t.get("restart_mode") == "fresh" and t.get("action") == "restarted"]}
+                try:
+                    ledger = load_ledger()
+                except (OSError, ValueError, RuntimeError) as e:
+                    res["errors"].append(f"ledger reload failed; retaining known snapshot for halt: {e}")
                 ledger["halts"].append(halt)
                 res["actions"].append({"kind": "rollout-halt", **halt})
                 if not args.dry_run:
@@ -962,6 +973,7 @@ def main():
     h.add_argument("params")
     a = ap.parse_args()
     if a.cmd == "host":
+        print("STARTED", flush=True)
         res = host_main(json.loads(a.params))
         print("RESULT " + json.dumps(res))
         return int(bool(res["errors"]))

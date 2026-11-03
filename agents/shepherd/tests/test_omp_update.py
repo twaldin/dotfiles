@@ -945,7 +945,8 @@ class Rollout(Sandbox):
         self.assertFalse(any(e['kind'] == 'notify' for e in self.log()))
     def test_first_turn_failure_stops_other_hosts_and_tells_assistant_on_deckbox(self):
         self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [
-            {'name': 'security-coordinator', 'verification_failure': 'fresh turn failed'}]}
+            {'name': 'security-coordinator', 'verification_failure': 'fresh turn failed',
+             'first_turn_failure': 'fresh turn failed'}]}
         self.assertEqual(self.run_once(), 1)
         self.assertEqual(list(self.params), ['deckbox'])
         notification = next(c for c in self.calls if c[0] == 'ssh')
@@ -979,7 +980,9 @@ class Rollout(Sandbox):
         self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
 
     def test_canary_verification_failure_blocks_new_release_and_notifies(self):
-        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{'verification_failure': 'protocol missing', 'protocol_model_failure': True}]}
+        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{
+            'verification_failure': 'protocol missing', 'first_turn_failure': 'protocol missing',
+            'protocol_model_failure': True}]}
         self.assertEqual(self.run_once(), 1)
         cfg = json.loads(Path(self.mod.CONFIG).read_text())
         self.assertEqual(cfg['blocked_versions']['18.8.0']['host'], 'deckbox')
@@ -989,18 +992,21 @@ class Rollout(Sandbox):
     def test_canary_already_on_newer_version_blocks_it_only_when_later_hosts_lack_it(self):
         for later, blocked in (('18.7.0', True), ('18.8.0', False)):
             with self.subTest(later=later):
+                (Path(self.mod.STATE) / 'rollout-ledger.json').unlink(missing_ok=True)
                 self.write_config({'blocked_versions': {}})
                 Path(self.mod.STATE).mkdir(parents=True, exist_ok=True)
                 (Path(self.mod.STATE) / 'last-run.json').write_text(json.dumps({'results': [
                     {'host': h, 'installed_after': later} for h in ('work', 'home')]}))
                 self.results['deckbox'] = {'installed_before': '18.8.0', 'errors': ['protocol missing'],
-                                          'tiles': [{'verification_failure': 'protocol missing', 'protocol_model_failure': True}]}
+                                          'tiles': [{'verification_failure': 'protocol missing',
+                                                     'first_turn_failure': 'protocol missing', 'protocol_model_failure': True}]}
                 self.assertEqual(self.run_once(), 1)
                 cfg = json.loads(Path(self.mod.CONFIG).read_text())
                 self.assertEqual('18.8.0' in cfg['blocked_versions'], blocked)
 
     def test_pid_or_session_verification_failure_stops_rollout_but_does_not_block(self):
-        self.results['deckbox'] = {'errors': ['session changed'], 'tiles': [{'verification_failure': 'session changed'}]}
+        self.results['deckbox'] = {'errors': ['session changed'], 'tiles': [{
+            'verification_failure': 'session changed', 'first_turn_failure': 'session changed'}]}
         self.assertEqual(self.run_once(), 1)
         self.assertEqual(list(self.params), ['deckbox'])
         self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
@@ -1014,7 +1020,9 @@ class Rollout(Sandbox):
             self.write_config(raw)
             return original(name, hc, params)
         self.mod.run_host = edited
-        self.results['deckbox'] = {'errors': ['model changed'], 'tiles': [{'verification_failure': 'model changed', 'protocol_model_failure': True}]}
+        self.results['deckbox'] = {'errors': ['model changed'], 'tiles': [{
+            'verification_failure': 'model changed', 'first_turn_failure': 'model changed',
+            'protocol_model_failure': True}]}
         self.assertEqual(self.run_once(), 1)
         raw = json.loads(Path(self.mod.CONFIG).read_text())
         self.assertEqual(raw['hosts']['home']['hold_below'], '18.8.0')
@@ -1040,7 +1048,9 @@ class Rollout(Sandbox):
 
     def test_dry_failure_never_blocks_or_rewrites_configuration(self):
         before = Path(self.mod.CONFIG).read_text()
-        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{'verification_failure': 'protocol missing', 'protocol_model_failure': True}]}
+        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{
+            'verification_failure': 'protocol missing', 'first_turn_failure': 'protocol missing',
+            'protocol_model_failure': True}]}
         self.assertEqual(self.run_once(dry=True), 1)
         self.assertEqual(Path(self.mod.CONFIG).read_text(), before)
 
@@ -1218,6 +1228,76 @@ class Rollout(Sandbox):
         self.assertEqual(ledger['halts'][0]['status'], 'resolved')
         self.assertEqual(ledger['halts'][0]['resolution'], 'operator verified recovery')
         self.assertTrue(ledger['halts'][0]['notified_at'])
+
+    def test_preexecution_ssh_failure_keeps_later_hosts_running_without_a_halt(self):
+        def with_unreachable_work(name, hc, params):
+            self.params[name] = params
+            if name == 'work':
+                return self.real_run_host(name, hc, params)
+            return self.run_host(name, hc, params)
+        self.mod.run_host = with_unreachable_work
+        response = subprocess.CompletedProcess([], 255, '', 'Permission denied (publickey,password,keyboard-interactive).')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertFalse((Path(self.mod.STATE) / 'rollout-ledger.json').exists())
+        self.assertEqual(self.calls, [])
+
+    def test_host_result_lost_after_start_marker_still_persists_a_halt(self):
+        def with_lost_result(name, hc, params):
+            self.params[name] = params
+            return self.real_run_host(name, hc, params)
+        self.mod.run_host = with_lost_result
+        response = subprocess.CompletedProcess([], 255, 'STARTED\n', 'Connection closed by remote host')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.assertIn('host result lost', ledger['halts'][0]['reason'])
+
+    def test_appending_a_halt_preserves_operator_evidence_added_during_host_run(self):
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'halts': [{
+            'id': 'msg_omp_update_old_entry', 'status': 'resolved', 'host': 'deckbox',
+            'name': 'prior-seat', 'version': '18.7.0', 'reason': 'prior issue'}]}))
+        def edited_ledger(name, hc, params):
+            self.params[name] = params
+            ledger = json.loads(path.read_text())
+            ledger['halts'][0]['resolution'] = 'operator added evidence while host ran'
+            path.write_text(json.dumps(ledger))
+            return {'host': name, 'installed_after': '18.8.0', 'actions': [], 'unmanaged': [],
+                    'errors': ['fresh turn failed'], 'tiles': [{
+                        'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+                        'verification_failure': 'fresh turn failed'}]}
+        self.mod.run_host = edited_ledger
+        self.assertEqual(self.run_once(), 1)
+        ledger = json.loads(path.read_text())
+        self.assertEqual(ledger['halts'][0]['resolution'], 'operator added evidence while host ran')
+        self.assertEqual(ledger['halts'][1]['status'], 'unresolved')
+
+    def test_unmarked_ambiguous_disconnect_is_not_classified_as_preexecution(self):
+        response = subprocess.CompletedProcess([], 255, '', 'Connection closed by remote host')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            with self.assertRaises(RuntimeError) as error:
+                self.real_run_host('work', {'ssh': 'twaldin-work'}, {})
+        self.assertNotIsInstance(error.exception, self.mod.HostNotStarted)
+
+    def test_ledger_corrupted_during_host_run_still_retains_the_new_halt(self):
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        def corrupted_ledger(name, hc, params):
+            path.write_text('invalid concurrent edit')
+            return {'host': name, 'installed_after': '18.8.0', 'actions': [], 'unmanaged': [],
+                    'errors': ['fresh turn failed'], 'tiles': [{
+                        'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+                        'verification_failure': 'fresh turn failed'}]}
+        self.mod.run_host = corrupted_ledger
+        self.assertEqual(self.run_once(), 1)
+        ledger = json.loads(path.read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
+        self.assertTrue(any('ledger reload failed' in e for e in record['results'][0]['errors']))
 
 
 if __name__ == '__main__':
