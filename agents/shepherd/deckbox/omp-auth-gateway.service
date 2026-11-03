@@ -1,0 +1,21 @@
+[Unit]
+Description=omp model gateway
+After=omp-auth-broker.service
+ConditionPathExists=/home/tim/.omp/profiles/auth-broker/agent/agent.db
+ConditionPathExists=/home/tim/.omp/profiles/auth-broker/auth-broker.token
+ConditionPathExists=/home/tim/.omp/profiles/auth-broker/auth-gateway.token
+
+[Service]
+Type=exec
+ExecStart=/home/tim/.bun/bin/omp auth-gateway serve --bind=100.107.83.38:4000
+Environment=OMP_PROFILE=auth-broker
+Environment=OMP_AUTH_BROKER_URL=http://100.107.83.38:8765
+Environment=PATH=/home/tim/.bun/bin:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

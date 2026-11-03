@@ -904,6 +904,156 @@ class Services(Sandbox):
         self.assertIn('health/version', self.host(services=[service])['errors'][0])
 
 
+class DeckboxServices(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.mod.MAC = False
+        self.write_config({'deckbox_auth_broker': True})
+        self.services = self.mod.load_config()['hosts']['deckbox']['services']
+        self.versions = {'omp-auth-broker.service': '1.2.2', 'omp-auth-gateway.service': '1.2.2'}
+        self.active, self.restart_error, self.bad_health, self.stuck = True, False, None, False
+        self.mod.sh.side_effect = self.service_command
+        self.mod.exe_path = mock.Mock(side_effect=AssertionError('systemd must not use lsof txt'))
+
+    def service_command(self, cmd, **kw):
+        if cmd[0] == 'systemctl':
+            self.calls.append(list(cmd))
+            if cmd[2] == 'show':
+                state = 'ActiveState=active\nSubState=running\nMainPID=800000\n' if self.active else 'ActiveState=inactive\nSubState=dead\nMainPID=0\n'
+                return subprocess.CompletedProcess(cmd, 0, state, '')
+            if cmd[2] == 'restart':
+                if self.restart_error:
+                    raise RuntimeError('restart failed')
+                if not self.stuck:
+                    self.versions[cmd[3]] = self.installed
+                return subprocess.CompletedProcess(cmd, 0, '', '')
+        if cmd[0] == 'curl':
+            self.calls.append(list(cmd))
+            unit = 'omp-auth-broker.service' if ':8765/' in cmd[-1] else 'omp-auth-gateway.service'
+            body = self.bad_health if self.bad_health is not None else {'ok': True, 'version': self.versions[unit]}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(body), '')
+        return self.command(cmd, **kw)
+
+    def run_services(self, dry=False, target='1.2.3', easl=False):
+        return self.mod.host_main({'host': 'deckbox', 'target': target, 'dry_run': dry,
+                                  'services': self.services, 'report_only': {'names': []},
+                                  'easl': {'cli': self.cli} if easl else None})
+
+    def unit_restarts(self):
+        return [c[3] for c in self.calls if c[:3] == ['systemctl', '--user', 'restart']]
+
+    def test_switch_defaults_off_and_preserves_home_overrides(self):
+        self.write_config({})
+        cfg = self.mod.load_config()
+        self.assertIs(cfg['deckbox_auth_broker'], False)
+        self.assertEqual([s['label'] for s in cfg['hosts']['home']['services']],
+                         ['com.twaldin.omp-auth-broker', 'com.twaldin.omp-auth-gateway'])
+        self.assertNotIn('services', cfg['hosts']['deckbox'])
+        custom = [{'label': 'com.twaldin.omp-auth-broker', 'match': 'auth-broker serve', 'health': 'custom'}]
+        self.write_config({'deckbox_auth_broker': False, 'hosts': {'home': {'services': custom}}})
+        self.assertEqual(self.mod.load_config()['hosts']['home']['services'], custom)
+
+    def test_non_boolean_ownership_switch_is_rejected(self):
+        self.write_config({'deckbox_auth_broker': 'false'})
+        with self.assertRaisesRegex(RuntimeError, 'must be a boolean'):
+            self.mod.load_config()
+
+    def test_enabled_switch_replaces_effective_auth_overrides_only(self):
+        other = {'label': 'unrelated', 'match': 'unrelated serve', 'health': 'unrelated'}
+        auth = [{'label': 'custom-broker', 'match': 'auth-broker serve'},
+                {'label': 'com.twaldin.omp-auth-gateway'},
+                {'unit': 'omp-auth-broker.service'}]
+        self.write_config({'deckbox_auth_broker': True, 'hosts': {
+            h: {'services': auth + [other]} for h in ('home', 'deckbox')}})
+        cfg = self.mod.load_config()
+        self.assertEqual(cfg['hosts']['home']['services'], [other])
+        self.assertEqual(cfg['hosts']['deckbox']['services'], self.services + [other])
+
+    def test_stale_units_restart_broker_first_and_check_both_health_endpoints(self):
+        res = self.run_services()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.unit_restarts(), ['omp-auth-broker.service', 'omp-auth-gateway.service'])
+        self.assertEqual([a['action'] for a in res['actions']], ['restarted', 'restarted'])
+        self.assertEqual({c[-1] for c in self.calls if c[0] == 'curl'},
+                         {'http://100.107.83.38:8765/v1/healthz', 'http://100.107.83.38:4000/healthz'})
+
+    def test_current_or_newer_units_are_checked_without_restart(self):
+        self.versions = {'omp-auth-broker.service': '1.2.3', 'omp-auth-gateway.service': '1.2.4'}
+        res = self.run_services()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.unit_restarts(), [])
+        self.assertEqual([a['action'] for a in res['actions']], ['none: current', 'none: current'])
+
+    def test_only_stale_unit_restarts(self):
+        self.versions['omp-auth-broker.service'] = '1.2.3'
+        self.assertEqual(self.run_services()['errors'], [])
+        self.assertEqual(self.unit_restarts(), ['omp-auth-gateway.service'])
+
+    def test_dry_run_reports_stale_and_pending_upgrade_without_restarts(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                self.calls.clear()
+                self.versions = dict.fromkeys(self.versions, '1.2.3' if pending else '1.2.2')
+                res = self.run_services(dry=True, target='1.2.4' if pending else '1.2.3')
+                self.assertEqual(res['errors'], [])
+                self.assertEqual([a['action'] for a in res['actions'] if a['kind'] == 'service'],
+                                 ['would restart', 'would restart'])
+                self.assertEqual(self.unit_restarts(), [])
+                self.assertFalse(any(c[0] == 'launchctl' for c in self.calls))
+
+    def test_inactive_staged_units_fail_closed_even_in_dry_run(self):
+        self.active = False
+        for dry in (False, True):
+            with self.subTest(dry=dry):
+                res = self.run_services(dry=dry, easl=True)
+                self.assertTrue(res['errors'])
+                self.assertEqual(res['tiles'], [])
+                self.assertEqual(self.unit_restarts(), [])
+                self.assertFalse(any(c[0] == 'curl' for c in self.calls))
+
+    def test_broker_restart_failure_prevents_gateway_and_seat_work(self):
+        self.restart_error = True
+        res = self.run_services(easl=True)
+        self.assertTrue(res['errors'])
+        self.assertEqual(res['tiles'], [])
+        self.assertEqual(self.unit_restarts(), ['omp-auth-broker.service'])
+        self.assertFalse(any(c[0] == self.cli or 'omp-auth-gateway.service' in c for c in self.calls))
+
+    def test_bad_health_fails_before_restart_gateway_or_seats(self):
+        for health in ({'ok': False, 'version': '1.2.3'}, {'ok': True},
+                       {'ok': True, 'version': 'unknown'}, [], 'not a health object'):
+            with self.subTest(health=health):
+                self.calls.clear()
+                self.bad_health = health
+                res = self.run_services(easl=True)
+                self.assertTrue(res['errors'])
+                self.assertEqual(res['tiles'], [])
+                self.assertEqual(self.unit_restarts(), [])
+                self.assertFalse(any(c[0] == self.cli or 'omp-auth-gateway.service' in c for c in self.calls))
+
+    def test_health_transport_failure_prevents_restart_gateway_and_seats(self):
+        original = self.service_command
+        def failed_health(cmd, **kw):
+            if cmd[0] == 'curl':
+                self.calls.append(list(cmd))
+                raise RuntimeError('HTTP 503')
+            return original(cmd, **kw)
+        self.mod.sh.side_effect = failed_health
+        res = self.run_services(easl=True)
+        self.assertTrue(res['errors'])
+        self.assertEqual(res['tiles'], [])
+        self.assertEqual(self.unit_restarts(), [])
+        self.assertFalse(any(c[0] == self.cli or 'omp-auth-gateway.service' in c for c in self.calls))
+
+    def test_stale_health_after_restart_prevents_gateway_and_seats(self):
+        self.stuck = True
+        res = self.run_services(easl=True)
+        self.assertTrue(res['errors'])
+        self.assertEqual(res['tiles'], [])
+        self.assertEqual(self.unit_restarts(), ['omp-auth-broker.service'])
+        self.assertFalse(any(c[0] == self.cli or 'omp-auth-gateway.service' in c for c in self.calls))
+
+
 class Rollout(Sandbox):
     def setUp(self):
         super().setUp()
@@ -927,6 +1077,20 @@ class Rollout(Sandbox):
     def log(self):
         return [json.loads(line) for line in (Path(self.mod.STATE) / 'actions.jsonl').read_text().splitlines()]
 
+    def test_ownership_switch_reaches_hosts_in_live_and_dry_runs(self):
+        for enabled in (False, True):
+            for dry in (False, True):
+                with self.subTest(enabled=enabled, dry=dry):
+                    self.params.clear()
+                    self.write_config({'deckbox_auth_broker': enabled})
+                    self.assertEqual(self.run_once(dry=dry), 0)
+                    self.assertEqual(self.params['home']['services'],
+                                     [] if enabled else self.mod.DEFAULT_CONFIG['hosts']['home']['services'])
+                    deckbox = self.params['deckbox']['services']
+                    self.assertEqual([s['unit'] for s in deckbox],
+                                     ['omp-auth-broker.service', 'omp-auth-gateway.service'] if enabled else [])
+                    self.assertTrue(all(p['dry_run'] is dry for p in self.params.values()))
+
     def test_canary_order_cannot_be_reversed_and_holds_apply(self):
         self.assertEqual(self.run_once(hosts='home,work,deckbox'), 0)
         self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
@@ -943,6 +1107,20 @@ class Rollout(Sandbox):
                 self.assertEqual(self.log()[-1]['error'], reason)
                 self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
         self.assertFalse(any(e['kind'] == 'notify' for e in self.log()))
+
+    def test_deckbox_auth_service_failure_stops_later_hosts_only_after_cutover(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.params.clear()
+                self.write_config({'deckbox_auth_broker': enabled})
+                self.results['deckbox'] = {
+                    'actions': [{'kind': 'service', 'label': 'omp-auth-broker.service',
+                                 'pids': [123], 'action': 'failed: restart failed'}],
+                    'errors': ['broker restart failed']}
+                self.assertEqual(self.run_once(), 1)
+                self.assertEqual(list(self.params), ['deckbox'] if enabled else ['deckbox', 'work', 'home'])
+                self.assertIn('broker restart failed', self.log()[-1]['error'])
+
     def test_first_turn_failure_stops_other_hosts_and_tells_assistant_on_deckbox(self):
         self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [
             {'name': 'security-coordinator', 'verification_failure': 'fresh turn failed',

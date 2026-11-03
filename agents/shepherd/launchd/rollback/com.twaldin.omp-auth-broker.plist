@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.twaldin.omp-auth-broker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/twaldin/.bun/bin/omp</string>
+    <string>auth-broker</string><string>serve</string>
+    <string>--bind=100.85.222.119:8765</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>OMP_PROFILE</key><string>auth-broker-rollback</string></dict>
+  <key>Umask</key><integer>63</integer>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>3</integer>
+  <key>StandardOutPath</key><string>/Users/twaldin/.omp/profiles/auth-broker-rollback/logs/broker.log</string>
+  <key>StandardErrorPath</key><string>/Users/twaldin/.omp/profiles/auth-broker-rollback/logs/broker.log</string>
+</dict>
+</plist>

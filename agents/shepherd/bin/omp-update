@@ -3,6 +3,8 @@
 
 Config: ~/.config/omp-update/config.json; local easl opt-in:
 ~/.config/machine-shepherd/easl.json {"enabled": true, "cli": ".../bin/easl"}.
+The deckbox_auth_broker switch defaults to false. Enable it only after cutover;
+it replaces home auth services with the two already-running deckbox user units.
 Logs: ~/.local/state/omp-update/actions.jsonl and last-run.json.
 Usage: omp-update run [--dry-run] [--hosts deckbox,work,home]
        omp-update target
@@ -53,6 +55,7 @@ DEFAULT_CONFIG = {
             {"label": "com.twaldin.omp-auth-gateway", "match": "auth-gateway serve",
              "health": "http://twaldin-home:4000/healthz"}]},
     },
+    "deckbox_auth_broker": False,
     "min_age_hours": 3,
     "report_only": {"names": []},
     "blocked_versions": {},
@@ -506,6 +509,46 @@ def verify_turn(a, pid, session, baseline, previous, installed):
 def restart_services(services, installed, dry, pending, res):
     procs = ps_table()
     for svc in services:
+        if svc.get("unit"):
+            act = {"kind": "service", "label": svc["unit"], "pids": []}
+            res["actions"].append(act)
+            try:
+                state = sh(["systemctl", "--user", "show", svc["unit"],
+                            "--property=ActiveState,SubState,MainPID"], timeout=30, check=True).stdout
+                state = dict(line.split("=", 1) for line in state.splitlines() if "=" in line)
+                pid = int(state.get("MainPID", "0"))
+                if state.get("ActiveState") != "active" or state.get("SubState") != "running" or pid <= 0:
+                    raise RuntimeError("unit is not running; cutover must start it explicitly")
+                act["pids"] = [pid]
+                health = json.loads(sh(["curl", "-fsS", "--max-time", "5", svc["health"]],
+                                       timeout=15, check=True).stdout)
+                version = health.get("version") if isinstance(health, dict) else None
+                if not isinstance(health, dict) or health.get("ok") is not True or not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][\w.-]+)?", version):
+                    raise RuntimeError("service health/version not verified")
+                act["version"] = version
+                if vtuple(version) >= vtuple(installed) and not (dry and pending):
+                    act["action"] = "none: current"
+                elif dry:
+                    act["action"] = "would restart"
+                else:
+                    sh(["systemctl", "--user", "restart", svc["unit"]], timeout=60, check=True)
+                    for _ in range(30):
+                        time.sleep(2)
+                        try:
+                            health = json.loads(sh(["curl", "-fsS", "--max-time", "5", svc["health"]],
+                                                   timeout=15, check=True).stdout)
+                            if isinstance(health, dict) and health.get("ok") is True and health.get("version") == installed:
+                                act["action"] = "restarted"
+                                break
+                        except (RuntimeError, ValueError, subprocess.TimeoutExpired):
+                            pass
+                    else:
+                        raise RuntimeError("service health/version not verified within 60 s")
+            except Exception as e:
+                act["action"] = f"failed: {e}"
+                res["errors"].append(f"service {svc['unit']}: {e}")
+                return
+            continue
         pids = [p for p, i in procs.items() if svc["match"] in i["cmd"] and is_agent_omp(i["cmd"])]
         act = {"kind": "service", "label": svc["label"], "pids": pids}
         res["actions"].append(act)
@@ -752,6 +795,19 @@ def load_config():
     cfg = {**base, **{k: v for k, v in raw.items() if k in DEFAULT_CONFIG}}
     cfg["hosts"] = {h: {**defaults, **{k: v for k, v in raw.get("hosts", {}).get(h, {}).items()
                                      if k in HOST_KEYS}} for h, defaults in base["hosts"].items()}
+    if not isinstance(cfg["deckbox_auth_broker"], bool):
+        raise RuntimeError("deckbox_auth_broker must be a boolean")
+    if cfg["deckbox_auth_broker"]:
+        for host in ("home", "deckbox"):
+            cfg["hosts"][host]["services"] = [
+                svc for svc in cfg["hosts"][host].get("services", [])
+                if not any(name in str(svc.get(key, ""))
+                           for name in ("omp-auth-broker", "omp-auth-gateway", "auth-broker serve", "auth-gateway serve")
+                           for key in ("label", "unit", "match"))]
+        cfg["hosts"]["deckbox"]["services"] = [
+            {"unit": "omp-auth-broker.service", "health": "http://100.107.83.38:8765/v1/healthz"},
+            {"unit": "omp-auth-gateway.service", "health": "http://100.107.83.38:4000/healthz"},
+        ] + cfg["hosts"]["deckbox"]["services"]
     names = set(cfg["report_only"].get("names", [])) - {"lindy-seat"}
     cfg["report_only"] = {"names": sorted(names)}
     return cfg
@@ -932,6 +988,12 @@ def main_run(args):
             if notify_assistant(cfg, res, args.dry_run, halt) and halt and not args.dry_run:
                 mark_halt_notified(halt["id"])
             if res.get("host_result_lost"):
+                break
+            if (cfg["deckbox_auth_broker"] and name == "deckbox"
+                    and any(a["kind"] == "service"
+                            and a.get("label") in ("omp-auth-broker.service", "omp-auth-gateway.service")
+                            and a.get("action", "").startswith("failed:")
+                            for a in res["actions"])):
                 break
             if res.get("install_failure") or any(t.get("verification_failure") for t in res["tiles"]):
                 version = res.get("installed_after")

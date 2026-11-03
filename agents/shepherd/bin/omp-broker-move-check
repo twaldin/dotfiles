@@ -1,0 +1,77 @@
+#!/usr/bin/python3 -E
+"""Require exact OAuth identity and completion results without printing raw rows."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+
+ACCOUNTS = ('gmail', 'lindy.ai', 'timhotty1', 'purdue')
+
+
+def validate(result, url, identity):
+    if result.get('strict') is not True or result.get('broker') != url:
+        raise ValueError('wrong broker or non-strict result')
+    rows = result.get('credentials')
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise ValueError('missing or extra credential row')
+    row = rows[0]
+    if (row.get('provider') != 'anthropic' or row.get('type') != 'oauth'
+            or row.get('email', '').strip().lower() != identity['email'].strip().lower()
+            or row.get('orgId') != identity['orgId']):
+        raise ValueError('wrong OAuth identity or organization')
+    completion = row.get('completion') or {}
+    if completion.get('ok') is not True:
+        raise ValueError('unknown, skipped, or failed completion')
+    return {'email': row['email'], 'orgId': row['orgId'], 'ok': True,
+            'model': completion.get('modelId'), 'latencyMs': completion.get('latencyMs')}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--omp', required=True)
+    parser.add_argument('--profile', required=True)
+    parser.add_argument('--url', required=True)
+    parser.add_argument('--expected', required=True)
+    parser.add_argument('--account', choices=ACCOUNTS, action='append')
+    parser.add_argument('--discover', action='store_true', help='Check the profile URL without inherited broker overrides')
+    args = parser.parse_args()
+    expected = json.loads(Path(args.expected).read_text())
+    if set(expected) != set(ACCOUNTS):
+        raise ValueError('expected identities must name all four accounts')
+    keys = {}
+    for name, identity in expected.items():
+        if not all(isinstance(identity.get(k), str) and identity[k].strip() for k in ('email', 'orgId')):
+            raise ValueError('missing expected email or organization')
+        keys[name] = 'email:' + identity['email'].strip().lower() + '|org:' + identity['orgId']
+    if len(set(keys.values())) != len(ACCOUNTS):
+        raise ValueError('expected accounts must be distinct')
+    for name in args.account or ACCOUNTS:
+        identity = expected[name]
+        with tempfile.TemporaryDirectory(prefix='broker-pin-') as directory:
+            pool = Path(directory) / 'pool.json'
+            pool.write_text(json.dumps({'*': False, 'anthropic': {'accounts': [keys[name]], 'apiKeys': False}}))
+            pool.chmod(0o600)
+            env = dict(os.environ, OMP_PROFILE=args.profile, PI_PROFILE=args.profile,
+                       OMP_AUTH_BROKER_ACCOUNT_POOL_FILE=str(pool))
+            for key in ('OMP_AUTH_BROKER_TOKEN', 'PI_CODING_AGENT_DIR', 'PI_CONFIG_DIR'):
+                env.pop(key, None)
+            if args.discover:
+                env.pop('OMP_AUTH_BROKER_URL', None)
+            else:
+                env['OMP_AUTH_BROKER_URL'] = args.url
+            result = subprocess.run([args.omp, 'auth-gateway', 'check', '--strict', '--json'],
+                                    env=env, cwd=directory, capture_output=True, text=True, timeout=600)
+            if result.returncode:
+                raise ValueError(name + ': CLI failed; inspect privately')
+            evidence = validate(json.loads(result.stdout), args.url, identity)
+            print(json.dumps(dict(evidence, account=name)), flush=True)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        raise SystemExit('Broker readiness failed. Inspect privately; do not publish raw results or headers.')
