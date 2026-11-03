@@ -126,7 +126,7 @@ class Sandbox(unittest.TestCase):
             elif method == 'agent.restart':
                 if self.pending:
                     self.pending = False
-                    return subprocess.CompletedProcess(cmd, 1, '{"error":{"code":"conflict","message":"pending message or prompt"}}', '')
+                    return subprocess.CompletedProcess(cmd, 1, '', 'conflict: pending message or prompt')
                 a = next(a for a in self.tiles if a['tile'] == cmd[3])
                 if self.new_pid:
                     a['pid'] += 100000
@@ -1179,8 +1179,7 @@ class Rollout(Sandbox):
             if cmd[:2] == [self.cli, 'agent.restart']:
                 self.calls.append(list(cmd))
                 self.tiles[0].pop('pid')
-                return subprocess.CompletedProcess(cmd, 1, json.dumps({
-                    'error': {'code': 'unavailable', 'message': 'nothing was relaunched'}}), '')
+                return subprocess.CompletedProcess(cmd, 1, '', 'unavailable: session conflict: nothing was relaunched')
             return self.command(cmd, **kw)
         self.mod.sh.side_effect = unavailable
         self.assertEqual(self.run_once(), 1)

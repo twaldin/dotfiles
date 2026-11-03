@@ -301,7 +301,9 @@ def easl(cli, *args, timeout=60):
         out = None
     if r.returncode or not isinstance(out, dict) or out.get("error"):
         detail = (r.stderr or r.stdout).strip()[:300] or f"exit {r.returncode}"
-        error = EaslConflict if re.search(r"\bconflict\b", detail) else RuntimeError
+        info = out.get("error") if isinstance(out, dict) else None
+        code = info.get("code") if isinstance(info, dict) else r.stderr.partition(":")[0].strip()
+        error = EaslConflict if code == "conflict" else RuntimeError
         raise error(f"easl {args[0]}: {detail}")
     return out
 
