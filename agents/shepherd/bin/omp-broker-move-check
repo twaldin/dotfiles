@@ -63,7 +63,7 @@ def main():
             else:
                 env['OMP_AUTH_BROKER_URL'] = args.url
             result = subprocess.run([args.omp, 'auth-gateway', 'check', '--strict', '--json'],
-                                    env=env, capture_output=True, text=True, timeout=600)
+                                    env=env, cwd=directory, capture_output=True, text=True, timeout=600)
             if result.returncode:
                 raise ValueError(name + ': CLI failed; inspect privately')
             evidence = validate(json.loads(result.stdout), args.url, identity)

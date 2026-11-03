@@ -84,6 +84,8 @@ class Readiness(unittest.TestCase):
                     self.assertNotIn(key, env)
                 self.assertNotEqual(env['OMP_AUTH_BROKER_ACCOUNT_POOL_FILE'],
                                     parent['OMP_AUTH_BROKER_ACCOUNT_POOL_FILE'])
+                self.assertEqual(Path(kwargs['cwd']),
+                                 Path(env['OMP_AUTH_BROKER_ACCOUNT_POOL_FILE']).parent)
                 pool = json.loads(Path(env['OMP_AUTH_BROKER_ACCOUNT_POOL_FILE']).read_text())
                 self.assertEqual(pool, {'*': False, 'anthropic': {
                     'accounts': ['email:test@example.org|org:MixedCase-Org'], 'apiKeys': False}})
