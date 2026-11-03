@@ -953,6 +953,11 @@ class DeckboxServices(Sandbox):
         self.write_config({'deckbox_auth_broker': False, 'hosts': {'home': {'services': custom}}})
         self.assertEqual(self.mod.load_config()['hosts']['home']['services'], custom)
 
+    def test_non_boolean_ownership_switch_is_rejected(self):
+        self.write_config({'deckbox_auth_broker': 'false'})
+        with self.assertRaisesRegex(RuntimeError, 'must be a boolean'):
+            self.mod.load_config()
+
     def test_enabled_switch_replaces_effective_auth_overrides_only(self):
         other = {'label': 'unrelated', 'match': 'unrelated serve', 'health': 'unrelated'}
         auth = [{'label': 'custom-broker', 'match': 'auth-broker serve'},

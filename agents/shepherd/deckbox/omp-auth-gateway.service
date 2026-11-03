@@ -10,6 +10,7 @@ Type=exec
 ExecStart=/home/tim/.bun/bin/omp auth-gateway serve --bind=100.107.83.38:4000
 Environment=OMP_PROFILE=auth-broker
 Environment=OMP_AUTH_BROKER_URL=http://100.107.83.38:8765
+Environment=PATH=/home/tim/.bun/bin:/usr/local/bin:/usr/bin:/bin
 UMask=0077
 Restart=on-failure
 RestartSec=3
