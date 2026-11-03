@@ -36,7 +36,7 @@ def main():
     parser.add_argument('--url', required=True)
     parser.add_argument('--expected', required=True)
     parser.add_argument('--account', choices=ACCOUNTS, action='append')
-    parser.add_argument('--discover', action='store_true', help='Do not override the persistent broker URL')
+    parser.add_argument('--discover', action='store_true', help='Check the profile URL without inherited broker overrides')
     args = parser.parse_args()
     expected = json.loads(Path(args.expected).read_text())
     if set(expected) != set(ACCOUNTS):
@@ -54,8 +54,13 @@ def main():
             pool = Path(directory) / 'pool.json'
             pool.write_text(json.dumps({'*': False, 'anthropic': {'accounts': [keys[name]], 'apiKeys': False}}))
             pool.chmod(0o600)
-            env = dict(os.environ, OMP_PROFILE=args.profile, OMP_AUTH_BROKER_ACCOUNT_POOL_FILE=str(pool))
-            if not args.discover:
+            env = dict(os.environ, OMP_PROFILE=args.profile, PI_PROFILE=args.profile,
+                       OMP_AUTH_BROKER_ACCOUNT_POOL_FILE=str(pool))
+            for key in ('OMP_AUTH_BROKER_TOKEN', 'PI_CODING_AGENT_DIR', 'PI_CONFIG_DIR'):
+                env.pop(key, None)
+            if args.discover:
+                env.pop('OMP_AUTH_BROKER_URL', None)
+            else:
                 env['OMP_AUTH_BROKER_URL'] = args.url
             result = subprocess.run([args.omp, 'auth-gateway', 'check', '--strict', '--json'],
                                     env=env, capture_output=True, text=True, timeout=600)

@@ -1,8 +1,16 @@
 import copy
 import importlib.machinery
 import importlib.util
+import contextlib
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 
 
 loader = importlib.machinery.SourceFileLoader(
@@ -54,6 +62,40 @@ class Readiness(unittest.TestCase):
         for change in ({'strict': False}, {'broker': 'http://100.85.222.119:8765'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 gate.validate({**self.result, **change}, self.url, self.identity)
+
+    def test_discovery_drops_parent_url_and_uses_requested_profile_and_exclusive_pool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            expected = {name: {'email': name + '@example.org', 'orgId': name}
+                        for name in gate.ACCOUNTS}
+            expected['gmail'] = self.identity
+            path = Path(directory) / 'expected.json'
+            path.write_text(json.dumps(expected))
+            parent = {'OMP_AUTH_BROKER_URL': self.url, 'OMP_PROFILE': 'wrong-profile',
+                      'PI_PROFILE': 'wrong-legacy-profile', 'PI_CONFIG_DIR': 'unused-root',
+                      'PI_CODING_AGENT_DIR': '/unused/parent-agent',
+                      'OMP_AUTH_BROKER_TOKEN': 'synthetic-parent-override',
+                      'OMP_AUTH_BROKER_ACCOUNT_POOL_FILE': '/unused/parent-pool.json'}
+            def probe(cmd, **kwargs):
+                env = kwargs['env']
+                self.assertNotIn('OMP_AUTH_BROKER_URL', env)
+                self.assertEqual(env['OMP_PROFILE'], 'default')
+                self.assertEqual(env['PI_PROFILE'], 'default')
+                for key in ('OMP_AUTH_BROKER_TOKEN', 'PI_CODING_AGENT_DIR', 'PI_CONFIG_DIR'):
+                    self.assertNotIn(key, env)
+                self.assertNotEqual(env['OMP_AUTH_BROKER_ACCOUNT_POOL_FILE'],
+                                    parent['OMP_AUTH_BROKER_ACCOUNT_POOL_FILE'])
+                pool = json.loads(Path(env['OMP_AUTH_BROKER_ACCOUNT_POOL_FILE']).read_text())
+                self.assertEqual(pool, {'*': False, 'anthropic': {
+                    'accounts': ['email:test@example.org|org:MixedCase-Org'], 'apiKeys': False}})
+                return subprocess.CompletedProcess(cmd, 0, json.dumps(self.result), '')
+            argv = ['check', '--omp', '/unused/omp', '--profile', 'default', '--url', self.url,
+                    '--expected', str(path), '--account', 'gmail', '--discover']
+            with mock.patch.object(sys, 'argv', argv), mock.patch.dict(os.environ, parent, clear=True), \
+                    mock.patch.object(gate.subprocess, 'run', side_effect=probe), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                gate.main()
+            self.assertEqual(json.loads(output.getvalue()), {
+                **self.identity, 'ok': True, 'model': 'probe-model', 'latencyMs': 12, 'account': 'gmail'})
 
 
 if __name__ == '__main__':
