@@ -62,6 +62,9 @@ class Sandbox(unittest.TestCase):
         self.mod.ps_table = lambda: copy.deepcopy(self.procs)
         self.mod.sh = mock.Mock(side_effect=self.command)
         self.list_count, self.on_list, self.after_restart = 0, {}, {}
+        self.turns = ['stop']
+        self.prompt_delivery = 'message'
+        self.mod.MAC = True
         self.new_pid, self.new_session, self.pending = True, None, False
         self.zsh_finds_omp, self.app_env = True, {}
         self.cli = '/Applications/easl.app/Contents/Resources/bin/easl'
@@ -123,18 +126,40 @@ class Sandbox(unittest.TestCase):
             elif method == 'agent.restart':
                 if self.pending:
                     self.pending = False
-                    return subprocess.CompletedProcess(cmd, 1, '{"error":{"code":"conflict","message":"pending message or prompt"}}', '')
+                    return subprocess.CompletedProcess(cmd, 1, '', 'conflict: pending message or prompt')
                 a = next(a for a in self.tiles if a['tile'] == cmd[3])
                 if self.new_pid:
                     a['pid'] += 100000
                 a.update(self.after_restart)
+                self.procs[a['pid']] = {'ppid': 1, 'age_s': 1, 'rss_mb': 400, 'cmd': self.mod.OMP}
+                a['lifecycle'] = {**a['lifecycle'], 'state': 'idle', 'seen': True, 'restored': False}
+                if cmd[-1] == 'fresh':
+                    path = self.root / f"fresh-{a['pid']}.jsonl"
+                    path.write_text('{"type":"session"}\n')
+                    self.sessions[a['tile']] = str(path)
                 if self.new_session:
                     self.sessions[a['tile']] = None if self.new_session == 'gone' else self.new_session
                 out = {'agent': copy.deepcopy(a)}
+            elif method == 'agent.prompt':
+                a = next(a for a in self.tiles if a['tile'] == cmd[3])
+                stop = self.turns.pop(0) if len(self.turns) > 1 else self.turns[0]
+                a['lifecycle']['state'] = 'working' if stop in (None, 'toolUse') else 'done'
+                if stop in ('error', 'aborted', 'length'):
+                    a['lifecycle'].update(state='idle', error=stop, errorSince=self.now,
+                                          errorCount=a['lifecycle'].get('errorCount', 0) + 1)
+                if stop:
+                    entry = {'type': 'message', 'id': 'turn-' + str(a['pid']),
+                             'runtime': {'version': self.installed},
+                             'message': {'role': 'assistant', 'stopReason': stop}}
+                    with open(self.sessions[a['tile']], 'a') as f:
+                        f.write(json.dumps(entry) + '\n')
+                out = {'delivery': self.prompt_delivery, 'message': 'msg_rearm'}
             else:
                 self.unexpected.append(list(cmd))
                 raise AssertionError(f'unexpected mutating easl command {cmd}')
             return subprocess.CompletedProcess(cmd, 0, json.dumps(out), '')
+        if cmd[0] == 'ssh' and 'tell assistant@agents' in cmd[-1]:
+            return subprocess.CompletedProcess(cmd, 0, '{"delivery":"message"}', '')
         if cmd[:2] == ['/bin/ps', '-E']:
             return subprocess.CompletedProcess(cmd, 0, ' '.join(f'{k}={v}' for k, v in self.app_env.items()), '')
         if cmd[0] == '/usr/bin/env':
@@ -204,18 +229,6 @@ class ReleasePolicy(Sandbox):
         self.assertEqual(self.mod.host_target(info, {'hold_below': '18.8.0'}), '18.7.0')
         self.assertEqual(self.mod.host_target(info, {'hold_below': '18.6.1'}), '0')
         self.assertEqual(self.mod.host_target(info, {}), '18.8.0')
-
-    def test_config_retains_only_supported_keys_and_lindy_is_always_report_only(self):
-        self.mod.load_config()['blocked_versions']['test'] = {}
-        self.assertEqual(self.mod.load_config()['blocked_versions'], {})
-        self.write_config({'notify': ['unused'], 'max_session_mb': 100, 'max_uptime_hours': 12,
-                           'max_rss_mb': 1, 'opt_in': ['lindy-seat'], 'skip_panes': [], 'extensions_pins': {},
-                           'order': ['home'], 'hosts': {'work': {'ssh': 'twaldin-work', 'manage_panes': False}},
-                           'report_only': {'names': [], 'panes': ['old']}})
-        cfg = self.mod.load_config()
-        self.assertEqual(set(cfg), set(self.mod.DEFAULT_CONFIG))
-        self.assertEqual(cfg['report_only'], {'names': ['lindy-seat']})
-        self.assertNotIn('manage_panes', cfg['hosts']['work'])
 
     def test_hourly_job_still_calls_run(self):
         plist = plistlib.loads((OMP_UPDATE.parent.parent / 'launchd' / 'net.waldin.omp-update.plist').read_bytes())
@@ -385,15 +398,14 @@ class TileResume(Sandbox):
                 self.tiles.clear()
                 self.place(rss=rss, age=49 * 3600)
                 self.mod.running_version = lambda *args: (older, '1.2.2' if older else '1.2.3')
-                with open(self.sessions['obj_lead'], 'wb') as f:
-                    f.truncate(200 * 1048576)
                 row = self.row(self.host())
                 self.assertEqual(row['action'], action)
                 self.assertFalse(any('session' in t or 'up ' in t or 'extensions' in t for t in row['triggers']))
 
     def test_unnamed_tiles_and_report_only_names_never_restart(self):
+        self.write_config({'report_only': {'names': ['custom']}})
         self.mod.running_version = mock.Mock(side_effect=RuntimeError('probe failed'))
-        for name, action in ((None, "skip: Tim's tile"), ('', "skip: Tim's tile"), ('lindy-seat', 'report: seat/front door (owner decides)')):
+        for name, action in ((None, "skip: Tim's tile"), ('', "skip: Tim's tile"), ('custom', 'report: seat/front door (owner decides)')):
             with self.subTest(name=name):
                 self.tiles.clear()
                 self.place(name=name)
@@ -404,8 +416,7 @@ class TileResume(Sandbox):
 
     def test_every_lifecycle_focus_and_draft_gate(self):
         cases = [({'state': 'working'}, 'working'), ({'state': 'blocked'}, 'blocked'),
-                 ({'state': 'unknown'}, 'unknown'), ({'state': 'done', 'seen': False}, 'answer not seen'),
-                 ({'state': 'done', 'seen': MISSING}, 'answer not seen'), ({'open': False}, 'board closed'),
+                 ({'state': 'unknown'}, 'unknown'), ({'open': False}, 'board closed'),
                  ({'open': MISSING}, 'board closed'),
                  ({'restored': True}, 'restored'), ({'focused': True}, 'focused'),
                  ({'focused': MISSING}, 'focused'), ({'draft': True}, 'draft'), ({'draft': MISSING}, 'draft'),
@@ -580,7 +591,8 @@ class TileResume(Sandbox):
         res = self.host()
         self.assertEqual(self.now - started, 60)
         self.assertIn('verification unavailable', res['errors'][0])
-        self.assertNotIn('verification_failure', self.row(res))
+        self.assertIn('verification_failure', self.row(res))
+        self.assertIn('first_turn_failure', self.row(res))
 
     def test_switch_off_or_unreachable_never_mutates_tiles(self):
         self.place()
@@ -601,6 +613,266 @@ class TileResume(Sandbox):
         self.assertEqual(self.mod.host_easl({'ssh': None})['cli'], self.cli)
         self.assertEqual(self.mod.host_easl({'ssh': 'twaldin-work', 'easl': self.cli})['cli'], self.cli)
         self.assertIsNone(self.mod.host_easl({'ssh': 'tim@deckbox'}))
+
+class FirstTurn(Sandbox):
+    def test_old_error_is_not_the_restarted_turn_and_tool_use_is_not_completion(self):
+        a = self.place(state='done', seen=False)
+        path = Path(self.sessions[a['tile']])
+        path.write_text(json.dumps({'type': 'message', 'id': 'old-error', 'message': {
+            'role': 'assistant', 'stopReason': 'error'}}) + '\n')
+        self.turns = ['toolUse']
+        def finish():
+            with path.open('a') as f:
+                f.write(json.dumps({'type': 'message', 'message': {
+                    'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+        self.on_list[5] = finish
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+
+    def test_error_gets_one_fresh_restart_then_remaining_seats_continue(self):
+        self.place()
+        self.place(tile='obj_second', name='second')
+        self.turns = ['error', 'stop', 'stop']
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual([c[-1] for c in self.restarts()], ['resume', 'fresh', 'resume'])
+        self.assertEqual(self.row(res)['restart_mode'], 'fresh')
+        self.assertFalse(self.row(res)['session_unchanged'])
+        self.assertEqual([s['stopReason'] for s in res['actions'] if s.get('step') == 'first-turn'],
+                         ['error', 'stop', 'stop'])
+        self.assertFalse(any('--force' in c for c in self.restarts()))
+        self.assertNotIn('first_turn_failure', self.row(res))
+
+    def test_second_error_stops_remaining_seats(self):
+        self.place()
+        self.place(tile='obj_second', name='second')
+        self.turns = ['error', 'error']
+        res = self.host()
+        self.assertEqual([c[-1] for c in self.restarts()], ['resume', 'fresh'])
+        self.assertIn('fresh first turn', res['errors'][0])
+        self.assertIn('verification_failure', self.row(res))
+        self.assertTrue(self.row(res)['first_turn_failure'])
+        self.assertEqual(self.tiles[1]['pid'], 500001)
+
+    def test_no_completed_turn_times_out_without_unsafe_fresh_restart(self):
+        self.place()
+        self.turns = [None]
+        started = self.now
+        res = self.host()
+        self.assertEqual(self.now - started, self.mod.TURN_VERIFY_S)
+        self.assertIn('no completed assistant turn', res['errors'][0])
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_new_lifecycle_error_counter_catches_error_even_if_cleared_before_poll(self):
+        a = self.place()
+        self.turns = [None]
+        self.on_list[4] = lambda: a['lifecycle'].update(errorCount=1, errorSince=123)
+        self.on_list[5] = lambda: a.update(draft=True)
+        res = self.host()
+        self.assertIn('fresh recovery unsafe', res['errors'][0])
+        self.assertEqual(self.row(res)['first_turn']['reason'], 'lifecycle error')
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_fresh_recovery_refuses_a_new_draft(self):
+        a = self.place()
+        self.turns = ['error']
+        self.on_list[5] = lambda: a.update(draft=True)
+        res = self.host()
+        self.assertIn('draft', res['errors'][0])
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_non_message_prompt_delivery_stops_rollout(self):
+        self.place()
+        self.prompt_delivery = 'not-delivered'
+        res = self.host()
+        self.assertIn('integration', res['errors'][0])
+        self.assertIn('verification_failure', self.row(res))
+
+    def test_working_seat_can_reach_safe_point_but_never_forces_stalled_seat(self):
+        a = self.place(state='working')
+        self.on_list[3] = lambda: a['lifecycle'].update(state='done', seen=False)
+        res = self.host()
+        self.assertEqual(self.row(res)['action'], 'restarted')
+        self.assertEqual(res['errors'], [])
+        self.tiles.clear()
+        self.calls.clear()
+        self.on_list.clear()
+        self.place(state='working')
+        res = self.host()
+        self.assertTrue(self.row(res)['stalled'])
+        self.assertEqual(self.row(res)['wait_bound_s'], self.mod.SAFE_POINT_S)
+        self.assertEqual(self.restarts(), [])
+
+    def test_dry_run_never_restarts_or_prompts_and_does_not_wait(self):
+        self.place()
+        self.place(tile='obj_working', state='working')
+        before = self.now
+        res = self.host(dry=True)
+        self.assertEqual(self.row(res)['action'], 'would restart')
+        self.assertEqual(self.now, before)
+        self.assertFalse(any(c[1] in ('agent.restart', 'agent.prompt') for c in self.calls))
+
+    def test_linux_does_not_require_macos_zsh(self):
+        self.mod.MAC = False
+        self.place()
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['version'], self.installed)
+        self.assertFalse(any(c[0] == '/usr/bin/env' for c in self.calls))
+
+    def test_existing_configuration_gains_deckbox_and_retargets_work_front_door(self):
+        self.write_config({'hosts': {'deckbox': {'ssh': 'tim@deckbox', 'python': 'python3'}},
+                           'report_only': {'names': ['lindy-seat', 'custom']}})
+        cfg = self.mod.load_config()
+        self.assertEqual(cfg['report_only']['names'], ['custom'])
+        self.assertEqual(self.mod.host_easl(cfg['hosts']['deckbox'])['cli'], '/home/tim/.local/bin/easl')
+        self.place(name='lindy-coordinator')
+        self.assertEqual(self.row(self.host())['action'], 'restarted')
+
+    def test_completed_seat_with_passive_waits_rolls_but_build_work_is_protected(self):
+        a = self.place(state='done', seen=False)
+        self.child(a['pid'], 'sleep 1800')
+        self.child(a['pid'], 'python3 /home/tim/.local/bin/lane wait another-lane --seat /home/tim/agents')
+        self.child(a['pid'], 'python3 /home/tim/.local/bin/watch-pr twaldin/easl#210 --until change')
+        self.child(a['pid'], 'bun /home/tim/.local/share/easl/cli/easl.ts ask wait ask_example')
+        self.child(a['pid'], 'python3 /home/tim/agents/bin/text inbox --wait')
+        res = self.host()
+        self.assertEqual(self.row(res)['action'], 'restarted')
+        self.tiles.clear()
+        a = self.place(state='done')
+        self.child(a['pid'], 'make build')
+        self.assertIn('live child', self.row(self.host())['action'])
+
+    def test_turn_on_wrong_version_stops_remaining_seats(self):
+        a = self.place()
+        self.place(tile='obj_second', name='second')
+        def replace_version():
+            path = Path(self.sessions[a['tile']])
+            lines = path.read_text().splitlines()
+            entry = json.loads(lines[-1])
+            entry['runtime']['version'] = '1.2.2'
+            lines[-1] = json.dumps(entry)
+            path.write_text('\n'.join(lines) + '\n')
+        self.on_list[4] = replace_version
+        res = self.host()
+        self.assertIn('expected 1.2.3', res['errors'][0])
+        self.assertEqual(len(self.restarts()), 1)
+        self.assertEqual(self.tiles[1]['pid'], 500001)
+
+    def test_stale_lifecycle_error_survives_restart_but_does_not_fail_new_turn(self):
+        a = self.place()
+        old = {'state': 'working', 'error': 'old provider error', 'errorCount': 4, 'errorSince': 123}
+        self.turns = [None]
+        self.on_list[3] = lambda: a.update(lifecycle=dict(old))
+        def finish():
+            with open(self.sessions[a['tile']], 'a') as f:
+                f.write(json.dumps({'type': 'message', 'message': {
+                    'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+        self.on_list[5] = finish
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_fresh_recovery_ignores_the_resumed_turns_sticky_error(self):
+        a = self.place()
+        self.turns = ['error', None]
+        def fresh_started():
+            a['lifecycle'].update(state='working', error='resume error', errorCount=1, errorSince=123)
+        self.on_list[6] = fresh_started
+        def finish():
+            with open(self.sessions[a['tile']], 'a') as f:
+                f.write(json.dumps({'type': 'message', 'message': {
+                    'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+        self.on_list[8] = finish
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['restart_mode'], 'fresh')
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+
+    def test_working_stall_is_retried_at_next_run_without_force(self):
+        a = self.place(state='working')
+        first = self.host()
+        self.assertTrue(self.row(first)['stalled'])
+        self.assertEqual(self.restarts(), [])
+        a['lifecycle']['state'] = 'idle'
+        second = self.host()
+        self.assertEqual(self.row(second)['action'], 'restarted')
+        self.assertFalse(any('--force' in c for c in self.restarts()))
+
+    def test_provider_error_retried_inside_working_turn_can_finish_successfully(self):
+        a = self.place()
+        self.turns = ['error']
+        self.on_list[4] = lambda: a['lifecycle'].update(state='working')
+        def recovered():
+            with open(self.sessions[a['tile']], 'a') as f:
+                f.write(json.dumps({'type': 'message', 'message': {
+                    'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+        self.on_list[5] = recovered
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_first_turn_probe_failure_is_retried_without_a_fresh_restart(self):
+        self.place()
+        prompted, failed = False, False
+        def flaky(cmd, **kw):
+            nonlocal prompted, failed
+            if prompted and cmd[:2] == [self.cli, 'agent.list'] and not failed:
+                failed = True
+                raise RuntimeError('temporary easl disconnect')
+            result = self.command(cmd, **kw)
+            prompted = prompted or cmd[:2] == [self.cli, 'agent.prompt']
+            return result
+        self.mod.sh.side_effect = flaky
+        res = self.host()
+        self.assertTrue(failed)
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_atomic_session_rewrite_during_retry_follows_new_file_not_old_history(self):
+        a = self.place()
+        path = Path(self.sessions[a['tile']])
+        history = [
+            {'type': 'session', 'id': 'root'},
+            {'type': 'message', 'id': 'old-stop', 'runtime': {'version': '1.2.2'},
+             'message': {'role': 'assistant', 'stopReason': 'stop'}},
+        ]
+        path.write_text(''.join(json.dumps(e) + '\n' for e in history))
+        self.turns = ['error']
+        self.on_list[4] = lambda: a['lifecycle'].update(state='working')
+        def rewrite():
+            replacement = path.with_suffix('.rewrite')
+            replacement.write_text(''.join(json.dumps(e) + '\n' for e in history))
+            os.replace(replacement, path)
+        def finish():
+            with path.open('a') as f:
+                f.write(json.dumps({'type': 'message', 'id': 'recovered-stop',
+                    'runtime': {'version': self.installed},
+                    'message': {'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+            a['lifecycle']['state'] = 'done'
+        self.on_list[5] = rewrite
+        self.on_list[6] = finish
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['entry'], 'recovered-stop')
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_config_ignores_unsupported_controls_and_does_not_share_mutable_state(self):
+        self.write_config({'notify': ['ignored'], 'hosts': {'deckbox': {
+            'ssh': 'tim@deckbox', 'manage_panes': True}}})
+        first = self.mod.load_config()
+        self.assertNotIn('notify', first)
+        self.assertNotIn('manage_panes', first['hosts']['deckbox'])
+        first['hosts']['deckbox']['easl'] = 'changed only in memory'
+        first['blocked_versions']['bad'] = {'reason': 'changed only in memory'}
+        second = self.mod.load_config()
+        self.assertNotEqual(second['hosts']['deckbox']['easl'], 'changed only in memory')
+        self.assertNotIn('bad', second['blocked_versions'])
+
 
 
 class Services(Sandbox):
@@ -671,6 +943,34 @@ class Rollout(Sandbox):
                 self.assertEqual(self.log()[-1]['error'], reason)
                 self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
         self.assertFalse(any(e['kind'] == 'notify' for e in self.log()))
+    def test_first_turn_failure_stops_other_hosts_and_tells_assistant_on_deckbox(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [
+            {'name': 'security-coordinator', 'verification_failure': 'fresh turn failed',
+             'first_turn_failure': 'fresh turn failed'}]}
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        notification = next(c for c in self.calls if c[0] == 'ssh')
+        self.assertIn('tim@deckbox', notification)
+        self.assertIn('tell assistant@agents', notification[-1])
+        self.assertIn('security-coordinator', notification[-1])
+        self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
+
+    def test_stalled_seats_are_logged_and_notified_without_stopping_other_hosts(self):
+        self.results['deckbox'] = {'tiles': [{'name': 'assistant', 'stalled': True}]}
+        self.assertEqual(self.run_once(), 0)
+        record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
+        self.assertTrue(record['results'][0]['tiles'][0]['stalled'])
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertTrue(any(e['kind'] == 'notify' and e['action'] == 'sent' for e in self.log()))
+
+    def test_dry_notifications_and_delivery_failures_remain_visible(self):
+        self.results['deckbox'] = {'tiles': [{'name': 'assistant', 'stalled': True}]}
+        self.assertEqual(self.run_once(dry=True), 0)
+        self.assertEqual(self.calls, [])
+        self.assertTrue(any(e['kind'] == 'notify' and e['dry_run'] for e in self.log()))
+        self.mod.sh.side_effect = RuntimeError('deckbox unreachable')
+        self.assertEqual(self.run_once(), 1)
+        self.assertIn('assistant notification', self.log()[-1]['error'])
 
     def test_failed_target_install_stops_rollout_without_blocking_version(self):
         self.results['deckbox'] = {'errors': ['install failed'], 'install_failure': True}
@@ -679,29 +979,34 @@ class Rollout(Sandbox):
         self.assertEqual(self.log()[-1]['error'], 'install failed')
         self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
 
-    def test_canary_verification_failure_blocks_new_release_without_notifications(self):
-        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{'verification_failure': 'protocol missing', 'protocol_model_failure': True}]}
+    def test_canary_verification_failure_blocks_new_release_and_notifies(self):
+        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{
+            'verification_failure': 'protocol missing', 'first_turn_failure': 'protocol missing',
+            'protocol_model_failure': True}]}
         self.assertEqual(self.run_once(), 1)
         cfg = json.loads(Path(self.mod.CONFIG).read_text())
         self.assertEqual(cfg['blocked_versions']['18.8.0']['host'], 'deckbox')
         self.assertEqual(cfg['blocked_versions']['18.8.0']['reason'], 'protocol missing')
-        self.assertFalse(self.mod.sh.called)
+        self.assertTrue(any(e['kind'] == 'notify' and e['action'] == 'sent' for e in self.log()))
 
     def test_canary_already_on_newer_version_blocks_it_only_when_later_hosts_lack_it(self):
         for later, blocked in (('18.7.0', True), ('18.8.0', False)):
             with self.subTest(later=later):
+                (Path(self.mod.STATE) / 'rollout-ledger.json').unlink(missing_ok=True)
                 self.write_config({'blocked_versions': {}})
                 Path(self.mod.STATE).mkdir(parents=True, exist_ok=True)
                 (Path(self.mod.STATE) / 'last-run.json').write_text(json.dumps({'results': [
                     {'host': h, 'installed_after': later} for h in ('work', 'home')]}))
                 self.results['deckbox'] = {'installed_before': '18.8.0', 'errors': ['protocol missing'],
-                                          'tiles': [{'verification_failure': 'protocol missing', 'protocol_model_failure': True}]}
+                                          'tiles': [{'verification_failure': 'protocol missing',
+                                                     'first_turn_failure': 'protocol missing', 'protocol_model_failure': True}]}
                 self.assertEqual(self.run_once(), 1)
                 cfg = json.loads(Path(self.mod.CONFIG).read_text())
                 self.assertEqual('18.8.0' in cfg['blocked_versions'], blocked)
 
     def test_pid_or_session_verification_failure_stops_rollout_but_does_not_block(self):
-        self.results['deckbox'] = {'errors': ['session changed'], 'tiles': [{'verification_failure': 'session changed'}]}
+        self.results['deckbox'] = {'errors': ['session changed'], 'tiles': [{
+            'verification_failure': 'session changed', 'first_turn_failure': 'session changed'}]}
         self.assertEqual(self.run_once(), 1)
         self.assertEqual(list(self.params), ['deckbox'])
         self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
@@ -715,7 +1020,9 @@ class Rollout(Sandbox):
             self.write_config(raw)
             return original(name, hc, params)
         self.mod.run_host = edited
-        self.results['deckbox'] = {'errors': ['model changed'], 'tiles': [{'verification_failure': 'model changed', 'protocol_model_failure': True}]}
+        self.results['deckbox'] = {'errors': ['model changed'], 'tiles': [{
+            'verification_failure': 'model changed', 'first_turn_failure': 'model changed',
+            'protocol_model_failure': True}]}
         self.assertEqual(self.run_once(), 1)
         raw = json.loads(Path(self.mod.CONFIG).read_text())
         self.assertEqual(raw['hosts']['home']['hold_below'], '18.8.0')
@@ -741,7 +1048,9 @@ class Rollout(Sandbox):
 
     def test_dry_failure_never_blocks_or_rewrites_configuration(self):
         before = Path(self.mod.CONFIG).read_text()
-        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{'verification_failure': 'protocol missing', 'protocol_model_failure': True}]}
+        self.results['deckbox'] = {'errors': ['protocol missing'], 'tiles': [{
+            'verification_failure': 'protocol missing', 'first_turn_failure': 'protocol missing',
+            'protocol_model_failure': True}]}
         self.assertEqual(self.run_once(dry=True), 1)
         self.assertEqual(Path(self.mod.CONFIG).read_text(), before)
 
@@ -757,7 +1066,7 @@ class Rollout(Sandbox):
             return self.run_host(name, hc, params)
         self.mod.run_host = unavailable
         self.assertEqual(self.run_once(), 1)
-        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertEqual(list(self.params), ['deckbox', 'work'])
         self.assertIn('ssh', self.log()[-1]['error'])
 
     def test_remote_host_runs_identical_script_over_ssh_and_propagates_exit_errors(self):
@@ -769,6 +1078,252 @@ class Rollout(Sandbox):
         self.assertIn('twaldin-work', call.call_args.args[0])
         self.assertEqual(call.call_args.kwargs['input'], OMP_UPDATE.read_text())
         self.assertEqual(res['errors'], ['host exited 1'])
+
+    def test_unresolved_first_turn_halt_survives_runs_until_ledger_resolution(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'tile': 'obj_security', 'name': 'security-coordinator',
+            'first_turn_failure': 'fresh turn failed', 'verification_failure': 'fresh turn failed'}]}
+        self.assertEqual(self.run_once(), 1)
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        ledger = json.loads(path.read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.assertTrue(ledger['halts'][0]['notified_at'])
+        self.params.clear()
+        self.calls.clear()
+        self.results.clear()
+        self.assertEqual(self.run_once(hosts='home'), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(self.calls, [])
+        self.assertEqual(json.loads(path.read_text()), ledger)
+        ledger['halts'][0]['status'] = 'resolved'
+        ledger['halts'][0]['resolution'] = 'seat recovered and verified by operator'
+        path.write_text(json.dumps(ledger))
+        self.assertEqual(self.run_once(), 0)
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+
+    def test_unsent_halt_notification_retries_same_message_without_rolling(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'tile': 'obj_security', 'name': 'security-coordinator',
+            'first_turn_failure': 'fresh turn failed', 'verification_failure': 'fresh turn failed'}]}
+        self.mod.sh.side_effect = RuntimeError('notification transport failed')
+        self.assertEqual(self.run_once(), 1)
+        first = self.mod.sh.call_args.args[0]
+        self.params.clear()
+        self.mod.sh.side_effect = self.command
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(self.mod.sh.call_args.args[0], first)
+        self.calls.clear()
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.calls, [])
+
+    def test_dry_run_does_not_create_or_resolve_halt_ledger(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+            'verification_failure': 'fresh turn failed'}]}
+        self.assertEqual(self.run_once(dry=True), 1)
+        self.assertFalse((Path(self.mod.STATE) / 'rollout-ledger.json').exists())
+
+    def test_invalid_halt_ledger_fails_closed_before_any_host_runs(self):
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        path.parent.mkdir(parents=True)
+        for contents in ('not JSON', '{}', '{"halts":[{"status":"unknown"}]}'):
+            path.write_text(contents)
+            with self.subTest(contents=contents):
+                self.assertEqual(self.run_once(), 1)
+                self.assertEqual(self.params, {})
+
+    def test_dry_run_observes_existing_halt_without_notifying_or_changing_it(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+            'verification_failure': 'fresh turn failed'}]}
+        self.assertEqual(self.run_once(), 1)
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        before = path.read_bytes()
+        self.params.clear()
+        self.calls.clear()
+        self.assertEqual(self.run_once(dry=True), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(self.calls, [])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_accepted_restart_that_never_becomes_ready_persists_a_halt(self):
+        self.place()
+        self.place(tile='obj_second', name='second')
+        self.new_pid = False
+        self.mod.resolve_target = lambda *args: {
+            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
+        def local_host(name, hc, params):
+            self.params[name] = params
+            params['easl'] = {'cli': self.cli}
+            return self.mod.host_main(params)
+        self.mod.run_host = local_host
+        self.assertEqual(self.run_once(), 1)
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.params.clear()
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_restart_error_after_kill_persists_halt_and_stops_all_hosts(self):
+        self.place()
+        self.mod.resolve_target = lambda *args: {
+            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
+        def local_host(name, hc, params):
+            self.params[name] = params
+            params['easl'] = {'cli': self.cli}
+            return self.mod.host_main(params)
+        self.mod.run_host = local_host
+        def unavailable(cmd, **kw):
+            if cmd[:2] == [self.cli, 'agent.restart']:
+                self.calls.append(list(cmd))
+                self.tiles[0].pop('pid')
+                return subprocess.CompletedProcess(cmd, 1, '', 'unavailable: session conflict: nothing was relaunched')
+            return self.command(cmd, **kw)
+        self.mod.sh.side_effect = unavailable
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.assertIn('nothing was relaunched', ledger['halts'][0]['reason'])
+        self.assertTrue(ledger['halts'][0]['notified_at'])
+        self.params.clear()
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_lost_host_result_is_held_across_runs_and_notified_once(self):
+        def lost(name, hc, params):
+            self.params[name] = params
+            raise subprocess.TimeoutExpired('ssh', 5400)
+        self.mod.run_host = lost
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.assertIn('host result lost', ledger['halts'][0]['reason'])
+        self.assertTrue(ledger['halts'][0]['notified_at'])
+        self.params.clear()
+        self.calls.clear()
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(self.calls, [])
+
+    def test_recording_notification_does_not_undo_a_concurrent_ledger_resolution(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+            'verification_failure': 'fresh turn failed'}]}
+        def resolve_during_send(cmd, **kw):
+            if cmd[0] == 'ssh' and 'tell assistant@agents' in cmd[-1]:
+                path = Path(self.mod.STATE) / 'rollout-ledger.json'
+                ledger = json.loads(path.read_text())
+                ledger['halts'][0].update(status='resolved', resolution='operator verified recovery')
+                path.write_text(json.dumps(ledger))
+            return self.command(cmd, **kw)
+        self.mod.sh.side_effect = resolve_during_send
+        self.assertEqual(self.run_once(), 1)
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'resolved')
+        self.assertEqual(ledger['halts'][0]['resolution'], 'operator verified recovery')
+        self.assertTrue(ledger['halts'][0]['notified_at'])
+
+    def test_preexecution_ssh_failure_keeps_later_hosts_running_without_a_halt(self):
+        def with_unreachable_work(name, hc, params):
+            self.params[name] = params
+            if name == 'work':
+                return self.real_run_host(name, hc, params)
+            return self.run_host(name, hc, params)
+        self.mod.run_host = with_unreachable_work
+        response = subprocess.CompletedProcess([], 255, '', 'Permission denied (publickey,password,keyboard-interactive).')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertFalse((Path(self.mod.STATE) / 'rollout-ledger.json').exists())
+        self.assertEqual(self.calls, [])
+
+    def test_host_result_lost_after_start_marker_still_persists_a_halt(self):
+        def with_lost_result(name, hc, params):
+            self.params[name] = params
+            return self.real_run_host(name, hc, params)
+        self.mod.run_host = with_lost_result
+        response = subprocess.CompletedProcess([], 255, 'STARTED\n', 'Connection closed by remote host')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.assertIn('host result lost', ledger['halts'][0]['reason'])
+
+    def test_appending_a_halt_preserves_operator_evidence_added_during_host_run(self):
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'halts': [{
+            'id': 'msg_omp_update_old_entry', 'status': 'resolved', 'host': 'deckbox',
+            'name': 'prior-seat', 'version': '18.7.0', 'reason': 'prior issue'}]}))
+        def edited_ledger(name, hc, params):
+            self.params[name] = params
+            ledger = json.loads(path.read_text())
+            ledger['halts'][0]['resolution'] = 'operator added evidence while host ran'
+            path.write_text(json.dumps(ledger))
+            return {'host': name, 'installed_after': '18.8.0', 'actions': [], 'unmanaged': [],
+                    'errors': ['fresh turn failed'], 'tiles': [{
+                        'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+                        'verification_failure': 'fresh turn failed'}]}
+        self.mod.run_host = edited_ledger
+        self.assertEqual(self.run_once(), 1)
+        ledger = json.loads(path.read_text())
+        self.assertEqual(ledger['halts'][0]['resolution'], 'operator added evidence while host ran')
+        self.assertEqual(ledger['halts'][1]['status'], 'unresolved')
+
+    def test_unmarked_ambiguous_disconnect_is_not_classified_as_preexecution(self):
+        response = subprocess.CompletedProcess([], 255, '', 'Connection closed by remote host')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            with self.assertRaises(RuntimeError) as error:
+                self.real_run_host('work', {'ssh': 'twaldin-work'}, {})
+        self.assertNotIsInstance(error.exception, self.mod.HostNotStarted)
+
+    def test_ledger_corrupted_during_host_run_still_retains_the_new_halt(self):
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        def corrupted_ledger(name, hc, params):
+            path.write_text('invalid concurrent edit')
+            return {'host': name, 'installed_after': '18.8.0', 'actions': [], 'unmanaged': [],
+                    'errors': ['fresh turn failed'], 'tiles': [{
+                        'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+                        'verification_failure': 'fresh turn failed'}]}
+        self.mod.run_host = corrupted_ledger
+        self.assertEqual(self.run_once(), 1)
+        ledger = json.loads(path.read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
+        self.assertTrue(any('ledger reload failed' in e for e in record['results'][0]['errors']))
+
+    def test_remote_interpreter_failure_before_marker_does_not_halt_later_hosts(self):
+        def with_broken_interpreter(name, hc, params):
+            self.params[name] = params
+            if name == 'work':
+                return self.real_run_host(name, hc, params)
+            return self.run_host(name, hc, params)
+        self.mod.run_host = with_broken_interpreter
+        response = subprocess.CompletedProcess([], 1, '', 'xcrun: error: invalid active developer path')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertFalse((Path(self.mod.STATE) / 'rollout-ledger.json').exists())
+
+    def test_start_marker_glued_to_shell_output_still_makes_result_loss_a_halt(self):
+        response = subprocess.CompletedProcess([], 1, 'shell bannerSTARTED\n', 'worker failed')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            with self.assertRaises(RuntimeError) as error:
+                self.real_run_host('work', {'ssh': 'twaldin-work'}, {})
+        self.assertNotIsInstance(error.exception, self.mod.HostNotStarted)
+
+    def test_ssh_killed_by_signal_without_marker_remains_ambiguous(self):
+        response = subprocess.CompletedProcess([], -9, '', '')
+        with mock.patch.object(subprocess, 'run', return_value=response):
+            with self.assertRaises(RuntimeError) as error:
+                self.real_run_host('work', {'ssh': 'twaldin-work'}, {})
+        self.assertNotIsInstance(error.exception, self.mod.HostNotStarted)
 
 
 if __name__ == '__main__':
