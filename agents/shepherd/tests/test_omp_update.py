@@ -1156,6 +1156,69 @@ class Rollout(Sandbox):
         self.assertEqual(self.params, {})
         self.assertEqual(len(self.restarts()), 1)
 
+    def test_restart_error_after_kill_persists_halt_and_stops_all_hosts(self):
+        self.place()
+        self.mod.resolve_target = lambda *args: {
+            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
+        def local_host(name, hc, params):
+            self.params[name] = params
+            params['easl'] = {'cli': self.cli}
+            return self.mod.host_main(params)
+        self.mod.run_host = local_host
+        def unavailable(cmd, **kw):
+            if cmd[:2] == [self.cli, 'agent.restart']:
+                self.calls.append(list(cmd))
+                self.tiles[0].pop('pid')
+                return subprocess.CompletedProcess(cmd, 1, json.dumps({
+                    'error': {'code': 'unavailable', 'message': 'nothing was relaunched'}}), '')
+            return self.command(cmd, **kw)
+        self.mod.sh.side_effect = unavailable
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.assertIn('nothing was relaunched', ledger['halts'][0]['reason'])
+        self.assertTrue(ledger['halts'][0]['notified_at'])
+        self.params.clear()
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_lost_host_result_is_held_across_runs_and_notified_once(self):
+        def lost(name, hc, params):
+            self.params[name] = params
+            raise subprocess.TimeoutExpired('ssh', 5400)
+        self.mod.run_host = lost
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.assertIn('host result lost', ledger['halts'][0]['reason'])
+        self.assertTrue(ledger['halts'][0]['notified_at'])
+        self.params.clear()
+        self.calls.clear()
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(self.calls, [])
+
+    def test_recording_notification_does_not_undo_a_concurrent_ledger_resolution(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+            'verification_failure': 'fresh turn failed'}]}
+        def resolve_during_send(cmd, **kw):
+            if cmd[0] == 'ssh' and 'tell assistant@agents' in cmd[-1]:
+                path = Path(self.mod.STATE) / 'rollout-ledger.json'
+                ledger = json.loads(path.read_text())
+                ledger['halts'][0].update(status='resolved', resolution='operator verified recovery')
+                path.write_text(json.dumps(ledger))
+            return self.command(cmd, **kw)
+        self.mod.sh.side_effect = resolve_during_send
+        self.assertEqual(self.run_once(), 1)
+        ledger = json.loads((Path(self.mod.STATE) / 'rollout-ledger.json').read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'resolved')
+        self.assertEqual(ledger['halts'][0]['resolution'], 'operator verified recovery')
+        self.assertTrue(ledger['halts'][0]['notified_at'])
+
 
 if __name__ == '__main__':
     unittest.main()

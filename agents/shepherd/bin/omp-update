@@ -373,12 +373,13 @@ def restart_tile(row, a, actions, installed):
                     if entry.get("id"):
                         baseline.add(entry["id"])
         actions.append(dict(step, ts=stamp(), step="restart"))
+        row["verification_stage"] = "restart"
         try:
             easl(a["cli"], "agent.restart", "--target", a["tile"], "--mode", mode, timeout=120)
-            row["verification_stage"] = "restart"
         except EaslConflict as e:
             if mode == "fresh":
                 raise RuntimeError(f"fresh recovery refused: {e}")
+            row.pop("verification_stage", None)
             row["action"] = f"skip: easl refused: {e}"
             return
         now, session = verify_restart(row, a, mode)
@@ -759,17 +760,24 @@ def notify_assistant(cfg, res, dry, halt=None):
     failed = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("verification_failure")]
     recovered = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"]
                  if t.get("restart_mode") == "fresh" and t.get("action") == "restarted"]
-    if not (stalled or failed or recovered):
+    if not (halt or stalled or failed or recovered):
         return
-    text = (f"omp-update {res['host']}: working past {SAFE_POINT_S}s (not forced): {stalled}; "
-            f"rollout stopped after verification failure: {failed}; fresh recovery: {recovered}. "
-            "See ~/.local/state/omp-update/last-run.json on home.")
     if halt:
         if halt.get("notified_at"):
             return False
+        stalled, recovered = halt.get("stalled", []), halt.get("recovered", [])
         text = (f"omp-update rollout halted: {halt['host']} {halt['name']} on omp {halt['version']}: "
                 f"{halt['reason']}. Halt {halt['id']} remains active until its status is resolved in "
                 "~/.local/state/omp-update/rollout-ledger.json on home.")
+    else:
+        text = f"omp-update {res['host']}."
+        if failed:
+            text += f" Rollout stopped after verification failure: {failed}."
+    if stalled:
+        text += f" Working past the {SAFE_POINT_S}s safe-point window (not forced): {stalled}."
+    if recovered:
+        text += f" Fresh recovery: {recovered}."
+    text += " See ~/.local/state/omp-update/last-run.json on home."
     act = {"kind": "notify", "target": "assistant@agents", "text": text, "dry_run": dry}
     res["actions"].append(act)
     if dry:
@@ -842,6 +850,16 @@ def save_ledger(ledger):
     os.replace(path + ".tmp", path)
 
 
+def mark_halt_notified(halt_id):
+    ledger = load_ledger()
+    for halt in ledger["halts"]:
+        if halt["id"] == halt_id:
+            halt["notified_at"] = stamp()
+            save_ledger(ledger)
+            return
+    raise RuntimeError(f"halt {halt_id} missing after notification; ledger left unchanged")
+
+
 def main_run(args):
     record = {"started": stamp(), "dry_run": args.dry_run, "results": [], "errors": []}
     lock = None
@@ -862,8 +880,7 @@ def main_run(args):
                    "unmanaged": [], "errors": []}
             record["results"].append(res)
             if notify_assistant(cfg, res, args.dry_run, halt) and not args.dry_run:
-                halt["notified_at"] = stamp()
-                save_ledger(ledger)
+                mark_halt_notified(halt["id"])
             raise RuntimeError(f"rollout halted by unresolved ledger entry {halt['id']}")
         try:
             with open(os.path.join(STATE, "last-run.json")) as f:
@@ -884,19 +901,22 @@ def main_run(args):
             record["results"].append(res)
             failure = next((t for t in res["tiles"] if t.get("first_turn_failure")), None)
             halt = None
-            if failure:
+            if failure or res.get("host_result_lost"):
                 halt = {"id": "msg_omp_update_" + uuid.uuid4().hex, "status": "unresolved",
-                        "host": name, "name": failure.get("name") or failure.get("tile", "unknown"),
-                        "tile": failure.get("tile"), "version": res.get("installed_after") or params["target"],
-                        "reason": failure["first_turn_failure"], "at": stamp(),
-                        "first_turn": failure.get("first_turn")}
+                        "host": name, "name": (failure.get("name") or failure.get("tile", "unknown")) if failure else "host result",
+                        "tile": failure.get("tile") if failure else None,
+                        "version": (res.get("installed_after") or params["target"]) if failure else "unknown",
+                        "reason": failure["first_turn_failure"] if failure else f"host result lost: {res['errors'][0]}",
+                        "at": stamp(), "first_turn": failure.get("first_turn") if failure else None,
+                        "stalled": [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("stalled")],
+                        "recovered": [t.get("name") or t.get("tile", "unknown") for t in res["tiles"]
+                                      if t.get("restart_mode") == "fresh" and t.get("action") == "restarted"]}
                 ledger["halts"].append(halt)
                 res["actions"].append({"kind": "rollout-halt", **halt})
                 if not args.dry_run:
                     save_ledger(ledger)
             if notify_assistant(cfg, res, args.dry_run, halt) and halt and not args.dry_run:
-                halt["notified_at"] = stamp()
-                save_ledger(ledger)
+                mark_halt_notified(halt["id"])
             if res.get("host_result_lost"):
                 break
             if res.get("install_failure") or any(t.get("verification_failure") for t in res["tiles"]):
