@@ -132,7 +132,7 @@ class Sandbox(unittest.TestCase):
                     a['pid'] += 100000
                 a.update(self.after_restart)
                 self.procs[a['pid']] = {'ppid': 1, 'age_s': 1, 'rss_mb': 400, 'cmd': self.mod.OMP}
-                a['lifecycle'] = {'state': 'idle', 'seen': True}
+                a['lifecycle'] = {**a['lifecycle'], 'state': 'idle', 'seen': True, 'restored': False}
                 if cmd[-1] == 'fresh':
                     path = self.root / f"fresh-{a['pid']}.jsonl"
                     path.write_text('{"type":"session"}\n')
@@ -143,6 +143,10 @@ class Sandbox(unittest.TestCase):
             elif method == 'agent.prompt':
                 a = next(a for a in self.tiles if a['tile'] == cmd[3])
                 stop = self.turns.pop(0) if len(self.turns) > 1 else self.turns[0]
+                a['lifecycle']['state'] = 'working' if stop in (None, 'toolUse') else 'done'
+                if stop in ('error', 'aborted', 'length'):
+                    a['lifecycle'].update(state='idle', error=stop, errorSince=self.now,
+                                          errorCount=a['lifecycle'].get('errorCount', 0) + 1)
                 if stop:
                     entry = {'type': 'message', 'id': 'turn-' + str(a['pid']),
                              'runtime': {'version': self.installed},
@@ -639,6 +643,7 @@ class FirstTurn(Sandbox):
         self.assertEqual([s['stopReason'] for s in res['actions'] if s.get('step') == 'first-turn'],
                          ['error', 'stop', 'stop'])
         self.assertFalse(any('--force' in c for c in self.restarts()))
+        self.assertNotIn('first_turn_failure', self.row(res))
 
     def test_second_error_stops_remaining_seats(self):
         self.place()
@@ -648,6 +653,7 @@ class FirstTurn(Sandbox):
         self.assertEqual([c[-1] for c in self.restarts()], ['resume', 'fresh'])
         self.assertIn('fresh first turn', res['errors'][0])
         self.assertIn('verification_failure', self.row(res))
+        self.assertTrue(self.row(res)['first_turn_failure'])
         self.assertEqual(self.tiles[1]['pid'], 500001)
 
     def test_no_completed_turn_times_out_without_unsafe_fresh_restart(self):
@@ -730,6 +736,8 @@ class FirstTurn(Sandbox):
         self.child(a['pid'], 'sleep 1800')
         self.child(a['pid'], 'python3 /home/tim/.local/bin/lane wait another-lane --seat /home/tim/agents')
         self.child(a['pid'], 'python3 /home/tim/.local/bin/watch-pr twaldin/easl#210 --until change')
+        self.child(a['pid'], 'bun /home/tim/.local/share/easl/cli/easl.ts ask wait ask_example')
+        self.child(a['pid'], 'python3 /home/tim/agents/bin/text inbox --wait')
         res = self.host()
         self.assertEqual(self.row(res)['action'], 'restarted')
         self.tiles.clear()
@@ -752,6 +760,79 @@ class FirstTurn(Sandbox):
         self.assertIn('expected 1.2.3', res['errors'][0])
         self.assertEqual(len(self.restarts()), 1)
         self.assertEqual(self.tiles[1]['pid'], 500001)
+
+    def test_stale_lifecycle_error_survives_restart_but_does_not_fail_new_turn(self):
+        a = self.place()
+        old = {'state': 'working', 'error': 'old provider error', 'errorCount': 4, 'errorSince': 123}
+        self.turns = [None]
+        self.on_list[3] = lambda: a.update(lifecycle=dict(old))
+        def finish():
+            with open(self.sessions[a['tile']], 'a') as f:
+                f.write(json.dumps({'type': 'message', 'message': {
+                    'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+        self.on_list[5] = finish
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_fresh_recovery_ignores_the_resumed_turns_sticky_error(self):
+        a = self.place()
+        self.turns = ['error', None]
+        def fresh_started():
+            a['lifecycle'].update(state='working', error='resume error', errorCount=1, errorSince=123)
+        self.on_list[6] = fresh_started
+        def finish():
+            with open(self.sessions[a['tile']], 'a') as f:
+                f.write(json.dumps({'type': 'message', 'message': {
+                    'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+        self.on_list[8] = finish
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['restart_mode'], 'fresh')
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+
+    def test_working_stall_is_retried_at_next_run_without_force(self):
+        a = self.place(state='working')
+        first = self.host()
+        self.assertTrue(self.row(first)['stalled'])
+        self.assertEqual(self.restarts(), [])
+        a['lifecycle']['state'] = 'idle'
+        second = self.host()
+        self.assertEqual(self.row(second)['action'], 'restarted')
+        self.assertFalse(any('--force' in c for c in self.restarts()))
+
+    def test_provider_error_retried_inside_working_turn_can_finish_successfully(self):
+        a = self.place()
+        self.turns = ['error']
+        self.on_list[4] = lambda: a['lifecycle'].update(state='working')
+        def recovered():
+            with open(self.sessions[a['tile']], 'a') as f:
+                f.write(json.dumps({'type': 'message', 'message': {
+                    'role': 'assistant', 'stopReason': 'stop'}}) + '\n')
+        self.on_list[5] = recovered
+        res = self.host()
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_first_turn_probe_failure_is_retried_without_a_fresh_restart(self):
+        self.place()
+        prompted, failed = False, False
+        def flaky(cmd, **kw):
+            nonlocal prompted, failed
+            if prompted and cmd[:2] == [self.cli, 'agent.list'] and not failed:
+                failed = True
+                raise RuntimeError('temporary easl disconnect')
+            result = self.command(cmd, **kw)
+            prompted = prompted or cmd[:2] == [self.cli, 'agent.prompt']
+            return result
+        self.mod.sh.side_effect = flaky
+        res = self.host()
+        self.assertTrue(failed)
+        self.assertEqual(res['errors'], [])
+        self.assertEqual(self.row(res)['first_turn']['stopReason'], 'stop')
+        self.assertEqual(len(self.restarts()), 1)
 
 
 
@@ -948,6 +1029,74 @@ class Rollout(Sandbox):
         self.assertIn('twaldin-work', call.call_args.args[0])
         self.assertEqual(call.call_args.kwargs['input'], OMP_UPDATE.read_text())
         self.assertEqual(res['errors'], ['host exited 1'])
+
+    def test_unresolved_first_turn_halt_survives_runs_until_ledger_resolution(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'tile': 'obj_security', 'name': 'security-coordinator',
+            'first_turn_failure': 'fresh turn failed', 'verification_failure': 'fresh turn failed'}]}
+        self.assertEqual(self.run_once(), 1)
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        ledger = json.loads(path.read_text())
+        self.assertEqual(ledger['halts'][0]['status'], 'unresolved')
+        self.assertTrue(ledger['halts'][0]['notified_at'])
+        self.params.clear()
+        self.calls.clear()
+        self.results.clear()
+        self.assertEqual(self.run_once(hosts='home'), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(self.calls, [])
+        self.assertEqual(json.loads(path.read_text()), ledger)
+        ledger['halts'][0]['status'] = 'resolved'
+        ledger['halts'][0]['resolution'] = 'seat recovered and verified by operator'
+        path.write_text(json.dumps(ledger))
+        self.assertEqual(self.run_once(), 0)
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+
+    def test_unsent_halt_notification_retries_same_message_without_rolling(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'tile': 'obj_security', 'name': 'security-coordinator',
+            'first_turn_failure': 'fresh turn failed', 'verification_failure': 'fresh turn failed'}]}
+        self.mod.sh.side_effect = RuntimeError('notification transport failed')
+        self.assertEqual(self.run_once(), 1)
+        first = self.mod.sh.call_args.args[0]
+        self.params.clear()
+        self.mod.sh.side_effect = self.command
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(self.mod.sh.call_args.args[0], first)
+        self.calls.clear()
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.calls, [])
+
+    def test_dry_run_does_not_create_or_resolve_halt_ledger(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+            'verification_failure': 'fresh turn failed'}]}
+        self.assertEqual(self.run_once(dry=True), 1)
+        self.assertFalse((Path(self.mod.STATE) / 'rollout-ledger.json').exists())
+
+    def test_invalid_halt_ledger_fails_closed_before_any_host_runs(self):
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        path.parent.mkdir(parents=True)
+        for contents in ('not JSON', '{}', '{"halts":[{"status":"unknown"}]}'):
+            path.write_text(contents)
+            with self.subTest(contents=contents):
+                self.assertEqual(self.run_once(), 1)
+                self.assertEqual(self.params, {})
+
+    def test_dry_run_observes_existing_halt_without_notifying_or_changing_it(self):
+        self.results['deckbox'] = {'errors': ['fresh turn failed'], 'tiles': [{
+            'name': 'security-coordinator', 'first_turn_failure': 'fresh turn failed',
+            'verification_failure': 'fresh turn failed'}]}
+        self.assertEqual(self.run_once(), 1)
+        path = Path(self.mod.STATE) / 'rollout-ledger.json'
+        before = path.read_bytes()
+        self.params.clear()
+        self.calls.clear()
+        self.assertEqual(self.run_once(dry=True), 1)
+        self.assertEqual(self.params, {})
+        self.assertEqual(self.calls, [])
+        self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == '__main__':

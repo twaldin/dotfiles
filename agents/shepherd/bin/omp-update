@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
 """Update omp and roll named easl coordinators at safe points.
 
-Keep release selection, canary install order and broker restarts independent of
-seat rollout. Never force a restart or touch Tim's unnamed tiles. Wait at most
-five minutes for working seats, then report them to assistant@agents on deckbox.
-Verify PID, session, protocol and model, then send one integration-only re-arm
-prompt and require its first completed assistant turn within three minutes.
-An errored turn gets one safe fresh restart; another failure stops the rollout.
-
 Config: ~/.config/omp-update/config.json; local easl opt-in:
 ~/.config/machine-shepherd/easl.json {"enabled": true, "cli": ".../bin/easl"}.
 Logs: ~/.local/state/omp-update/actions.jsonl and last-run.json.
@@ -28,6 +21,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 
 REPO = "can1357/oh-my-pi"
 NPM_PKG = "@oh-my-pi/pi-coding-agent"
@@ -46,7 +40,7 @@ MAX_RSS_MB = 1536
 VERIFY_S = 60
 SUBAGENT_FRESH_S = 180
 SAFE_POINT_S = 300
-TURN_VERIFY_S = 180
+TURN_VERIFY_S = 600
 DEFAULT_CONFIG = {
     "hosts": {
         "deckbox": {"ssh": "tim@deckbox", "python": "python3",
@@ -69,7 +63,8 @@ TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner(-\d+)?/")
 SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|pyright|langserver|language-server|languageserver|"
                         r"tsserver|rust-analyzer|gopls|clangd|sourcekit-lsp|lsp-mux|biome lsp|ruff server")
 PASSIVE_WAIT = re.compile(r"(?:^|/)(?:sleep \d+(?:\.\d+)?$|lane wait |"
-                          r"watch-pr .* --until (?:change|merge)\b|vuln-feed .* --wait(?: |$))")
+                          r"watch-pr .* --until (?:change|merge)\b|vuln-feed .* --wait(?: |$)|"
+                          r"easl(?:\.ts)? ask wait |text inbox --wait(?: |$))")
 
 
 def sh(cmd, timeout=120, check=False, **kw):
@@ -349,7 +344,7 @@ def idle_gate(a, procs, session):
     lc = a.get("lifecycle") or {}
     if lc.get("restored"):
         return "lifecycle restored after an app restart, unconfirmed"
-    if lc.get("state") not in ("idle", "waiting", "done"):
+    if lc.get("state") not in ("idle", "done"):
         return str(lc.get("state") or "unknown")
     for key in ("focused", "draft"):
         if a.get(key) is not False:
@@ -368,7 +363,6 @@ def restart_tile(row, a, actions, installed):
     for mode in ("resume", "fresh"):
         step = {"kind": "tile-step", "tile": a["tile"], "name": a["name"], "mode": mode}
         baseline = os.path.getsize(row["session"]) if mode == "resume" else 0
-        lifecycle = a.get("lifecycle") or {}
         actions.append(dict(step, ts=stamp(), step="restart"))
         try:
             easl(a["cli"], "agent.restart", "--target", a["tile"], "--mode", mode, timeout=120)
@@ -378,6 +372,8 @@ def restart_tile(row, a, actions, installed):
             row["action"] = f"skip: easl refused: {e}"
             return
         now, session = verify_restart(row, a, mode)
+        lifecycle = now.get("lifecycle") or {}
+        row["verification_stage"] = "first-turn"
         actions.append(dict(step, ts=stamp(), step="ready", pid=now["pid"], session=session))
         prompt = easl(a["cli"], "agent.prompt", "--target", a["tile"],
                       "--text", f"You were restarted onto omp {installed} by the updater. Re-arm your own background jobs from your state.",
@@ -390,9 +386,11 @@ def restart_tile(row, a, actions, installed):
         row.update(first_turn=result, restart_mode=mode)
         if result["ok"]:
             row.pop("verification_failure", None)
+            row.pop("first_turn_failure", None)
             row["action"] = "restarted"
             return
         row["verification_failure"] = result["reason"]
+        row["first_turn_failure"] = result["reason"]
         if mode == "fresh" or not result.get("turn_error"):
             raise RuntimeError(f"{mode} first turn: {result['reason']}")
         a = tile_get(a["cli"], a["tile"]) or {}
@@ -438,20 +436,23 @@ def verify_restart(row, a, mode):
 
 
 def verify_turn(a, pid, session, offset, previous, installed):
-    deadline = time.time() + TURN_VERIFY_S
-    started = False
+    deadline, pending_error = time.time() + TURN_VERIFY_S, None
     with open(session) as f:
         f.seek(offset)
         while time.time() < deadline:
-            now = tile_get(a["cli"], a["tile"], timeout=deadline - time.time()) or {}
+            try:
+                now = tile_get(a["cli"], a["tile"], timeout=deadline - time.time()) or {}
+            except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
+                time.sleep(min(2, max(0, deadline - time.time())))
+                continue
             if now.get("pid") != pid:
                 return {"ok": False, "reason": "tile changed during first turn"}
             lc = now.get("lifecycle") or {}
-            started = started or lc.get("state") == "working"
             new_error = lc.get("errorCount", 0) > previous.get("errorCount", 0) or (
                 lc.get("errorSince") and lc.get("errorSince") != previous.get("errorSince"))
-            if new_error or (started and lc.get("error")):
-                return {"ok": False, "turn_error": True, "reason": lc.get("error") or "lifecycle error"}
+            if new_error:
+                pending_error = {"ok": False, "turn_error": True,
+                                 "reason": lc.get("error") or "lifecycle error"}
             while True:
                 pos = f.tell()
                 line = f.readline()
@@ -473,11 +474,13 @@ def verify_turn(a, pid, session, offset, previous, installed):
                           "entry": entry.get("id"), "session": session}
                 if version and version != installed:
                     return dict(result, ok=False, reason=f"turn ran omp {version}, expected {installed}")
-                if not result["ok"]:
-                    result.update(turn_error=True, reason=message.get("errorMessage") or stop)
-                return result
+                if result["ok"]:
+                    return result
+                pending_error = dict(result, turn_error=True, reason=message.get("errorMessage") or stop)
+            if pending_error and lc.get("state") in ("idle", "done"):
+                return pending_error
             time.sleep(min(2, max(0, deadline - time.time())))
-    return {"ok": False, "reason": f"no completed assistant turn within {TURN_VERIFY_S} s"}
+    return pending_error or {"ok": False, "reason": f"no completed assistant turn within {TURN_VERIFY_S} s"}
 
 
 def restart_services(services, installed, dry, pending, res):
@@ -592,17 +595,22 @@ def host_main(params):
                     if (a.get("lifecycle") or {}).get("state") == "working" and not dry:
                         res["actions"].append({"kind": "tile-step", "tile": a["tile"], "step": "wait-safe-point",
                                                "ts": stamp(), "bound_s": SAFE_POINT_S})
-                        while time.time() < safe_deadline:
-                            time.sleep(min(2, max(0, safe_deadline - time.time())))
+                        while True:
                             now = tile_get(a["cli"], a["tile"])
                             if not now or now.get("pid") != a["pid"]:
+                                row["action"] = "skip: tile changed while waiting"
                                 break
-                            if (now.get("lifecycle") or {}).get("state") != "working":
-                                a = now
+                            a = now
+                            row["status"] = (a.get("lifecycle") or {}).get("state")
+                            if row["status"] != "working":
                                 break
-                        if (a.get("lifecycle") or {}).get("state") == "working":
-                            row["stalled"] = True
-                            row["wait_bound_s"] = SAFE_POINT_S
+                            if time.time() >= safe_deadline:
+                                row["stalled"] = True
+                                row["wait_bound_s"] = SAFE_POINT_S
+                                break
+                            time.sleep(min(2, max(0, safe_deadline - time.time())))
+                        if row.get("action"):
+                            continue
                         procs = ps_table()
                     skip = idle_gate(a, procs, session)
                     if not skip and not a.get("model"):
@@ -629,6 +637,8 @@ def host_main(params):
                 row["action"] = f"failed: {e}"
                 if row.get("new_pid"):
                     row["verification_failure"] = str(e)
+                    if row.get("verification_stage") == "first-turn":
+                        row["first_turn_failure"] = str(e)
                 res["errors"].append(f"{a['tile']}: {e}")
                 break
             finally:
@@ -728,7 +738,7 @@ def load_config():
     return cfg
 
 
-def notify_assistant(cfg, res, dry):
+def notify_assistant(cfg, res, dry, halt=None):
     stalled = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("stalled")]
     failed = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("verification_failure")]
     recovered = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"]
@@ -738,17 +748,26 @@ def notify_assistant(cfg, res, dry):
     text = (f"omp-update {res['host']}: working past {SAFE_POINT_S}s (not forced): {stalled}; "
             f"rollout stopped after verification failure: {failed}; fresh recovery: {recovered}. "
             "See ~/.local/state/omp-update/last-run.json on home.")
+    if halt:
+        if halt.get("notified_at"):
+            return False
+        text = (f"omp-update rollout halted: {halt['host']} {halt['name']} on omp {halt['version']}: "
+                f"{halt['reason']}. Halt {halt['id']} remains active until its status is resolved in "
+                "~/.local/state/omp-update/rollout-ledger.json on home.")
     act = {"kind": "notify", "target": "assistant@agents", "text": text, "dry_run": dry}
     res["actions"].append(act)
     if dry:
         return
     hc = cfg["hosts"]["deckbox"]
     cmd = [hc["easl"], "tell", "assistant@agents", text, "--from", "omp-update"]
+    if halt:
+        cmd.extend(["--message", halt["id"]])
     try:
         if hc.get("ssh"):
             cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", hc["ssh"], shlex.join(cmd)]
         sh(cmd, timeout=60, check=True)
         act["action"] = "sent"
+        return True
     except Exception as e:
         act["action"] = f"failed: {e}"
         res["errors"].append(f"assistant notification: {e}")
@@ -784,6 +803,29 @@ def take_lock():
         raise
 
 
+def load_ledger():
+    try:
+        with open(os.path.join(STATE, "rollout-ledger.json")) as f:
+            ledger = json.load(f)
+    except FileNotFoundError:
+        return {"halts": []}
+    if (not isinstance(ledger, dict) or not isinstance(ledger.get("halts"), list)
+            or any(not isinstance(h, dict) or h.get("status") not in ("unresolved", "resolved")
+                   or not all(isinstance(h.get(k), str) and h[k] for k in ("id", "host", "name", "version", "reason"))
+                   for h in ledger["halts"])):
+        raise RuntimeError("invalid rollout-ledger.json; rollout held")
+    return ledger
+
+
+def save_ledger(ledger):
+    path = os.path.join(STATE, "rollout-ledger.json")
+    with open(path + ".tmp", "w") as f:
+        json.dump(ledger, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(path + ".tmp", path)
+
+
 def main_run(args):
     record = {"started": stamp(), "dry_run": args.dry_run, "results": [], "errors": []}
     lock = None
@@ -795,6 +837,18 @@ def main_run(args):
         if not args.dry_run:
             update_config(prune_config)
         cfg = load_config()
+        ledger = load_ledger()
+        halt = next((h for h in ledger["halts"] if h["status"] == "unresolved"), None)
+        if halt:
+            record["halted"] = dict(halt)
+            res = {"host": halt["host"], "actions": [{"kind": "rollout-held", "halt": halt["id"]}],
+                   "tiles": [{"name": halt["name"], "verification_failure": halt["reason"]}],
+                   "unmanaged": [], "errors": []}
+            record["results"].append(res)
+            if notify_assistant(cfg, res, args.dry_run, halt) and not args.dry_run:
+                halt["notified_at"] = stamp()
+                save_ledger(ledger)
+            raise RuntimeError(f"rollout halted by unresolved ledger entry {halt['id']}")
         try:
             with open(os.path.join(STATE, "last-run.json")) as f:
                 known = {r["host"]: r.get("installed_after") for r in json.load(f)["results"]}
@@ -811,7 +865,21 @@ def main_run(args):
                 res = {"host": name, "actions": [], "tiles": [], "unmanaged": [], "errors": [str(e)]}
             res.update(target=params["target"], hold_below=hc.get("hold_below"))
             record["results"].append(res)
-            notify_assistant(cfg, res, args.dry_run)
+            failure = next((t for t in res["tiles"] if t.get("first_turn_failure")), None)
+            halt = None
+            if failure:
+                halt = {"id": "msg_omp_update_" + uuid.uuid4().hex, "status": "unresolved",
+                        "host": name, "name": failure.get("name") or failure.get("tile", "unknown"),
+                        "tile": failure.get("tile"), "version": res.get("installed_after") or params["target"],
+                        "reason": failure["first_turn_failure"], "at": stamp(),
+                        "first_turn": failure.get("first_turn")}
+                ledger["halts"].append(halt)
+                res["actions"].append({"kind": "rollout-halt", **halt})
+                if not args.dry_run:
+                    save_ledger(ledger)
+            if notify_assistant(cfg, res, args.dry_run, halt) and halt and not args.dry_run:
+                halt["notified_at"] = stamp()
+                save_ledger(ledger)
             if res.get("install_failure") or any(t.get("verification_failure") for t in res["tiles"]):
                 version = res.get("installed_after")
                 later = ORDER[ORDER.index(name) + 1:]
