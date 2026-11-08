@@ -40,7 +40,7 @@ A quota 429 becomes a shared block (`pi-ai/src/auth-broker/remote-store.ts:812-8
 - **omp broker:** stamp each event with `bootId` and an increasing `seq`, and keep the last hour in memory.
 - **`omp usage --json`:** add `rateLimitEvents: {bootId, events: [{seq, provider, credentialId, kind}]}`.
 
-The governor already polls `omp usage --json` every 30 s. It stores `(bootId, seq)` and reads every event after it, or every event when `bootId` changes. Events become the only 429 signal: a poll that brings any new event for a provider halves that provider once (G5), whether a seat or a money job hit it, and whether omp recovered or not. `finish` stops halving on 429 and keeps halving on transport errors. Each 429 reaches the governor by one path, so arrival order and job retries cannot count it twice. The governor enters event mode only at startup, before any job runs: if its first poll carries `rateLimitEvents`, it sets the cursor to the newest `seq`. Otherwise `finish` halves on 429 as today, and entering event mode later needs a runner restart. If events later disappear, after an omp rollback, the governor falls back to `finish` at once. Limit: a dropped post loses one halving.
+The governor polls `omp usage --json` every 30 s and keeps a `(bootId, seq)` cursor. A new `bootId` means it reads every event. Events are the only 429 signal: a poll with any new event for a provider halves that provider once (G5), whether a seat or a money job hit it and whether omp recovered. `finish` halves only on transport errors, so no 429 counts twice. The mode is fixed at startup, before any job runs. If the first poll carries `rateLimitEvents`, the governor uses events with the cursor at the newest `seq`. Otherwise `finish` halves on 429 as today. If events vanish in event mode, no LLM job starts until a restart. Limit: a dropped post loses one halving.
 
 ## How the governor uses it
 
@@ -55,7 +55,7 @@ The governor already polls `omp usage --json` every 30 s. It stores `(bootId, se
 - **Pinned job hits a quota 429:** omp cannot rotate inside the job, so the job fails as transient and the runner retries it uncharged on another account (G7).
 - **Fallback keys:** a `models.yml` key for a pinned provider would bypass the pool (`cascade.ts:385-405`). The runner refuses to start if `omp` resolves one.
 - **Rollback, runner:** stop setting the pool env var. Routing returns to omp's ranking at the next job.
-- **Rollback, omp:** `omp-update` never downgrades (`agents/shepherd/bin/omp-update:588-611`). Set `hold_below` for each host. Then reinstall the previous version with `bun install -g @oh-my-pi/pi-coding-agent@<previous>` on deckbox, or restore the newest `.bak` binary on home. Restart the broker and gateway first, then roll seats.
+- **Rollback, omp:** stop the money runner first. `omp-update` never downgrades (`agents/shepherd/bin/omp-update:588-611`), so set `hold_below` for each host. Then reinstall the previous version with `bun install -g @oh-my-pi/pi-coding-agent@<previous>` on deckbox, or restore the newest `.bak` binary on home. Restart the broker and gateway, roll seats, then start the runner.
 
 ## Size and where it lands
 
@@ -70,7 +70,7 @@ The broker's units live in dotfiles. Its code is omp, so omp work lands in `can1
 ## Tests
 
 - **omp unit:** report fields survive dedupe and the wire, and `--redact` masks `identityKey`. Events carry no secrets, expire after an hour, and restart with a new `bootId`. An older broker's 404 turns posting off.
-- **money unit:** 40 back-to-back jobs over 3 accounts in the band use all 3. The pick skips a blocked account at 0.10 and an account at 0.78 that paused at 0.81. A JSON 429 with empty stderr ends `charge: false`. A turn without `credentialId` fails the pin check. A restart whose new `seq` passes the old cursor still delivers every event. In event mode, a job's terminal 429 halves once, in either order of `finish` and poll, and a 429 recovered inside a successful job halves once. A governor that started without events never enters event mode, and one that loses events falls back to `finish`.
+- **money unit:** 40 back-to-back jobs over 3 accounts in the band use all 3. The pick skips a blocked account at 0.10 and an account at 0.78 that paused at 0.81. A JSON 429 with empty stderr ends `charge: false`. A turn without `credentialId` fails the pin check. A restart whose new `seq` passes the old cursor still delivers every event. In event mode, a job's terminal 429 halves once, in either order of `finish` and poll, and a 429 recovered inside a successful job halves once. The mode set at startup holds for the run, and losing events in event mode stops new LLM jobs.
 - **Live smoke, no model calls:** check that every `omp usage --json` report carries `credentialId` and `identityKey`, and that the keys match `omp usage accounts --json` one to one.
 - **Live acceptance:** the runner's next 40 queued Anthropic test calls run pinned, as planned work with no extra quota. Each must report its pinned account's `credentialId`, and the governor must show 3 or more distinct accounts.
 
