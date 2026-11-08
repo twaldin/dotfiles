@@ -21,14 +21,14 @@ Each completed assistant turn carries `credentialId`, the broker's durable row i
 
 ## 2. Spread: the runner picks, omp obeys
 
-`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` limits one process to chosen accounts by `identityKey` (`pi-ai/src/auth-broker/discover.ts:270-340`, `remote-store.ts:83-98`). `agents/shepherd/bin/omp-broker-move-check:55-58` uses it today to pin one account per check. For each LLM job, the runner:
+`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` limits one process to chosen accounts by `identityKey` (`pi-ai/src/auth-broker/discover.ts:270-340`, `remote-store.ts:83-98`). `agents/shepherd/bin/omp-broker-move-check:55-58` uses it today to pin one account per check. For each LLM job, the runner builds a job pool:
 
 1. Builds the candidate set: the provider's accounts that are not G2-paused (with the 0.75 resume rule) and not blocked.
 2. Takes the lowest `usedFraction`. Accounts within 0.05 of the lowest count as tied, and ties go to the account with the fewest jobs assigned in the last 30 minutes. The band stops a 5-minute-old meter from sending every job to one account.
 3. Writes a 0600 pool file `{"*": true, "<provider>": {"accounts": ["<identityKey>"], "apiKeys": false}}` and sets the env var on that `omp -p` only. It also drops provider API-key env vars, which the pool cannot hide (`pi-ai/src/auth/cascade.ts:458-462`).
 4. Rejects a result whose assistant turns lack `credentialId` or name another account.
 
-Seats see nothing. Pinning waits for the omp fields: without `credentialId` and `blockedUntil` on reports, the runner cannot check a pin or skip a blocked account, and omp serves a blocked account as a last resort (`pi-ai/src/auth/select.ts:965-998`).
+Seats see nothing. Job pools wait for the omp fields: without `credentialId` and `blockedUntil` on reports, the runner cannot check a job's account or skip a blocked one, and omp serves a blocked account as a last resort (`pi-ai/src/auth/select.ts:965-998`).
 
 Rejected: an upstream `auth.selection: spread` setting. It changes ranking for every user, and G2's 0.75 resume rule has no omp equivalent.
 
@@ -44,17 +44,17 @@ The governor polls `omp usage --json` every 30 s and keeps a `(bootId, seq)` cur
 
 ## How the governor uses it
 
-- G3 measure: distinct `credentialId`s over the last 40 test calls per provider. `routing: spread` at 3 or more, `pinned` below.
-- Under spread, G2 pauses per account. A provider is unavailable only when no account is a candidate.
+- G3 measure: distinct `credentialId`s over the last 40 test calls per provider. `routing: spread` needs job pools on and 3 or more distinct accounts. Otherwise routing is `pinned`.
+- Under spread, G2 pauses per account, and a provider is unavailable only when no account is a candidate. Under `pinned`, a provider stops when any account is paused, as today.
 
 ## Risks to running seats, and rollback
 
 - **Seats:** no config, setting, or ranking change. They get event posting and the usage fields through the normal `omp-update` roll.
-- **OAuth refresh:** unchanged. A pinned process refreshes through the broker like any client (`remote-store.ts:1299-1353`).
+- **OAuth refresh:** unchanged. A job-pool process refreshes through the broker like any client (`remote-store.ts:1299-1353`).
 - **Affinity and prompt cache:** one job stays on one account, so a multi-turn tester keeps its cache. Shared money prompts warm on several accounts instead of one. Tokens do not gate (order 9).
-- **Pinned job hits a quota 429:** omp cannot rotate inside the job, so the job fails as transient and the runner retries it uncharged on another account (G7).
-- **Fallback keys:** a `models.yml` key for a pinned provider would bypass the pool (`cascade.ts:385-405`). The runner refuses to start if `omp` resolves one.
-- **Rollback, runner:** stop setting the pool env var. Routing returns to omp's ranking at the next job.
+- **A job-pool job hits a quota 429:** omp cannot rotate inside the job, so the job fails as transient and the runner retries it uncharged on another account (G7).
+- **Fallback keys:** a `models.yml` key for the job's provider would bypass the pool (`cascade.ts:385-405`). The runner refuses to start if `omp` resolves one.
+- **Rollback, runner:** turn job pools off with one runner switch. The switch stops setting the pool env var and returns the governor to `pinned`, so omp's ranking cannot reach a paused account.
 - **Rollback, omp:** stop the money runner first. `omp-update` never downgrades (`agents/shepherd/bin/omp-update:588-611`), so set `hold_below` for each host. Then reinstall the previous version with `bun install -g @oh-my-pi/pi-coding-agent@<previous>` on deckbox, or restore the newest `.bak` binary on home. Restart the broker and gateway, roll seats, then start the runner.
 
 ## Size and where it lands
@@ -63,16 +63,16 @@ The governor polls `omp usage --json` every 30 s and keeps a `(bootId, seq)` cur
 |---|---|---|
 | omp: three usage-report fields, redaction | ~30 | ~40 |
 | omp: rate-limit events | ~100 | ~80 |
-| money: JSON mode, pick, pinning, events | ~170 | ~140 |
+| money: JSON mode, pick, job pools, events | ~170 | ~140 |
 
-The broker's units live in dotfiles. Its code is omp, so omp work lands in `can1357/oh-my-pi`, because `omp-update` installs only upstream releases (`omp-update:28-29,731-743`). The money JSON-mode change, and with it the G3 count, can ship first. Pinning and event halving start once the omp changes reach a release.
+The broker's units live in dotfiles. Its code is omp, so omp work lands in `can1357/oh-my-pi`, because `omp-update` installs only upstream releases (`omp-update:28-29,731-743`). The money JSON-mode change, and with it the G3 count, can ship first. Job pools and event halving start once the omp changes reach a release.
 
 ## Tests
 
 - **omp unit:** report fields survive dedupe and the wire, and `--redact` masks `identityKey`. Events carry no secrets, expire after an hour, and restart with a new `bootId`. An older broker's 404 turns posting off.
-- **money unit:** 40 back-to-back jobs over 3 accounts in the band use all 3. The pick skips a blocked account at 0.10 and an account at 0.78 that paused at 0.81. A JSON 429 with empty stderr ends `charge: false`. A turn without `credentialId` fails the pin check. A restart whose new `seq` passes the old cursor still delivers every event. In event mode, a job's terminal 429 halves once, in either order of `finish` and poll, and a 429 recovered inside a successful job halves once. The mode set at startup holds for the run, and losing events in event mode stops new LLM jobs.
+- **money unit:** 40 back-to-back jobs over 3 accounts in the band use all 3. The pick skips a blocked account at 0.10 and an account at 0.78 that paused at 0.81. A JSON 429 with empty stderr ends `charge: false`. A turn without `credentialId` fails the pool check. A restart whose new `seq` passes the old cursor still delivers every event. In event mode, a job's terminal 429 halves once, in either order of `finish` and poll, and a 429 recovered inside a successful job halves once. The mode set at startup holds for the run, and losing events in event mode stops new LLM jobs. With job pools switched off, one paused account stops its provider.
 - **Live smoke, no model calls:** check that every `omp usage --json` report carries `credentialId` and `identityKey`, and that the keys match `omp usage accounts --json` one to one.
-- **Live acceptance:** the runner's next 40 queued Anthropic test calls run pinned, as planned work with no extra quota. Each must report its pinned account's `credentialId`, and the governor must show 3 or more distinct accounts.
+- **Live acceptance:** the runner's next 40 queued Anthropic test calls run with job pools, as planned work with no extra quota. Each must report its pool's `credentialId`, and the governor must show 3 or more distinct accounts.
 
 ## Open decisions for Tim
 
