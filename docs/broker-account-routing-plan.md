@@ -36,11 +36,11 @@ Rejected: an upstream `auth.selection: spread` setting. It changes ranking for e
 
 A quota 429 becomes a shared block (`pi-ai/src/auth-broker/remote-store.ts:812-836`). A transient "slow down" 429 stays in the process that got it (`pi-ai/src/error/rate-limit.ts:469-497`). Blocks appear only in `/v1/snapshot`, which also holds access tokens, and no route lists 429s (`pi-ai/src/auth-broker/server.ts:159-173`).
 
-- **omp client:** post every 429 to `POST /v1/events/rate-limit` with provider, `credentialId`, kind, `retryAfterMs`, and `source`, the value of the poster's `OMP_EVENT_SOURCE` env var when set. A failed post is dropped. A 404 from an older broker turns posting off for that process.
+- **omp client:** post every 429 to `POST /v1/events/rate-limit` with provider, `credentialId`, kind, and `retryAfterMs`. A failed post is dropped. A 404 from an older broker turns posting off for that process.
 - **omp broker:** stamp each event with `bootId` and an increasing `seq`, and keep the last hour in memory.
-- **`omp usage --json`:** add `rateLimitEvents: {bootId, events: [{seq, provider, credentialId, kind, source}]}`.
+- **`omp usage --json`:** add `rateLimitEvents: {bootId, events: [{seq, provider, credentialId, kind}]}`.
 
-The governor already polls `omp usage --json` every 30 s. It stores `(bootId, seq)` and reads every event after it, or every event when `bootId` changes. The runner sets `OMP_EVENT_SOURCE=money:<job id>` on each job. A job that ends on a 429 halves its provider (G5) through `finish`, so a dropped post loses nothing, and the governor records one credit for that job, kept for an hour like the buffer. Each poll counts the new events per provider, from seats and from money jobs, and skips one event whose `source` is a credited job, using up that credit. A count above zero halves the provider once. So a 429 that omp retried inside a successful job still halves, and a terminal 429 counts once whenever its event arrives.
+The governor already polls `omp usage --json` every 30 s. It stores `(bootId, seq)` and reads every event after it, or every event when `bootId` changes. Events become the only 429 signal: a poll that brings any new event for a provider halves that provider once (G5), whether a seat or a money job hit it, and whether omp recovered or not. `finish` stops halving on 429 and keeps halving on transport errors. Each 429 reaches the governor by one path, so arrival order and job retries cannot count it twice. While the usage JSON lacks `rateLimitEvents`, `finish` halves on 429 as today. Limit: a dropped post loses that one 429's halving.
 
 ## How the governor uses it
 
@@ -70,7 +70,7 @@ The broker's units live in dotfiles. Its code is omp, so omp work lands in `can1
 ## Tests
 
 - **omp unit:** report fields survive dedupe and the wire, and `--redact` masks `identityKey`. Events carry no secrets, expire after an hour, and restart with a new `bootId`. An older broker's 404 turns posting off.
-- **money unit:** 40 back-to-back jobs over 3 accounts in the band use all 3. The pick skips a blocked account at 0.10 and an account at 0.78 that paused at 0.81. A JSON 429 with empty stderr ends `charge: false`. A turn without `credentialId` fails the pin check. A restart whose new `seq` passes the old cursor still delivers every event. A job's terminal 429 halves once even when its event arrives minutes later. A 429 that omp retried inside a successful job halves once through its event. A seat's event halves once.
+- **money unit:** 40 back-to-back jobs over 3 accounts in the band use all 3. The pick skips a blocked account at 0.10 and an account at 0.78 that paused at 0.81. A JSON 429 with empty stderr ends `charge: false`. A turn without `credentialId` fails the pin check. A restart whose new `seq` passes the old cursor still delivers every event. With events present, a job's terminal 429 halves once, in either order of `finish` and poll. A 429 recovered inside a successful job halves once. Without events, `finish` halves on 429.
 - **Live smoke, no model calls:** check that every `omp usage --json` report carries `credentialId` and `identityKey`, and that the keys match `omp usage accounts --json` one to one.
 - **Live acceptance:** the runner's next 40 queued Anthropic test calls run pinned, as planned work with no extra quota. Each must report its pinned account's `credentialId`, and the governor must show 3 or more distinct accounts.
 
