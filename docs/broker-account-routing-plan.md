@@ -36,7 +36,7 @@ Transient 429s stay in the process that got them (`pi-ai/src/error/rate-limit.ts
 ## Governor
 
 - **G3:** count distinct `credentialId`s in the last 40 test calls per provider. `routing: spread` needs job pools on and 3 or more accounts. Otherwise routing is `pinned`, where any paused account stops the provider, as today.
-- **429s:** each 30 s poll reads events past the `(bootId, seq)` cursor, and any new event halves its provider once (G5), whoever hit it. `finish` halves only on transport errors, so no 429 counts twice. The mode is fixed at startup. With no events at the first poll, `finish` keeps halving on 429. If events vanish later, LLM jobs stop until a restart. A dropped post loses one halving.
+- **429s:** the mode is fixed at startup by whether the first poll's JSON has a `rateLimitEvents` field, even an empty one. Without the field, `finish` keeps halving on 429 as today. With it, the cursor starts at the newest `seq`, each 30 s poll reads every later event (every event after a `bootId` change), and any new event halves its provider once (G5), whoever hit it. `finish` then halves only on transport errors, so no 429 counts twice. If the field disappears later, LLM jobs stop until a restart. A dropped post loses one halving.
 
 ## Risks and rollback
 
@@ -49,7 +49,7 @@ Transient 429s stay in the process that got them (`pi-ai/src/error/rate-limit.ts
 omp work lands upstream in `can1357/oh-my-pi`, since `omp-update` installs only upstream releases (`omp-update:28-29,731-743`). Estimates: report fields ~30 lines plus ~40 test lines, events ~100 plus ~80, money ~170 plus ~140. The JSON-mode change and the G3 count ship before any omp release.
 
 - **omp unit:** fields survive dedupe, the wire, and `--redact`. Events carry no secrets, expire, and change `bootId` on restart.
-- **money unit:** 40 jobs over 3 tied accounts use all 3. The pick skips a blocked account at 0.10 and one at 0.78 that paused at 0.81. A JSON 429 is uncharged. A missing `credentialId` fails the job. Each 429 halves once in either arrival order and across a `seq` reset.
+- **money unit:** 40 jobs over 3 tied accounts use all 3. The pick skips a blocked account at 0.10 and one at 0.78 that paused at 0.81. A JSON 429 is uncharged. A missing `credentialId` fails the job. Each 429 halves once in either arrival order. A new `bootId` whose `seq` already passed the old cursor loses no events. An empty event list at startup still selects event mode.
 - **Live smoke, no model calls:** `identityKey`s in `omp usage --json` match `omp usage accounts --json` one to one.
 - **Live acceptance:** the next 40 queued Anthropic test calls run with job pools, adding no quota. Each reports its pool's `credentialId`, and the governor shows 3 or more accounts.
 
