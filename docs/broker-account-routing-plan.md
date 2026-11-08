@@ -36,11 +36,11 @@ Rejected: an upstream `auth.selection: spread` setting. It changes ranking for e
 
 A quota 429 becomes a shared block (`pi-ai/src/auth-broker/remote-store.ts:812-836`). A transient "slow down" 429 stays in the process that got it (`pi-ai/src/error/rate-limit.ts:469-497`). Blocks appear only in `/v1/snapshot`, which also holds access tokens, and no route lists 429s (`pi-ai/src/auth-broker/server.ts:159-173`).
 
-- **omp client:** post every 429 to `POST /v1/events/rate-limit` with provider, `credentialId`, kind, and `retryAfterMs`. A failed post is dropped. A 404 from an older broker turns posting off for that process.
+- **omp client:** post every 429 to `POST /v1/events/rate-limit` with provider, `credentialId`, kind, `retryAfterMs`, and `source`, the value of the poster's `OMP_EVENT_SOURCE` env var when set. A failed post is dropped. A 404 from an older broker turns posting off for that process.
 - **omp broker:** stamp each event with `bootId` and an increasing `seq`, and keep the last hour in memory.
-- **`omp usage --json`:** add `rateLimitEvents: {bootId, events: [{seq, provider, credentialId, kind}]}`.
+- **`omp usage --json`:** add `rateLimitEvents: {bootId, events: [{seq, provider, credentialId, kind, source}]}`.
 
-The governor already polls `omp usage --json` every 30 s. It stores `(bootId, seq)` and reads every event after it, or every event when `bootId` changes. A 429 from either source, a money job's `finish` or a new event, halves the provider limit (G5) unless that provider halved in the last 60 s. `finish` keeps its path, so a dropped post loses nothing, and the shared window absorbs the duplicate in either arrival order.
+The governor already polls `omp usage --json` every 30 s. It stores `(bootId, seq)` and reads every event after it, or every event when `bootId` changes. The runner sets `OMP_EVENT_SOURCE=money:<job id>` on each job. A money job's 429 halves the provider limit (G5) through `finish`, so a dropped post loses nothing. The governor skips events whose `source` starts with `money:`. A poll that brings any other event for a provider, which is a seat's 429, halves that provider once. Each 429 has one path, so delay and arrival order cannot double-count it.
 
 ## How the governor uses it
 
@@ -70,7 +70,7 @@ The broker's units live in dotfiles. Its code is omp, so omp work lands in `can1
 ## Tests
 
 - **omp unit:** report fields survive dedupe and the wire, and `--redact` masks `identityKey`. Events carry no secrets, expire after an hour, and restart with a new `bootId`. An older broker's 404 turns posting off.
-- **money unit:** 40 back-to-back jobs over 3 accounts in the band use all 3. The pick skips a blocked account at 0.10 and an account at 0.78 that paused at 0.81. A JSON 429 with empty stderr ends `charge: false`. A turn without `credentialId` fails the pin check. A restart whose new `seq` passes the old cursor still delivers every event. A 429 halves once whether `finish` or the event arrives first.
+- **money unit:** 40 back-to-back jobs over 3 accounts in the band use all 3. The pick skips a blocked account at 0.10 and an account at 0.78 that paused at 0.81. A JSON 429 with empty stderr ends `charge: false`. A turn without `credentialId` fails the pin check. A restart whose new `seq` passes the old cursor still delivers every event. A money job's 429 halves once even when its event arrives minutes later, and a seat's event halves once.
 - **Live smoke, no model calls:** check that every `omp usage --json` report carries `credentialId` and `identityKey`, and that the keys match `omp usage accounts --json` one to one.
 - **Live acceptance:** the runner's next 40 queued Anthropic test calls run pinned, as planned work with no extra quota. Each must report its pinned account's `credentialId`, and the governor must show 3 or more distinct accounts.
 
