@@ -1,80 +1,59 @@
-# Plan: per-call account ids, spread, and 429 events for the money runner
+# Plan: account ids, spread, and 429 events for the money runner
 
-Status: plan only, nothing built or deployed. Target: money SPEC G3 (`twaldin/money` `docs/SPEC.md:502`). References are to omp 18.18.1, the live broker's version, relative to `~/.bun/install/global/node_modules/@oh-my-pi/`.
+Plan only. Target: money SPEC G3 (`docs/SPEC.md:502`). References are to omp 18.18.1, the live broker's version, under `~/.bun/install/global/node_modules/@oh-my-pi/`.
 
-## Where account choice happens today
+## Today
 
-The broker does not choose accounts. It holds the pool, usage reports, refreshes, and shared cooldown blocks. Each `omp` process ranks and picks in its own `AuthStorage` (`pi-ai/src/auth-broker/types.ts:1-6`, `discover.ts:496-540`). The money runner is such a process: `testers/tester.py:151` and `gen/gen0.py:372` run `omp -p --no-session` against the home broker. SPEC line 520 says jobs go through `omp auth-gateway`. They do not.
+Each `omp` process picks its own account (`pi-ai/src/auth-broker/types.ts:1-6`). The broker only holds credentials, usage, refreshes, and cooldown blocks. Money's `omp -p` calls (`testers/tester.py:151`, `gen/gen0.py:372`) are such processes and skip the gateway, despite SPEC line 520.
 
-A new session ranks credentials in this order (`pi-ai/src/auth/rank.ts:88-135`): blocks, plan, spent allowance, reserve (active only when an `auth.accountPolicies` entry exists, `select.ts:357-361`), priority boost, 5h window at 85%, configured priority, measured before unmeasured. Then it sorts by required drain, descending: headroom divided by hours to reset (`pi-ai/src/auth/usage-report.ts:256-269`). Ties fall to stored order (`select.ts:689`). A warm session keeps its pick (`select.ts:638-658`).
-
-Every fresh process computes the same winner from the same cached meters, so the ranking concentrates load by design, consistent with 40 of 40 test sessions on one account. In the last 4 hours, deckbox seats logged 12,616 Anthropic turns on credential row 22 and at most 1,586 on any other row.
+After safety checks (blocks, plan, spent allowance, 5h window at 85%), a new session takes the highest required drain: headroom per hour left before reset (`pi-ai/src/auth/rank.ts:88-135`). Every fresh process picks the same winner, which fits 40 of 40 sessions on one account. Seats too: in the last 4 hours, row 22 served 12,616 Anthropic seat turns, and no other row passed 1,586.
 
 ## 1. Account id per call
 
-Each completed assistant turn carries `credentialId`, the broker's durable row id for the credential that served it (`pi-ai/src/stream.ts:1241-1247`, `pi-ai/src/types.ts:1322`). `omp -p --mode json` prints it in `message_end` events (`pi-coding-agent/src/modes/print-mode.ts:104-105,361-362`). A failed attempt that omp retries on another account is dropped (`stream.ts:1249-1267`), so this names the serving account, not every attempt. Section 3 covers failures.
+Every completed turn already carries `credentialId`, the broker's durable row id (`pi-ai/src/stream.ts:1241-1247`), and `omp -p --mode json` prints it in `message_end` (`print-mode.ts:361`). A failed attempt that omp retried on another account is dropped (`stream.ts:1249-1267`).
 
-`omp usage --json` cannot be joined to that id: reports carry `metadata.accountId`, `email`, and `orgId`, but no `credentialId`, `identityKey`, or block state.
+- **omp:** add `credentialId`, `identityKey`, and `blockedUntil` to each `omp usage --json` report (`pi-ai/src/auth/usage.ts:809-845`). `--redact` masks `identityKey`.
+- **money:** use `--mode json` and collect `credentialId` from every assistant `message_end`. Decode terminal errors from stdout, because today a JSON-mode 429 becomes a charged `omp exited 1` (`tester.py:155-156`, `run.py:199-202`).
 
-- **omp:** add `credentialId`, `identityKey`, and `blockedUntil` to each `UsageReport` where the broker builds it per credential (`pi-ai/src/auth/usage.ts:809-845`). Keep them through `dedupeUsageReports` and the wire schema. `--redact` masks `identityKey` (`pi-coding-agent/src/cli/usage-cli.ts:1154-1178`).
-- **money:** run `omp -p --mode json`. Collect `credentialId` from every assistant `message_end`. In JSON mode a terminal error goes to stdout, not stderr (`print-mode.ts:633-645`), so the tester must decode it and report a 429 as transient. Today it reports `omp exited 1` (`testers/tester.py:155-156`), which `runner/run.py:199-202` charges.
+## 2. Spread: per-job account pools
 
-## 2. Spread: the runner picks, omp obeys
+`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` limits one process to named accounts (`pi-ai/src/auth-broker/discover.ts:270-340`). `omp-broker-move-check:55-58` already uses it. For each LLM job, the runner:
 
-`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` limits one process to chosen accounts by `identityKey` (`pi-ai/src/auth-broker/discover.ts:270-340`, `remote-store.ts:83-98`). `agents/shepherd/bin/omp-broker-move-check:55-58` uses it today to pin one account per check. For each LLM job, the runner builds a job pool:
+1. Keeps the provider's accounts that are neither G2-paused (0.75 resume rule kept) nor blocked.
+2. Picks the lowest `usedFraction`. Accounts within 0.05 of it tie, and ties go to the fewest jobs assigned in the last 30 minutes, so a cached meter cannot funnel every job to one account.
+3. Writes a 0600 pool file with that one `identityKey` and `apiKeys: false` for that `omp -p` only. It drops provider API-key env vars and refuses a `models.yml` key for the provider, which the pool cannot hide (`pi-ai/src/auth/cascade.ts:385-405,458-462`).
+4. Rejects a result whose turns lack `credentialId` or name another account.
 
-1. Builds the candidate set: the provider's accounts that are not G2-paused (with the 0.75 resume rule) and not blocked.
-2. Takes the lowest `usedFraction`. Accounts within 0.05 of the lowest count as tied, and ties go to the account with the fewest jobs assigned in the last 30 minutes. The band stops a 5-minute-old meter from sending every job to one account.
-3. Writes a 0600 pool file `{"*": true, "<provider>": {"accounts": ["<identityKey>"], "apiKeys": false}}` and sets the env var on that `omp -p` only. It also drops provider API-key env vars, which the pool cannot hide (`pi-ai/src/auth/cascade.ts:458-462`).
-4. Rejects a result whose assistant turns lack `credentialId` or name another account.
-
-Seats see nothing. Job pools wait for the omp fields: without `credentialId` and `blockedUntil` on reports, the runner cannot check a job's account or skip a blocked one, and omp serves a blocked account as a last resort (`pi-ai/src/auth/select.ts:965-998`).
-
-Rejected: an upstream `auth.selection: spread` setting. It changes ranking for every user, and G2's 0.75 resume rule has no omp equivalent.
+Seats see nothing. Job pools wait for the omp fields, because omp serves a blocked account as a last resort (`select.ts:965-998`). A quota 429 inside a job cannot rotate, so the job fails as transient and retries uncharged elsewhere (G7).
 
 ## 3. Rate-limit events
 
-A quota 429 becomes a shared block (`pi-ai/src/auth-broker/remote-store.ts:812-836`). A transient "slow down" 429 stays in the process that got it (`pi-ai/src/error/rate-limit.ts:469-497`). Blocks appear only in `/v1/snapshot`, which also holds access tokens, and no route lists 429s (`pi-ai/src/auth-broker/server.ts:159-173`).
+Transient 429s stay in the process that got them (`pi-ai/src/error/rate-limit.ts:469-497`), and quota blocks show only in the token-bearing `/v1/snapshot`.
 
-- **omp client:** post every 429 to `POST /v1/events/rate-limit` with provider, `credentialId`, kind, and `retryAfterMs`. A failed post is dropped. A 404 from an older broker turns posting off for that process.
-- **omp broker:** stamp each event with `bootId` and an increasing `seq`, and keep the last hour in memory.
-- **`omp usage --json`:** add `rateLimitEvents: {bootId, events: [{seq, provider, credentialId, kind}]}`.
+- **omp client:** post each 429 (provider, `credentialId`, kind, `retryAfterMs`) to `POST /v1/events/rate-limit`. Drop failed posts. Stop posting on a 404 from an older broker.
+- **omp broker:** number events with `bootId` and `seq`, and keep one hour in memory. `omp usage --json` adds `rateLimitEvents`.
 
-The governor polls `omp usage --json` every 30 s and keeps a `(bootId, seq)` cursor. A new `bootId` means it reads every event. Events are the only 429 signal: a poll with any new event for a provider halves that provider once (G5), whether a seat or a money job hit it and whether omp recovered. `finish` halves only on transport errors, so no 429 counts twice. The mode is fixed at startup, before any job runs. If the first poll carries `rateLimitEvents`, the governor uses events with the cursor at the newest `seq`. Otherwise `finish` halves on 429 as today. If events vanish in event mode, no LLM job starts until a restart. Limit: a dropped post loses one halving.
+## Governor
 
-## How the governor uses it
+- **G3:** count distinct `credentialId`s in the last 40 test calls per provider. `routing: spread` needs job pools on and 3 or more accounts. Otherwise routing is `pinned`, where any paused account stops the provider, as today.
+- **429s:** each 30 s poll reads events past the `(bootId, seq)` cursor, and any new event halves its provider once (G5), whoever hit it. `finish` halves only on transport errors, so no 429 counts twice. The mode is fixed at startup. With no events at the first poll, `finish` keeps halving on 429. If events vanish later, LLM jobs stop until a restart. A dropped post loses one halving.
 
-- G3 measure: distinct `credentialId`s over the last 40 test calls per provider. `routing: spread` needs job pools on and 3 or more distinct accounts. Otherwise routing is `pinned`.
-- Under spread, G2 pauses per account, and a provider is unavailable only when no account is a candidate. Under `pinned`, a provider stops when any account is paused, as today.
+## Risks and rollback
 
-## Risks to running seats, and rollback
+- **Seats:** no config or ranking change. Event posts and usage fields arrive with the normal `omp-update` roll. OAuth refresh is unchanged (`remote-store.ts:1299-1353`).
+- **Affinity and cache:** one job stays on one account. Money prompts warm several accounts' caches instead of one. Tokens do not gate (order 9).
+- **Rollback:** one runner switch turns job pools off and returns routing to `pinned`. For omp, stop the runner and set `hold_below`, since `omp-update` never downgrades (`omp-update:588-611`). Reinstall the previous version (`bun install -g` on deckbox, the newest `.bak` on home), restart broker and gateway, roll seats, and start the runner last.
 
-- **Seats:** no config, setting, or ranking change. They get event posting and the usage fields through the normal `omp-update` roll.
-- **OAuth refresh:** unchanged. A job-pool process refreshes through the broker like any client (`remote-store.ts:1299-1353`).
-- **Affinity and prompt cache:** one job stays on one account, so a multi-turn tester keeps its cache. Shared money prompts warm on several accounts instead of one. Tokens do not gate (order 9).
-- **A job-pool job hits a quota 429:** omp cannot rotate inside the job, so the job fails as transient and the runner retries it uncharged on another account (G7).
-- **Fallback keys:** a `models.yml` key for the job's provider would bypass the pool (`cascade.ts:385-405`). The runner refuses to start if `omp` resolves one.
-- **Rollback, runner:** turn job pools off with one runner switch. The switch stops setting the pool env var and returns the governor to `pinned`, so omp's ranking cannot reach a paused account.
-- **Rollback, omp:** stop the money runner first. `omp-update` never downgrades (`agents/shepherd/bin/omp-update:588-611`), so set `hold_below` for each host. Then reinstall the previous version with `bun install -g @oh-my-pi/pi-coding-agent@<previous>` on deckbox, or restore the newest `.bak` binary on home. Restart the broker and gateway, roll seats, then start the runner.
+## Size and tests
 
-## Size and where it lands
+omp work lands upstream in `can1357/oh-my-pi`, since `omp-update` installs only upstream releases (`omp-update:28-29,731-743`). Estimates: report fields ~30 lines plus ~40 test lines, events ~100 plus ~80, money ~170 plus ~140. The JSON-mode change and the G3 count ship before any omp release.
 
-| Change | Code | Tests |
-|---|---|---|
-| omp: three usage-report fields, redaction | ~30 | ~40 |
-| omp: rate-limit events | ~100 | ~80 |
-| money: JSON mode, pick, job pools, events | ~170 | ~140 |
-
-The broker's units live in dotfiles. Its code is omp, so omp work lands in `can1357/oh-my-pi`, because `omp-update` installs only upstream releases (`omp-update:28-29,731-743`). The money JSON-mode change, and with it the G3 count, can ship first. Job pools and event halving start once the omp changes reach a release.
-
-## Tests
-
-- **omp unit:** report fields survive dedupe and the wire, and `--redact` masks `identityKey`. Events carry no secrets, expire after an hour, and restart with a new `bootId`. An older broker's 404 turns posting off.
-- **money unit:** 40 back-to-back jobs over 3 accounts in the band use all 3. The pick skips a blocked account at 0.10 and an account at 0.78 that paused at 0.81. A JSON 429 with empty stderr ends `charge: false`. A turn without `credentialId` fails the pool check. A restart whose new `seq` passes the old cursor still delivers every event. In event mode, a job's terminal 429 halves once, in either order of `finish` and poll, and a 429 recovered inside a successful job halves once. The mode set at startup holds for the run, and losing events in event mode stops new LLM jobs. With job pools switched off, one paused account stops its provider.
-- **Live smoke, no model calls:** check that every `omp usage --json` report carries `credentialId` and `identityKey`, and that the keys match `omp usage accounts --json` one to one.
-- **Live acceptance:** the runner's next 40 queued Anthropic test calls run with job pools, as planned work with no extra quota. Each must report its pool's `credentialId`, and the governor must show 3 or more distinct accounts.
+- **omp unit:** fields survive dedupe, the wire, and `--redact`. Events carry no secrets, expire, and change `bootId` on restart.
+- **money unit:** 40 jobs over 3 tied accounts use all 3. The pick skips a blocked account at 0.10 and one at 0.78 that paused at 0.81. A JSON 429 is uncharged. A missing `credentialId` fails the job. Each 429 halves once in either arrival order and across a `seq` reset.
+- **Live smoke, no model calls:** `identityKey`s in `omp usage --json` match `omp usage accounts --json` one to one.
+- **Live acceptance:** the next 40 queued Anthropic test calls run with job pools, adding no quota. Each reports its pool's `credentialId`, and the governor shows 3 or more accounts.
 
 ## Open decisions for Tim
 
-- **Codex:** G4 refuses Codex jobs until Codex passes G3, and G3 needs 40 Codex calls. Lifting needs a bounded 40-call Codex run that Tim approves.
-- **Spread versus G3:** least-used puts load on accounts within 0.05 of the lowest. G3's "3 or more distinct" passes only while 3 accounts sit in that band. Z.ai and xAI have one account each, so they can never pass. The SPEC needs a rule for both cases.
+- **Codex:** G4 blocks Codex jobs until G3 passes, and G3 needs 40 Codex calls. Lifting G4 needs a bounded Codex run that Tim approves.
+- **G3 shape:** G3 passes only while 3 accounts sit within 0.05 of the least used. Z.ai and xAI have one account each and can never pass.
