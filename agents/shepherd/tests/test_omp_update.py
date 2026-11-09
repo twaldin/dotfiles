@@ -1206,6 +1206,26 @@ class Rollout(Sandbox):
         self.assertEqual(len(self.restarts()), 3)
         self.assertEqual(self.mod.load_ledger(), {'halts': []})
 
+    def test_missing_pid_during_first_turn_still_halts_rollout(self):
+        a = self.place()
+        self.place(tile='obj_second', name='second')
+        self.turns = [None]
+        self.mod.resolve_target = lambda *args: {
+            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
+        def local_host(name, hc, params):
+            self.params[name] = params
+            return self.mod.host_main(dict(params, easl={'cli': self.cli}))
+        self.mod.run_host = local_host
+        self.on_list[4] = lambda: a.pop('pid')
+        self.assertEqual(self.run_once(), 1)
+        self.assertEqual(list(self.params), ['deckbox'])
+        halt = self.mod.load_ledger()['halts'][0]
+        self.assertEqual(halt['status'], 'unresolved')
+        self.assertFalse(halt['first_turn']['ok'])
+        self.assertNotIn('superseded', halt['first_turn'])
+        self.assertEqual(len(self.restarts()), 1)
+        self.assertEqual(self.tiles[1]['pid'], 500001)
+
     def test_failed_target_install_stops_rollout_without_blocking_version(self):
         self.results['deckbox'] = {'errors': ['install failed'], 'install_failure': True}
         self.assertEqual(self.run_once(), 1)
