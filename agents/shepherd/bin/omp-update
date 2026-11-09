@@ -460,10 +460,11 @@ def verify_turn(a, pid, session, baseline, previous, installed):
         except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
             time.sleep(min(2, max(0, deadline - time.time())))
             continue
-        if now.get("pid") != pid:
-            if now.get("pid"):
-                return {"ok": True, "superseded": True, "reason": "tile changed during first turn"}
-            return {"ok": False, "reason": "tile changed during first turn"}
+        if not now.get("pid"):
+            time.sleep(min(2, max(0, deadline - time.time())))
+            continue
+        if now["pid"] != pid:
+            return {"ok": True, "superseded": True, "reason": "tile changed during first turn"}
         lc = now.get("lifecycle") or {}
         new_error = lc.get("errorCount", 0) > previous.get("errorCount", 0) or (
             lc.get("errorSince") and lc.get("errorSince") != previous.get("errorSince"))

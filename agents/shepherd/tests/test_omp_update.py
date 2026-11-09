@@ -1081,6 +1081,16 @@ class Rollout(Sandbox):
         res.update(self.results.get(name, {}))
         return res
 
+    def use_real_deckbox(self):
+        self.mod.resolve_target = lambda *args: {
+            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
+        def local_host(name, hc, params):
+            if name != 'deckbox':
+                return self.run_host(name, hc, params)
+            self.params[name] = params
+            return self.mod.host_main(dict(params, easl={'cli': self.cli}))
+        self.mod.run_host = local_host
+
     def run_once(self, hosts=None, dry=False):
         with contextlib.redirect_stdout(io.StringIO()):
             return self.mod.main_run(argparse.Namespace(hosts=hosts, dry_run=dry))
@@ -1146,14 +1156,7 @@ class Rollout(Sandbox):
 
     def test_stalled_seats_stay_logged_without_hourly_notifications_or_halts(self):
         self.place(name='assistant', state='working')
-        self.mod.resolve_target = lambda *args: {
-            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
-        def local_host(name, hc, params):
-            if name != 'deckbox':
-                return self.run_host(name, hc, params)
-            self.params[name] = params
-            return self.mod.host_main(dict(params, easl={'cli': self.cli}))
-        self.mod.run_host = local_host
+        self.use_real_deckbox()
         for _ in range(2):
             self.params.clear()
             self.assertEqual(self.run_once(), 0)
@@ -1178,19 +1181,13 @@ class Rollout(Sandbox):
     def test_superseded_first_turn_continues_rollout_and_rechecks_binary_next_run(self):
         a = self.place()
         self.place(tile='obj_second', name='second')
-        self.mod.resolve_target = lambda *args: {
-            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
-        def local_host(name, hc, params):
-            if name != 'deckbox':
-                return self.run_host(name, hc, params)
-            self.params[name] = params
-            return self.mod.host_main(dict(params, easl={'cli': self.cli}))
-        self.mod.run_host = local_host
+        self.use_real_deckbox()
         def replace_tile():
             a['pid'] = 900000
             self.procs[a['pid']] = {
                 'ppid': 1, 'cmd': self.mod.OMP, 'age_s': 1, 'rss_mb': 400}
-        self.on_list[4] = replace_tile
+        self.on_list[4] = lambda: a.pop('pid')
+        self.on_list[5] = replace_tile
         self.assertEqual(self.run_once(), 0)
         record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
         res = record['results'][0]
@@ -1210,14 +1207,11 @@ class Rollout(Sandbox):
         a = self.place()
         self.place(tile='obj_second', name='second')
         self.turns = [None]
-        self.mod.resolve_target = lambda *args: {
-            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
-        def local_host(name, hc, params):
-            self.params[name] = params
-            return self.mod.host_main(dict(params, easl={'cli': self.cli}))
-        self.mod.run_host = local_host
+        self.use_real_deckbox()
         self.on_list[4] = lambda: a.pop('pid')
+        started = self.now
         self.assertEqual(self.run_once(), 1)
+        self.assertEqual(self.now - started, self.mod.TURN_VERIFY_S)
         self.assertEqual(list(self.params), ['deckbox'])
         halt = self.mod.load_ledger()['halts'][0]
         self.assertEqual(halt['status'], 'unresolved')
