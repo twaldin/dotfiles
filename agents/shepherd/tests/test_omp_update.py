@@ -439,6 +439,17 @@ class TileResume(Sandbox):
         self.child(a['pid'], 'pyright langserver')
         self.assertEqual(self.row(self.host())['action'], 'restarted')
 
+    def test_headless_google_chrome_subtree_allows_roll_but_headful_browser_blocks(self):
+        a = self.place(name='assistant')
+        browser = self.child(a['pid'], '/usr/bin/google-chrome-stable --remote-debugging-port=9222')
+        self.child(browser, 'chrome --type=renderer')
+        self.assertIn('live child', self.row(self.host())['action'])
+        self.assertEqual(self.restarts(), [])
+        self.procs[browser]['cmd'] += ' --headless=new'
+        res = self.host()
+        self.assertEqual(self.row(res)['action'], 'restarted')
+        self.assertEqual(res['errors'], [])
+
     def test_open_or_recent_nested_in_process_subagent_prevents_resume(self):
         a = self.place()
         folder = Path(self.sessions[a['tile']][:-6]) / 'Worker'
@@ -1133,22 +1144,67 @@ class Rollout(Sandbox):
         self.assertIn('security-coordinator', notification[-1])
         self.assertNotIn('blocked_versions', json.loads(Path(self.mod.CONFIG).read_text()))
 
-    def test_stalled_seats_are_logged_and_notified_without_stopping_other_hosts(self):
-        self.results['deckbox'] = {'tiles': [{'name': 'assistant', 'stalled': True}]}
-        self.assertEqual(self.run_once(), 0)
-        record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
-        self.assertTrue(record['results'][0]['tiles'][0]['stalled'])
-        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
-        self.assertTrue(any(e['kind'] == 'notify' and e['action'] == 'sent' for e in self.log()))
+    def test_stalled_seats_stay_logged_without_hourly_notifications_or_halts(self):
+        self.place(name='assistant', state='working')
+        self.mod.resolve_target = lambda *args: {
+            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
+        def local_host(name, hc, params):
+            if name != 'deckbox':
+                return self.run_host(name, hc, params)
+            self.params[name] = params
+            return self.mod.host_main(dict(params, easl={'cli': self.cli}))
+        self.mod.run_host = local_host
+        for _ in range(2):
+            self.params.clear()
+            self.assertEqual(self.run_once(), 0)
+            record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
+            self.assertTrue(record['results'][0]['tiles'][0]['stalled'])
+            self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertEqual(self.restarts(), [])
+        self.assertFalse(any(e['kind'] == 'notify' for e in self.log()))
+        self.assertFalse(any('tell assistant@agents' in c[-1] for c in self.calls))
+        self.assertEqual(self.mod.load_ledger(), {'halts': []})
 
     def test_dry_notifications_and_delivery_failures_remain_visible(self):
-        self.results['deckbox'] = {'tiles': [{'name': 'assistant', 'stalled': True}]}
+        self.results['deckbox'] = {'tiles': [
+            {'name': 'assistant', 'restart_mode': 'fresh', 'action': 'restarted'}]}
         self.assertEqual(self.run_once(dry=True), 0)
         self.assertEqual(self.calls, [])
         self.assertTrue(any(e['kind'] == 'notify' and e['dry_run'] for e in self.log()))
         self.mod.sh.side_effect = RuntimeError('deckbox unreachable')
         self.assertEqual(self.run_once(), 1)
         self.assertIn('assistant notification', self.log()[-1]['error'])
+
+    def test_superseded_first_turn_continues_rollout_and_rechecks_binary_next_run(self):
+        a = self.place()
+        self.place(tile='obj_second', name='second')
+        self.mod.resolve_target = lambda *args: {
+            'target': self.installed, 'eligible': [self.installed], 'blocked': []}
+        def local_host(name, hc, params):
+            if name != 'deckbox':
+                return self.run_host(name, hc, params)
+            self.params[name] = params
+            return self.mod.host_main(dict(params, easl={'cli': self.cli}))
+        self.mod.run_host = local_host
+        def replace_tile():
+            a['pid'] = 900000
+            self.procs[a['pid']] = {
+                'ppid': 1, 'cmd': self.mod.OMP, 'age_s': 1, 'rss_mb': 400}
+        self.on_list[4] = replace_tile
+        self.assertEqual(self.run_once(), 0)
+        record = json.loads((Path(self.mod.STATE) / 'last-run.json').read_text())
+        res = record['results'][0]
+        self.assertTrue(self.row(res)['first_turn']['ok'])
+        self.assertTrue(self.row(res)['first_turn']['superseded'])
+        self.assertEqual(self.row(res, 'obj_second')['action'], 'restarted')
+        self.assertEqual(list(self.params), ['deckbox', 'work', 'home'])
+        self.assertEqual(self.mod.load_ledger(), {'halts': []})
+        self.mod.running_version = lambda pid, *args: (
+            pid == 900000, '1.2.2' if pid == 900000 else self.installed)
+        self.assertEqual(self.run_once(), 0)
+        self.assertEqual(a['pid'], 1000000)
+        self.assertEqual(len(self.restarts()), 3)
+        self.assertEqual(self.mod.load_ledger(), {'halts': []})
 
     def test_failed_target_install_stops_rollout_without_blocking_version(self):
         self.results['deckbox'] = {'errors': ['install failed'], 'install_failure': True}

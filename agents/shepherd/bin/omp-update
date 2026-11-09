@@ -63,7 +63,8 @@ DEFAULT_CONFIG = {
 HOST_KEYS = ("ssh", "python", "easl", "services", "hold_below", "hold_note")
 # Look through omp's workers/kernels for child work; ignore browser/LSP subtrees.
 TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner(-\d+)?/")
-SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|pyright|langserver|language-server|languageserver|"
+SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|google-chrome-stable .*--headless|"
+                        r"pyright|langserver|language-server|languageserver|"
                         r"tsserver|rust-analyzer|gopls|clangd|sourcekit-lsp|lsp-mux|biome lsp|ruff server")
 PASSIVE_WAIT = re.compile(r"(?:^|/)(?:sleep \d+(?:\.\d+)?$|lane wait |"
                           r"watch-pr .* --until (?:change|merge)\b|vuln-feed .* --wait(?: |$)|"
@@ -460,7 +461,7 @@ def verify_turn(a, pid, session, baseline, previous, installed):
             time.sleep(min(2, max(0, deadline - time.time())))
             continue
         if now.get("pid") != pid:
-            return {"ok": False, "reason": "tile changed during first turn"}
+            return {"ok": True, "superseded": True, "reason": "tile changed during first turn"}
         lc = now.get("lifecycle") or {}
         new_error = lc.get("errorCount", 0) > previous.get("errorCount", 0) or (
             lc.get("errorSince") and lc.get("errorSince") != previous.get("errorSince"))
@@ -814,22 +815,19 @@ def load_config():
 
 
 def notify_assistant(cfg, res, dry, halt=None):
-    stalled = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("stalled")]
     recovered = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"]
                  if t.get("restart_mode") == "fresh" and t.get("action") == "restarted"]
-    if not (halt or stalled or recovered):
+    if not (halt or recovered):
         return
     if halt:
         if halt.get("notified_at"):
             return False
-        stalled, recovered = halt.get("stalled", []), halt.get("recovered", [])
+        recovered = halt.get("recovered", [])
         text = (f"omp-update rollout halted: {halt['host']} {halt['name']} on omp {halt['version']}: "
                 f"{halt['reason']}. Halt {halt['id']} remains active until its status is resolved in "
                 "~/.local/state/omp-update/rollout-ledger.json on home.")
     else:
         text = f"omp-update {res['host']}."
-    if stalled:
-        text += f" Working past the {SAFE_POINT_S}s safe-point window (not forced): {stalled}."
     if recovered:
         text += f" Fresh recovery: {recovered}."
     text += " See ~/.local/state/omp-update/last-run.json on home."
