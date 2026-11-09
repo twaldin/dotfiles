@@ -251,6 +251,11 @@ def live_children(pid, procs):
         cmd = procs[c]["cmd"]
         if SUBTREE_OK.search(cmd) or PASSIVE_WAIT.search(cmd):
             continue
+        argv = cmd.split()
+        if (argv and (os.path.basename(argv[0]) == "google-chrome-stable"
+                      or argv[0] == "/opt/google/chrome/chrome")
+                and any(arg == "--headless" or arg.startswith("--headless=") for arg in argv[1:])):
+            continue
         if not TRANSPARENT.search(cmd):
             found.append(f"{c} {cmd[:70]}")
         stack.extend(kids.get(c, []))
@@ -459,8 +464,11 @@ def verify_turn(a, pid, session, baseline, previous, installed):
         except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
             time.sleep(min(2, max(0, deadline - time.time())))
             continue
-        if now.get("pid") != pid:
-            return {"ok": False, "reason": "tile changed during first turn"}
+        if not now.get("pid"):
+            time.sleep(min(2, max(0, deadline - time.time())))
+            continue
+        if now["pid"] != pid:
+            return {"ok": True, "superseded": True, "reason": "tile changed during first turn"}
         lc = now.get("lifecycle") or {}
         new_error = lc.get("errorCount", 0) > previous.get("errorCount", 0) or (
             lc.get("errorSince") and lc.get("errorSince") != previous.get("errorSince"))
@@ -814,22 +822,19 @@ def load_config():
 
 
 def notify_assistant(cfg, res, dry, halt=None):
-    stalled = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"] if t.get("stalled")]
     recovered = [t.get("name") or t.get("tile", "unknown") for t in res["tiles"]
                  if t.get("restart_mode") == "fresh" and t.get("action") == "restarted"]
-    if not (halt or stalled or recovered):
+    if not (halt or recovered):
         return
     if halt:
         if halt.get("notified_at"):
             return False
-        stalled, recovered = halt.get("stalled", []), halt.get("recovered", [])
+        recovered = halt.get("recovered", [])
         text = (f"omp-update rollout halted: {halt['host']} {halt['name']} on omp {halt['version']}: "
                 f"{halt['reason']}. Halt {halt['id']} remains active until its status is resolved in "
                 "~/.local/state/omp-update/rollout-ledger.json on home.")
     else:
         text = f"omp-update {res['host']}."
-    if stalled:
-        text += f" Working past the {SAFE_POINT_S}s safe-point window (not forced): {stalled}."
     if recovered:
         text += f" Fresh recovery: {recovered}."
     text += " See ~/.local/state/omp-update/last-run.json on home."
