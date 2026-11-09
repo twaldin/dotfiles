@@ -440,15 +440,35 @@ class TileResume(Sandbox):
         self.assertEqual(self.row(self.host())['action'], 'restarted')
 
     def test_headless_google_chrome_subtree_allows_roll_but_headful_browser_blocks(self):
-        a = self.place(name='assistant')
-        browser = self.child(a['pid'], '/usr/bin/google-chrome-stable --remote-debugging-port=9222')
-        self.child(browser, 'chrome --type=renderer')
-        self.assertIn('live child', self.row(self.host())['action'])
-        self.assertEqual(self.restarts(), [])
-        self.procs[browser]['cmd'] += ' --headless=new'
-        res = self.host()
-        self.assertEqual(self.row(res)['action'], 'restarted')
-        self.assertEqual(res['errors'], [])
+        for executable, flag in (('/usr/bin/google-chrome-stable', '--headless=new'),
+                                 ('google-chrome-stable', '--headless'),
+                                 ('/opt/google/chrome/chrome', '--headless=new')):
+            with self.subTest(executable=executable, flag=flag):
+                self.tiles.clear()
+                self.procs.clear()
+                self.calls.clear()
+                a = self.place(name='assistant')
+                browser = self.child(a['pid'], executable + ' --user-agent=--headless')
+                self.child(browser, 'chrome --type=renderer')
+                self.assertIn('live child', self.row(self.host())['action'])
+                self.assertEqual(self.restarts(), [])
+                self.procs[browser]['cmd'] += ' ' + flag
+                res = self.host()
+                self.assertEqual(self.row(res)['action'], 'restarted')
+                self.assertEqual(res['errors'], [])
+
+    def test_ssh_mentioning_headless_chrome_still_blocks_restart(self):
+        for remote in ('/usr/bin/google-chrome-stable --headless',
+                       '/opt/google/chrome/chrome --headless=new'):
+            with self.subTest(remote=remote):
+                self.tiles.clear()
+                self.procs.clear()
+                self.calls.clear()
+                a = self.place(name='assistant')
+                ssh = self.child(a['pid'], f'ssh host "{remote}"')
+                self.child(ssh, 'make build')
+                self.assertIn('live child', self.row(self.host())['action'])
+                self.assertEqual(self.restarts(), [])
 
     def test_open_or_recent_nested_in_process_subagent_prevents_resume(self):
         a = self.place()

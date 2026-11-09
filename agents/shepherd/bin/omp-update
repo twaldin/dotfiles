@@ -63,8 +63,7 @@ DEFAULT_CONFIG = {
 HOST_KEYS = ("ssh", "python", "easl", "services", "hold_below", "hold_note")
 # Look through omp's workers/kernels for child work; ignore browser/LSP subtrees.
 TRANSPARENT = re.compile(r"__omp_worker_|/omp-python-runner(-\d+)?/")
-SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|google-chrome-stable .*--headless|"
-                        r"pyright|langserver|language-server|languageserver|"
+SUBTREE_OK = re.compile(r"/\.omp/puppeteer/|pyright|langserver|language-server|languageserver|"
                         r"tsserver|rust-analyzer|gopls|clangd|sourcekit-lsp|lsp-mux|biome lsp|ruff server")
 PASSIVE_WAIT = re.compile(r"(?:^|/)(?:sleep \d+(?:\.\d+)?$|lane wait |"
                           r"watch-pr .* --until (?:change|merge)\b|vuln-feed .* --wait(?: |$)|"
@@ -251,6 +250,11 @@ def live_children(pid, procs):
         c = stack.pop()
         cmd = procs[c]["cmd"]
         if SUBTREE_OK.search(cmd) or PASSIVE_WAIT.search(cmd):
+            continue
+        argv = cmd.split()
+        if (argv and (os.path.basename(argv[0]) == "google-chrome-stable"
+                      or argv[0] == "/opt/google/chrome/chrome")
+                and any(arg == "--headless" or arg.startswith("--headless=") for arg in argv[1:])):
             continue
         if not TRANSPARENT.search(cmd):
             found.append(f"{c} {cmd[:70]}")
