@@ -126,7 +126,7 @@ PY
 
 `swaybg` centers the PNG without zoom or stretch. Niri starts Waybar and `swaybg` at login. A live reload does not start them, so start missing processes once in the current niri session and reload an existing Waybar with `SIGUSR2`. The 179.998 Hz rule matches the Acer by make, model, and serial number instead of by connector.
 
-For Caps tap Escape and hold Hyper, back up any keyd configs. The three IDs in `mac-layout.conf` also swap left Alt and left Super, as on the Mac. Check that no existing keyd config already lists those IDs or provides a wildcard default.
+Back up your keyd configs before installing these files. Caps Lock sends Escape when tapped and Hyper (Ctrl+Alt+Super) when held. On the three keyboards listed in `mac-layout.conf`, the left Ctrl key stays Ctrl, the left Windows key sends Alt, and the left Alt key sends Ctrl for app shortcuts. Check that no existing keyd config already lists those IDs or provides a wildcard default.
 
 ```sh
 sudo install -Dm644 linux/keyd/niri.conf /etc/keyd/niri.conf
@@ -134,8 +134,10 @@ sudo install -Dm644 linux/keyd/mac-layout.conf /etc/keyd/mac-layout.conf
 sudo keyd check && sudo systemctl enable --now keyd.service && sudo keyd reload
 ```
 
-Super+Space opens Fuzzel. Hyper+1–9 select named workspaces. Niri leaves an extra blank workspace below them. Alt+Shift+1–9 move the focused window and follow it. Sending to 6–8 also floats the window. New windows still tile there, and floated windows stay floating when sent back. Alt+grave toggles floating.
+On those keyboards, physical left Alt+Space opens Fuzzel, left Alt+Q closes the focused window, and left Ctrl+left Alt+F toggles fullscreen. Physical Ctrl+Space still reaches apps. On other keyboards, use Super+Space for Fuzzel and Alt+F4 to close a window. Hyper+F toggles fullscreen on any keyboard.
 
-Niri scrolls columns instead of splitting a binary tree. Hyper+H/J/K/L and arrows focus across columns or within a column. Alt+Shift moves columns or swaps windows within a column. Super+Comma groups windows vertically, and Super+Period separates them. Alt+Return zooms. Alt+0 resets the selected column to 55% rather than balancing the whole workspace. Alt+Tab uses niri's recent-window switcher.
+The remaining shortcuts use key names after remapping. Hyper+1–9 select named workspaces. Niri leaves an extra blank workspace below them. Both Hyper+Shift+1–9 and Alt+Shift+1–9 move the focused window and follow it. Sending to 6–8 also floats the window. New windows still tile there, and floated windows stay floating when sent back. Alt+grave toggles floating.
+
+Niri scrolls columns instead of splitting a binary tree. Hyper+H/J/K/L and Hyper+arrow keys move focus across columns or within a column. Add Shift to move a column or swap windows within a column. Alt+Shift with the same keys also moves columns or swaps windows. Hyper+Space maximizes the column. Hyper+Comma groups windows vertically, and Hyper+Period separates them. Hyper+Shift+Slash shows the shortcut overlay. Alt+Return zooms. Alt+0 resets the selected column to 55% rather than balancing the whole workspace. Alt+Tab uses niri's recent-window switcher.
 
 To roll back, restore the saved configs and remove files this setup created without a prior version. If setup enabled keyd, run `sudo systemctl disable --now keyd.service`. Otherwise, run `sudo keyd reload` after restoring its config.
