@@ -74,7 +74,17 @@ binds {
     Alt+Shift+Up    { move-window-up; }
     Alt+Shift+Right { move-column-right; }
 
+    Super+Ctrl+Alt+Shift+H     { move-column-left; }
+    Super+Ctrl+Alt+Shift+J     { move-window-down; }
+    Super+Ctrl+Alt+Shift+K     { move-window-up; }
+    Super+Ctrl+Alt+Shift+L     { move-column-right; }
+    Super+Ctrl+Alt+Shift+Left  { move-column-left; }
+    Super+Ctrl+Alt+Shift+Down  { move-window-down; }
+    Super+Ctrl+Alt+Shift+Up    { move-window-up; }
+    Super+Ctrl+Alt+Shift+Right { move-column-right; }
+
     Alt+Return { maximize-window-to-edges; }
+    Super+Ctrl+Alt+Space { maximize-column; }
     Alt+grave { toggle-window-floating; }
     Alt+0 { set-column-width "55%"; }
     Alt+Minus { set-column-width "-5%"; }
