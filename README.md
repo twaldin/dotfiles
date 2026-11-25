@@ -123,4 +123,4 @@ Super+Space opens Fuzzel. Hyper+1–9 select named workspaces. Niri leaves an ex
 
 Niri scrolls columns instead of splitting a binary tree. Hyper+H/J/K/L and arrows focus across columns or within a column. Alt+Shift moves columns or swaps windows within a column. Super+Comma groups windows vertically, and Super+Period separates them. Alt+Return zooms. Alt+0 resets the selected column to 55% rather than balancing the whole workspace. Alt+Tab uses niri's recent-window switcher.
 
-To roll back, restore the saved configs and remove files this setup created without a prior version. Disable `keyd.service` if you enabled it for this setup. Otherwise, run `sudo keyd reload` after restoring its config.
+To roll back, restore the saved configs and remove files this setup created without a prior version. If setup enabled keyd, run `sudo systemctl disable --now keyd.service`. Otherwise, run `sudo keyd reload` after restoring its config.
