@@ -1,0 +1,30 @@
+{
+  "layer": "top",
+  "position": "top",
+  "height": 36,
+  "modules-left": ["niri/workspaces", "niri/window"],
+  "modules-right": ["tray", "network", "pulseaudio", "clock"],
+  "niri/workspaces": {
+    "format": "{icon}",
+    "format-icons": {
+      "space-1": "1", "space-2": "2", "space-3": "3",
+      "space-4": "4", "space-5": "5", "space-6": "6",
+      "space-7": "7", "space-8": "8", "space-9": "9"
+    }
+  },
+  "niri/window": { "max-length": 45 },
+  "tray": { "spacing": 8 },
+  "network": {
+    "format-wifi": "Wi-Fi {signalStrength}%",
+    "format-ethernet": "Ethernet",
+    "format-disconnected": "Offline"
+  },
+  "pulseaudio": {
+    "format": "Vol {volume}%",
+    "format-muted": "Muted"
+  },
+  "clock": {
+    "format": "{:%a %b %d  %H:%M}",
+    "tooltip-format": "<tt>{calendar}</tt>"
+  }
+}

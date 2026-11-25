@@ -1,0 +1,101 @@
+input {
+    keyboard { numlock; }
+}
+
+output "DP-2" {
+    mode "1920x1080@179.998"
+}
+
+layout {
+    gaps 8
+    struts {
+        left 10
+        right 10
+        top 10
+        bottom 10
+    }
+    default-column-width { proportion 0.55; }
+    focus-ring { off; }
+}
+
+animations { off; }
+hotkey-overlay { skip-at-startup; }
+
+workspace "space-1"
+workspace "space-2"
+workspace "space-3"
+workspace "space-4"
+workspace "space-5"
+workspace "space-6"
+workspace "space-7"
+workspace "space-8"
+workspace "space-9"
+
+spawn-at-startup "waybar"
+spawn-at-startup "sh" "-c" "exec swaybg -m center -i \"$HOME/Pictures/wallpapers/bg1-centered-3024x1964.png\""
+
+binds {
+    Super+Space { spawn "fuzzel"; }
+    Super+Ctrl+Alt+Shift+B { spawn "chromium"; }
+    Super+Ctrl+Alt+Shift+D { spawn "discord"; }
+    Super+Ctrl+Alt+Shift+G { spawn "steam"; }
+    Super+Ctrl+Alt+Shift+P { spawn "keepassxc"; }
+    Super+Ctrl+Alt+Shift+S { spawn "slack"; }
+    Super+Ctrl+Alt+Shift+T { spawn "ghostty"; }
+    Super+W { close-window; }
+    Super+Shift+Slash { show-hotkey-overlay; }
+    Print { screenshot; }
+
+    Super+Ctrl+Alt+Shift+H     { focus-column-left; }
+    Super+Ctrl+Alt+Shift+J     { focus-window-down; }
+    Super+Ctrl+Alt+Shift+K     { focus-window-up; }
+    Super+Ctrl+Alt+Shift+L     { focus-column-right; }
+    Super+Ctrl+Alt+Shift+Left  { focus-column-left; }
+    Super+Ctrl+Alt+Shift+Down  { focus-window-down; }
+    Super+Ctrl+Alt+Shift+Up    { focus-window-up; }
+    Super+Ctrl+Alt+Shift+Right { focus-column-right; }
+
+    Alt+Shift+H     { move-column-left; }
+    Alt+Shift+J     { move-window-down; }
+    Alt+Shift+K     { move-window-up; }
+    Alt+Shift+L     { move-column-right; }
+    Alt+Shift+Left  { move-column-left; }
+    Alt+Shift+Down  { move-window-down; }
+    Alt+Shift+Up    { move-window-up; }
+    Alt+Shift+Right { move-column-right; }
+
+    Alt+Return { maximize-window-to-edges; }
+    Alt+grave { toggle-window-floating; }
+    Alt+0 { set-column-width "55%"; }
+    Alt+Minus { set-column-width "-5%"; }
+    Alt+Equal { set-column-width "+5%"; }
+    Super+Comma { consume-window-into-column; }
+    Super+Period { expel-window-from-column; }
+
+    Super+Ctrl+Alt+Shift+1 { focus-workspace "space-1"; }
+    Super+Ctrl+Alt+Shift+2 { focus-workspace "space-2"; }
+    Super+Ctrl+Alt+Shift+3 { focus-workspace "space-3"; }
+    Super+Ctrl+Alt+Shift+4 { focus-workspace "space-4"; }
+    Super+Ctrl+Alt+Shift+5 { focus-workspace "space-5"; }
+    Super+Ctrl+Alt+Shift+6 { focus-workspace "space-6"; }
+    Super+Ctrl+Alt+Shift+7 { focus-workspace "space-7"; }
+    Super+Ctrl+Alt+Shift+8 { focus-workspace "space-8"; }
+    Super+Ctrl+Alt+Shift+9 { focus-workspace "space-9"; }
+
+    Alt+Shift+1 { move-window-to-workspace "space-1"; }
+    Alt+Shift+2 { move-window-to-workspace "space-2"; }
+    Alt+Shift+3 { move-window-to-workspace "space-3"; }
+    Alt+Shift+4 { move-window-to-workspace "space-4"; }
+    Alt+Shift+5 { move-window-to-workspace "space-5"; }
+    Alt+Shift+6 { spawn-sh "niri msg action move-window-to-floating && niri msg action move-window-to-workspace space-6"; }
+    Alt+Shift+7 { spawn-sh "niri msg action move-window-to-floating && niri msg action move-window-to-workspace space-7"; }
+    Alt+Shift+8 { spawn-sh "niri msg action move-window-to-floating && niri msg action move-window-to-workspace space-8"; }
+    Alt+Shift+9 { move-window-to-workspace "space-9"; }
+}
+
+recent-windows {
+    binds {
+        Alt+Tab { next-window; }
+        Alt+Shift+Tab { previous-window; }
+    }
+}

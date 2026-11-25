@@ -18,6 +18,7 @@ my dotfiles: raw nvim on native vim.pack, zsh, tmux, Ghostty, native macOS windo
 | `scripts/` | tmux-sessionizer, Ghostty base16 theme switcher, Claude statusline |
 | `zen/` | zen browser userChrome.css + mods export |
 | `agents/` | the old agent setup; each machine drops it when it moves to tstack (below) |
+| `linux/` | CachyOS desktop: niri, Waybar, Fuzzel, keyd, Ghostty, and zsh |
 
 ## nvim
 
@@ -79,3 +80,41 @@ The window-manager lifecycle fails closed. On first Home adoption, stop the old 
 Install SketchyBar dependencies with `sketchybar/install-deps.sh`, run `sketchybar/scripts/smoke-config.sh`, and reload only after both pass. See `sketchybar/OPERATIONS.md` for permissions, runtime checks, and rollback.
 
 terminal theme is Ghostty's `Hardcore` — nvim follows it automatically.
+
+## CachyOS desktop
+
+Install `niri`, `waybar`, `fuzzel`, `keyd`, `swaybg`, `ghostty`, `zsh`, `neovim`, `ttf-jetbrains-mono-nerd`, `wl-clipboard`, `fzf`, `fd`, and `ripgrep`. Install `oh-my-posh-bin` from the AUR for the shared prompt. The app hotkeys use `chromium`, `discord`, `steam`, `keepassxc`, and `slack-desktop` (AUR).
+
+Back up your existing config files before copying these files from the repo root:
+
+```sh
+config="$HOME/.config"
+niri validate -c linux/niri/config.kdl &&
+	install -Dm644 linux/niri/config.kdl "$config/niri/config.kdl"
+install -Dm644 linux/waybar/config.jsonc "$config/waybar/config.jsonc"
+install -Dm644 linux/waybar/style.css "$config/waybar/style.css"
+install -Dm644 linux/fuzzel/fuzzel.ini "$config/fuzzel/fuzzel.ini"
+install -Dm644 linux/ghostty/config "$config/ghostty/config"
+install -Dm644 linux/zsh/.zshrc "$config/zsh/.zshrc"
+install -Dm644 zsh/pure-modified.omp.json "$config/zsh/pure-modified.omp.json"
+# With no existing nvim-cachyos directory:
+cp -a nvim "$config/nvim-cachyos"
+```
+
+Ghostty uses 50% live opacity without blur. It starts zsh with the Linux prompt and the `nvim-cachyos` profile. The existing `~/.zshrc` and default Neovim profile are unchanged.
+
+Put the home Mac's `bg1-centered-3024x1964.png` in `~/Pictures/wallpapers/`. `swaybg` centers the PNG without zoom or stretch. Niri starts Waybar and `swaybg` at login. A live reload does not start them, so start missing processes once in the current niri session and reload an existing Waybar with `SIGUSR2`. The 179.998 Hz rule targets the Acer on `DP-2`.
+
+For Caps tap Escape and hold Hyper, back up any keyd configs. Check that no other keyd config matches the same keyboards before installing this pair:
+
+```sh
+sudo install -Dm644 linux/keyd/niri.conf /etc/keyd/niri.conf
+sudo install -Dm644 linux/keyd/mac-layout.conf /etc/keyd/mac-layout.conf
+sudo keyd check && sudo systemctl enable --now keyd.service
+```
+
+Super+Space opens Fuzzel. Hyper+1–9 select named workspaces. Niri leaves an extra blank workspace below them. Alt+Shift+1–9 move the focused window and follow it. Sending to 6–8 also floats the window. New windows opened there still tile unless you float them with Alt+grave.
+
+Niri scrolls columns instead of splitting a binary tree. Hyper+H/J/K/L and arrows focus across columns or within a column. Alt+Shift moves columns or swaps windows within a column. Super+Comma groups windows vertically, and Super+Period separates them. Alt+Return zooms. Alt+0 resets the selected column to 55% rather than balancing the whole workspace. Alt+Tab uses niri's recent-window switcher.
+
+To roll back, restore the saved configs and disable `keyd.service` if you enabled it for this setup.
