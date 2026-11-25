@@ -32,7 +32,7 @@ workspace "space-8"
 workspace "space-9"
 
 spawn-at-startup "waybar"
-spawn-at-startup "sh" "-c" "exec swaybg -m center -i \"$HOME/Pictures/wallpapers/bg1-centered-3024x1964.png\""
+spawn-at-startup "sh" "-c" "exec swaybg -m center -i \"$HOME/Pictures/wallpapers/bg1-centered-1920x1080.png\""
 
 binds {
     Super+Space { spawn "fuzzel"; }

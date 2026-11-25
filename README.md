@@ -109,7 +109,22 @@ Ghostty uses 50% live opacity without blur. It starts zsh with the Linux prompt 
 
 Re-run the copy block to deploy updates from the checkout. If either keyd file changes, repeat its install and reload below. Regular files let you validate and replace the active niri config in its own directory without following another OS's symlinks.
 
-Put the home Mac's `bg1-centered-3024x1964.png` in `~/Pictures/wallpapers/`. `swaybg` centers the PNG without zoom or stretch. Niri starts Waybar and `swaybg` at login. A live reload does not start them, so start missing processes once in the current niri session and reload an existing Waybar with `SIGUSR2`. The 179.998 Hz rule targets the Acer on `DP-2`.
+If you don't already have `~/Pictures/wallpapers/bg1-centered-1920x1080.png`, install `python-pillow` and run this from the repo root before you log in to Niri. The PNG is generated from `bg1.jpg`, so the repo does not store a second copy.
+
+```sh
+mkdir -p "$HOME/Pictures/wallpapers" &&
+python3 - "$HOME/Pictures/wallpapers/bg1-centered-1920x1080.png" <<'PY'
+import sys
+from PIL import Image
+
+canvas = Image.new("RGB", (1920, 1080), "black")
+with Image.open("bg1.jpg") as source:
+	canvas.paste(source, (592, 302))
+canvas.save(sys.argv[1])
+PY
+```
+
+`swaybg` centers the PNG without zoom or stretch. Niri starts Waybar and `swaybg` at login. A live reload does not start them, so start missing processes once in the current niri session and reload an existing Waybar with `SIGUSR2`. The 179.998 Hz rule targets the Acer on `DP-2`.
 
 For Caps tap Escape and hold Hyper, back up any keyd configs. The three IDs in `mac-layout.conf` also swap left Alt and left Super, as on the Mac. Check that no existing keyd config already lists those IDs or provides a wildcard default.
 
