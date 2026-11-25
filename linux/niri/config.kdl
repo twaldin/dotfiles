@@ -9,10 +9,10 @@ output "DP-2" {
 layout {
     gaps 8
     struts {
-        left 10
-        right 10
-        top 10
-        bottom 10
+        left 2
+        right 2
+        top 2
+        bottom 2
     }
     default-column-width { proportion 0.55; }
     focus-ring { off; }
@@ -42,7 +42,7 @@ binds {
     Super+Ctrl+Alt+Shift+P { spawn "keepassxc"; }
     Super+Ctrl+Alt+Shift+S { spawn "slack"; }
     Super+Ctrl+Alt+Shift+T { spawn "ghostty"; }
-    Super+W { close-window; }
+    Alt+F4 { close-window; }
     Super+Shift+Slash { show-hotkey-overlay; }
     Print { screenshot; }
 
@@ -87,9 +87,9 @@ binds {
     Alt+Shift+3 { move-window-to-workspace "space-3"; }
     Alt+Shift+4 { move-window-to-workspace "space-4"; }
     Alt+Shift+5 { move-window-to-workspace "space-5"; }
-    Alt+Shift+6 { spawn-sh "niri msg action move-window-to-floating && niri msg action move-window-to-workspace space-6"; }
-    Alt+Shift+7 { spawn-sh "niri msg action move-window-to-floating && niri msg action move-window-to-workspace space-7"; }
-    Alt+Shift+8 { spawn-sh "niri msg action move-window-to-floating && niri msg action move-window-to-workspace space-8"; }
+    Alt+Shift+6 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-6"; }
+    Alt+Shift+7 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-7"; }
+    Alt+Shift+8 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-8"; }
     Alt+Shift+9 { move-window-to-workspace "space-9"; }
 }
 

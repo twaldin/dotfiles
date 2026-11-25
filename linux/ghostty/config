@@ -6,6 +6,7 @@ font-family = JetBrainsMono Nerd Font
 command = env ZDOTDIR="$HOME/.config/zsh" zsh
 window-decoration = none
 keybind = super+t=new_window
+keybind = super+w=close_surface
 keybind = shift+enter=text:\n
 keybind = alt+backspace=text:\x1b\x7f
 window-padding-y = 10
