@@ -107,9 +107,11 @@ Back up your existing configs before copying these files from the repo root. If 
 
 Ghostty uses 50% live opacity without blur. It starts zsh with the Linux prompt and the `nvim-cachyos` profile. The existing `~/.zshrc` and default Neovim profile are unchanged.
 
+Re-run the copy block to deploy updates from the checkout. Regular files let you validate and replace the active niri config in its own directory without following another OS's symlinks.
+
 Put the home Mac's `bg1-centered-3024x1964.png` in `~/Pictures/wallpapers/`. `swaybg` centers the PNG without zoom or stretch. Niri starts Waybar and `swaybg` at login. A live reload does not start them, so start missing processes once in the current niri session and reload an existing Waybar with `SIGUSR2`. The 179.998 Hz rule targets the Acer on `DP-2`.
 
-For Caps tap Escape and hold Hyper, back up any keyd configs. The three IDs in `mac-layout.conf` also swap left Alt and left Super, as on the Mac. Check that no other keyd config matches these keyboards before installing the pair:
+For Caps tap Escape and hold Hyper, back up any keyd configs. The three IDs in `mac-layout.conf` also swap left Alt and left Super, as on the Mac. Check that no existing keyd config already lists those IDs or provides a wildcard default.
 
 ```sh
 sudo install -Dm644 linux/keyd/niri.conf /etc/keyd/niri.conf
@@ -117,7 +119,7 @@ sudo install -Dm644 linux/keyd/mac-layout.conf /etc/keyd/mac-layout.conf
 sudo keyd check && sudo systemctl enable --now keyd.service && sudo keyd reload
 ```
 
-Super+Space opens Fuzzel. Hyper+1–9 select named workspaces. Niri leaves an extra blank workspace below them. Alt+Shift+1–9 move the focused window and follow it. Sending to 6–8 also floats the window. New windows opened there still tile unless you float them with Alt+grave.
+Super+Space opens Fuzzel. Hyper+1–9 select named workspaces. Niri leaves an extra blank workspace below them. Alt+Shift+1–9 move the focused window and follow it. Sending to 6–8 also floats the window. New windows still tile there, and floated windows stay floating when sent back. Alt+grave toggles floating.
 
 Niri scrolls columns instead of splitting a binary tree. Hyper+H/J/K/L and arrows focus across columns or within a column. Alt+Shift moves columns or swaps windows within a column. Super+Comma groups windows vertically, and Super+Period separates them. Alt+Return zooms. Alt+0 resets the selected column to 55% rather than balancing the whole workspace. Alt+Tab uses niri's recent-window switcher.
 
