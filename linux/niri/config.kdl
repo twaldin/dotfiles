@@ -35,7 +35,7 @@ spawn-at-startup "waybar"
 spawn-at-startup "sh" "-c" "exec swaybg -m center -i \"$HOME/Pictures/wallpapers/bg1-centered-1920x1080.png\""
 
 binds {
-    Super+Space { spawn "fuzzel"; }
+    Ctrl+Space { spawn "fuzzel"; }
     Super+Ctrl+Alt+B { spawn "chromium"; }
     Super+Ctrl+Alt+D { spawn "discord"; }
     Super+Ctrl+Alt+G { spawn "steam"; }
@@ -43,6 +43,7 @@ binds {
     Super+Ctrl+Alt+S { spawn "slack"; }
     Super+Ctrl+Alt+T { spawn "ghostty"; }
     Alt+F4 { close-window; }
+    Super+Ctrl+F { fullscreen-window; }
     Super+Shift+Slash { show-hotkey-overlay; }
     Print { screenshot; }
 

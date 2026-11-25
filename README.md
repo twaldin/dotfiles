@@ -134,8 +134,8 @@ sudo install -Dm644 linux/keyd/mac-layout.conf /etc/keyd/mac-layout.conf
 sudo keyd check && sudo systemctl enable --now keyd.service && sudo keyd reload
 ```
 
-The shortcuts below use the key names after remapping. Super+Space opens Fuzzel. Hyper+1–9 select named workspaces. Niri leaves an extra blank workspace below them. Both Hyper+Shift+1–9 and Alt+Shift+1–9 move the focused window and follow it. Sending to 6–8 also floats the window. New windows still tile there, and floated windows stay floating when sent back. Alt+grave toggles floating.
+The shortcuts below use the key names after remapping. Ctrl+Space opens Fuzzel. Hyper+1–9 select named workspaces. Niri leaves an extra blank workspace below them. Both Hyper+Shift+1–9 and Alt+Shift+1–9 move the focused window and follow it. Sending to 6–8 also floats the window. New windows still tile there, and floated windows stay floating when sent back. Alt+grave toggles floating.
 
-Niri scrolls columns instead of splitting a binary tree. Hyper+H/J/K/L and arrows focus across columns or within a column. Alt+Shift moves columns or swaps windows within a column. Super+Comma groups windows vertically, and Super+Period separates them. Alt+Return zooms. Alt+0 resets the selected column to 55% rather than balancing the whole workspace. Alt+Tab uses niri's recent-window switcher.
+Niri scrolls columns instead of splitting a binary tree. Hyper+H/J/K/L and arrows focus across columns or within a column. Alt+Shift moves columns or swaps windows within a column. Super+Comma groups windows vertically, and Super+Period separates them. Alt+Return zooms. Super+Ctrl+F toggles fullscreen. Alt+0 resets the selected column to 55% rather than balancing the whole workspace. Alt+Tab uses niri's recent-window switcher.
 
 To roll back, restore the saved configs and remove files this setup created without a prior version. If setup enabled keyd, run `sudo systemctl disable --now keyd.service`. Otherwise, run `sudo keyd reload` after restoring its config.
