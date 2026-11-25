@@ -1,0 +1,15 @@
+theme = Hardcore
+background-opacity = 0.5
+background-blur = false
+font-size = 24
+font-family = JetBrainsMono Nerd Font
+command = env ZDOTDIR="$HOME/.config/zsh" zsh
+window-decoration = none
+keybind = super+t=new_window
+keybind = super+w=close_surface
+keybind = super+c=copy_to_clipboard
+keybind = super+v=paste_from_clipboard
+keybind = shift+enter=text:\n
+keybind = alt+backspace=text:\x1b\x7f
+window-padding-y = 10
+window-padding-x = 10

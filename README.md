@@ -18,6 +18,7 @@ my dotfiles: raw nvim on native vim.pack, zsh, tmux, Ghostty, native macOS windo
 | `scripts/` | tmux-sessionizer, Ghostty base16 theme switcher, Claude statusline |
 | `zen/` | zen browser userChrome.css + mods export |
 | `agents/` | the old agent setup; each machine drops it when it moves to tstack (below) |
+| `linux/` | CachyOS desktop: niri, Waybar, Fuzzel, keyd, Ghostty, and zsh |
 
 ## nvim
 
@@ -79,3 +80,47 @@ The window-manager lifecycle fails closed. On first Home adoption, stop the old 
 Install SketchyBar dependencies with `sketchybar/install-deps.sh`, run `sketchybar/scripts/smoke-config.sh`, and reload only after both pass. See `sketchybar/OPERATIONS.md` for permissions, runtime checks, and rollback.
 
 terminal theme is Ghostty's `Hardcore` — nvim follows it automatically.
+
+## CachyOS desktop
+
+Install `niri`, `xwayland-satellite`, `waybar`, `fuzzel`, `keyd`, `swaybg`, `ghostty`, `zsh`, `neovim`, `wireplumber`, `playerctl`, `jq`, `ttf-jetbrains-mono-nerd`, `wl-clipboard`, `fzf`, `fd`, and `ripgrep`. Install `oh-my-posh-bin` from the AUR for the shared prompt. The app hotkeys use `chromium`, `discord`, `steam`, `keepassxc`, and `slack-desktop` (AUR).
+
+Back up your existing configs before copying these files from the repo root. If Fedora shares your home, do not replace a destination that Fedora uses. On this PC, the new desktop configs use paths the Fedora GNOME session did not use.
+
+```sh
+(
+	set -e
+	config="$HOME/.config"
+	niri validate -c linux/niri/config.kdl
+	install -Dm644 linux/waybar/config.jsonc "$config/waybar/config.jsonc"
+	install -Dm644 linux/waybar/style.css "$config/waybar/style.css"
+	install -Dm644 linux/fuzzel/fuzzel.ini "$config/fuzzel/fuzzel.ini"
+	install -Dm644 linux/ghostty/config "$config/ghostty/config"
+	install -Dm644 linux/zsh/.zshrc "$config/zsh/.zshrc"
+	install -Dm644 zsh/pure-modified.omp.json "$config/zsh/pure-modified.omp.json"
+	mkdir -p "$config/nvim-cachyos"
+	cp -a nvim/. "$config/nvim-cachyos/"
+	install -Dm755 linux/niri/send-floating "$config/niri/send-floating"
+	install -Dm644 linux/niri/config.kdl "$config/niri/config.kdl"
+)
+```
+
+Ghostty uses 50% live opacity without blur. It starts zsh with the Linux prompt and the `nvim-cachyos` profile. The existing `~/.zshrc` and default Neovim profile are unchanged.
+
+Re-run the copy block to deploy updates from the checkout. If either keyd file changes, repeat its install and reload below. Regular files let you validate and replace the active niri config in its own directory without following another OS's symlinks.
+
+Put the home Mac's `bg1-centered-3024x1964.png` in `~/Pictures/wallpapers/`. `swaybg` centers the PNG without zoom or stretch. Niri starts Waybar and `swaybg` at login. A live reload does not start them, so start missing processes once in the current niri session and reload an existing Waybar with `SIGUSR2`. The 179.998 Hz rule targets the Acer on `DP-2`.
+
+For Caps tap Escape and hold Hyper, back up any keyd configs. The three IDs in `mac-layout.conf` also swap left Alt and left Super, as on the Mac. Check that no existing keyd config already lists those IDs or provides a wildcard default.
+
+```sh
+sudo install -Dm644 linux/keyd/niri.conf /etc/keyd/niri.conf
+sudo install -Dm644 linux/keyd/mac-layout.conf /etc/keyd/mac-layout.conf
+sudo keyd check && sudo systemctl enable --now keyd.service && sudo keyd reload
+```
+
+Super+Space opens Fuzzel. Hyper+1–9 select named workspaces. Niri leaves an extra blank workspace below them. Alt+Shift+1–9 move the focused window and follow it. Sending to 6–8 also floats the window. New windows still tile there, and floated windows stay floating when sent back. Alt+grave toggles floating.
+
+Niri scrolls columns instead of splitting a binary tree. Hyper+H/J/K/L and arrows focus across columns or within a column. Alt+Shift moves columns or swaps windows within a column. Super+Comma groups windows vertically, and Super+Period separates them. Alt+Return zooms. Alt+0 resets the selected column to 55% rather than balancing the whole workspace. Alt+Tab uses niri's recent-window switcher.
+
+To roll back, restore the saved configs and remove files this setup created without a prior version. If setup enabled keyd, run `sudo systemctl disable --now keyd.service`. Otherwise, run `sudo keyd reload` after restoring its config.

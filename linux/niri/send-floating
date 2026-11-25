@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+
+window=$(niri msg --json focused-window | jq -er '.id // empty') || exit 0
+niri msg action move-window-to-floating --id "$window"
+exec niri msg action move-window-to-workspace --window-id "$window" "$1"
