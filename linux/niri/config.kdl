@@ -2,7 +2,7 @@ input {
     keyboard { numlock; }
 }
 
-output "DP-2" {
+output "Acer Technologies XF243Y M3 34391B6223W01" {
     mode "1920x1080@179.998"
 }
 
