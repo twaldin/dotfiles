@@ -83,7 +83,7 @@ terminal theme is Ghostty's `Hardcore` — nvim follows it automatically.
 
 ## CachyOS desktop
 
-Install `niri`, `xwayland-satellite`, `waybar`, `fuzzel`, `keyd`, `swaybg`, `ghostty`, `zsh`, `neovim`, `jq`, `ttf-jetbrains-mono-nerd`, `wl-clipboard`, `fzf`, `fd`, and `ripgrep`. Install `oh-my-posh-bin` from the AUR for the shared prompt. The app hotkeys use `chromium`, `discord`, `steam`, `keepassxc`, and `slack-desktop` (AUR).
+Install `niri`, `xwayland-satellite`, `waybar`, `fuzzel`, `keyd`, `swaybg`, `ghostty`, `zsh`, `neovim`, `wireplumber`, `playerctl`, `jq`, `ttf-jetbrains-mono-nerd`, `wl-clipboard`, `fzf`, `fd`, and `ripgrep`. Install `oh-my-posh-bin` from the AUR for the shared prompt. The app hotkeys use `chromium`, `discord`, `steam`, `keepassxc`, and `slack-desktop` (AUR).
 
 Back up your existing configs before copying these files from the repo root. If Fedora shares your home, do not replace a destination that Fedora uses. On this PC, the new desktop configs use paths the Fedora GNOME session did not use.
 
@@ -107,7 +107,7 @@ Back up your existing configs before copying these files from the repo root. If 
 
 Ghostty uses 50% live opacity without blur. It starts zsh with the Linux prompt and the `nvim-cachyos` profile. The existing `~/.zshrc` and default Neovim profile are unchanged.
 
-Re-run the copy block to deploy updates from the checkout. Regular files let you validate and replace the active niri config in its own directory without following another OS's symlinks.
+Re-run the copy block to deploy updates from the checkout. If either keyd file changes, repeat its install and reload below. Regular files let you validate and replace the active niri config in its own directory without following another OS's symlinks.
 
 Put the home Mac's `bg1-centered-3024x1964.png` in `~/Pictures/wallpapers/`. `swaybg` centers the PNG without zoom or stretch. Niri starts Waybar and `swaybg` at login. A live reload does not start them, so start missing processes once in the current niri session and reload an existing Waybar with `SIGUSR2`. The 179.998 Hz rule targets the Acer on `DP-2`.
 
