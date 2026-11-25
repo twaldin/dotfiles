@@ -36,12 +36,12 @@ spawn-at-startup "sh" "-c" "exec swaybg -m center -i \"$HOME/Pictures/wallpapers
 
 binds {
     Super+Space { spawn "fuzzel"; }
-    Super+Ctrl+Alt+Shift+B { spawn "chromium"; }
-    Super+Ctrl+Alt+Shift+D { spawn "discord"; }
-    Super+Ctrl+Alt+Shift+G { spawn "steam"; }
-    Super+Ctrl+Alt+Shift+P { spawn "keepassxc"; }
-    Super+Ctrl+Alt+Shift+S { spawn "slack"; }
-    Super+Ctrl+Alt+Shift+T { spawn "ghostty"; }
+    Super+Ctrl+Alt+B { spawn "chromium"; }
+    Super+Ctrl+Alt+D { spawn "discord"; }
+    Super+Ctrl+Alt+G { spawn "steam"; }
+    Super+Ctrl+Alt+P { spawn "keepassxc"; }
+    Super+Ctrl+Alt+S { spawn "slack"; }
+    Super+Ctrl+Alt+T { spawn "ghostty"; }
     Alt+F4 { close-window; }
     Super+Shift+Slash { show-hotkey-overlay; }
     Print { screenshot; }
@@ -55,14 +55,14 @@ binds {
     XF86AudioPrev        allow-when-locked=true { spawn "playerctl" "previous"; }
     XF86AudioNext        allow-when-locked=true { spawn "playerctl" "next"; }
 
-    Super+Ctrl+Alt+Shift+H     { focus-column-left; }
-    Super+Ctrl+Alt+Shift+J     { focus-window-down; }
-    Super+Ctrl+Alt+Shift+K     { focus-window-up; }
-    Super+Ctrl+Alt+Shift+L     { focus-column-right; }
-    Super+Ctrl+Alt+Shift+Left  { focus-column-left; }
-    Super+Ctrl+Alt+Shift+Down  { focus-window-down; }
-    Super+Ctrl+Alt+Shift+Up    { focus-window-up; }
-    Super+Ctrl+Alt+Shift+Right { focus-column-right; }
+    Super+Ctrl+Alt+H     { focus-column-left; }
+    Super+Ctrl+Alt+J     { focus-window-down; }
+    Super+Ctrl+Alt+K     { focus-window-up; }
+    Super+Ctrl+Alt+L     { focus-column-right; }
+    Super+Ctrl+Alt+Left  { focus-column-left; }
+    Super+Ctrl+Alt+Down  { focus-window-down; }
+    Super+Ctrl+Alt+Up    { focus-window-up; }
+    Super+Ctrl+Alt+Right { focus-column-right; }
 
     Alt+Shift+H     { move-column-left; }
     Alt+Shift+J     { move-window-down; }
@@ -81,15 +81,15 @@ binds {
     Super+Comma { consume-window-into-column; }
     Super+Period { expel-window-from-column; }
 
-    Super+Ctrl+Alt+Shift+1 { focus-workspace "space-1"; }
-    Super+Ctrl+Alt+Shift+2 { focus-workspace "space-2"; }
-    Super+Ctrl+Alt+Shift+3 { focus-workspace "space-3"; }
-    Super+Ctrl+Alt+Shift+4 { focus-workspace "space-4"; }
-    Super+Ctrl+Alt+Shift+5 { focus-workspace "space-5"; }
-    Super+Ctrl+Alt+Shift+6 { focus-workspace "space-6"; }
-    Super+Ctrl+Alt+Shift+7 { focus-workspace "space-7"; }
-    Super+Ctrl+Alt+Shift+8 { focus-workspace "space-8"; }
-    Super+Ctrl+Alt+Shift+9 { focus-workspace "space-9"; }
+    Super+Ctrl+Alt+1 { focus-workspace "space-1"; }
+    Super+Ctrl+Alt+2 { focus-workspace "space-2"; }
+    Super+Ctrl+Alt+3 { focus-workspace "space-3"; }
+    Super+Ctrl+Alt+4 { focus-workspace "space-4"; }
+    Super+Ctrl+Alt+5 { focus-workspace "space-5"; }
+    Super+Ctrl+Alt+6 { focus-workspace "space-6"; }
+    Super+Ctrl+Alt+7 { focus-workspace "space-7"; }
+    Super+Ctrl+Alt+8 { focus-workspace "space-8"; }
+    Super+Ctrl+Alt+9 { focus-workspace "space-9"; }
 
     Alt+Shift+1 { move-window-to-workspace "space-1"; }
     Alt+Shift+2 { move-window-to-workspace "space-2"; }
@@ -100,6 +100,16 @@ binds {
     Alt+Shift+7 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-7"; }
     Alt+Shift+8 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-8"; }
     Alt+Shift+9 { move-window-to-workspace "space-9"; }
+
+    Super+Ctrl+Alt+Shift+1 { move-window-to-workspace "space-1"; }
+    Super+Ctrl+Alt+Shift+2 { move-window-to-workspace "space-2"; }
+    Super+Ctrl+Alt+Shift+3 { move-window-to-workspace "space-3"; }
+    Super+Ctrl+Alt+Shift+4 { move-window-to-workspace "space-4"; }
+    Super+Ctrl+Alt+Shift+5 { move-window-to-workspace "space-5"; }
+    Super+Ctrl+Alt+Shift+6 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-6"; }
+    Super+Ctrl+Alt+Shift+7 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-7"; }
+    Super+Ctrl+Alt+Shift+8 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-8"; }
+    Super+Ctrl+Alt+Shift+9 { move-window-to-workspace "space-9"; }
 }
 
 recent-windows {
