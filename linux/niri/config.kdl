@@ -35,7 +35,7 @@ spawn-at-startup "waybar"
 spawn-at-startup "sh" "-c" "exec swaybg -m center -i \"$HOME/Pictures/wallpapers/bg1-centered-1920x1080.png\""
 
 binds {
-    Ctrl+Space { spawn "fuzzel"; }
+    Super+Space { spawn "fuzzel"; }
     Super+Ctrl+Alt+B { spawn "chromium"; }
     Super+Ctrl+Alt+D { spawn "discord"; }
     Super+Ctrl+Alt+G { spawn "steam"; }
@@ -43,8 +43,8 @@ binds {
     Super+Ctrl+Alt+S { spawn "slack"; }
     Super+Ctrl+Alt+T { spawn "ghostty"; }
     Alt+F4 { close-window; }
-    Super+Ctrl+F { fullscreen-window; }
-    Super+Shift+Slash { show-hotkey-overlay; }
+    Super+Ctrl+Alt+F { fullscreen-window; }
+    Super+Ctrl+Alt+Shift+Slash { show-hotkey-overlay; }
     Print { screenshot; }
 
     XF86AudioRaiseVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.1+" "-l" "1.0"; }
@@ -79,8 +79,8 @@ binds {
     Alt+0 { set-column-width "55%"; }
     Alt+Minus { set-column-width "-5%"; }
     Alt+Equal { set-column-width "+5%"; }
-    Super+Comma { consume-window-into-column; }
-    Super+Period { expel-window-from-column; }
+    Super+Ctrl+Alt+Comma { consume-window-into-column; }
+    Super+Ctrl+Alt+Period { expel-window-from-column; }
 
     Super+Ctrl+Alt+1 { focus-workspace "space-1"; }
     Super+Ctrl+Alt+2 { focus-workspace "space-2"; }
