@@ -65,15 +65,6 @@ binds {
     Super+Ctrl+Alt+Up    { focus-window-up; }
     Super+Ctrl+Alt+Right { focus-column-right; }
 
-    Alt+Shift+H     { move-column-left; }
-    Alt+Shift+J     { move-window-down; }
-    Alt+Shift+K     { move-window-up; }
-    Alt+Shift+L     { move-column-right; }
-    Alt+Shift+Left  { move-column-left; }
-    Alt+Shift+Down  { move-window-down; }
-    Alt+Shift+Up    { move-window-up; }
-    Alt+Shift+Right { move-column-right; }
-
     Super+Ctrl+Alt+Shift+H     { move-column-left; }
     Super+Ctrl+Alt+Shift+J     { move-window-down; }
     Super+Ctrl+Alt+Shift+K     { move-window-up; }
@@ -83,12 +74,12 @@ binds {
     Super+Ctrl+Alt+Shift+Up    { move-window-up; }
     Super+Ctrl+Alt+Shift+Right { move-column-right; }
 
-    Alt+Return { maximize-window-to-edges; }
+    Super+Ctrl+Alt+Return { maximize-window-to-edges; }
     Super+Ctrl+Alt+Space { maximize-column; }
-    Alt+grave { toggle-window-floating; }
-    Alt+0 { set-column-width "55%"; }
-    Alt+Minus { set-column-width "-5%"; }
-    Alt+Equal { set-column-width "+5%"; }
+    Super+Ctrl+Alt+grave { toggle-window-floating; }
+    Super+Ctrl+Alt+0 { set-column-width "55%"; }
+    Super+Ctrl+Alt+Minus { set-column-width "-5%"; }
+    Super+Ctrl+Alt+Equal { set-column-width "+5%"; }
     Super+Ctrl+Alt+Comma { consume-window-into-column; }
     Super+Ctrl+Alt+Period { expel-window-from-column; }
 
@@ -101,16 +92,6 @@ binds {
     Super+Ctrl+Alt+7 { focus-workspace "space-7"; }
     Super+Ctrl+Alt+8 { focus-workspace "space-8"; }
     Super+Ctrl+Alt+9 { focus-workspace "space-9"; }
-
-    Alt+Shift+1 { move-window-to-workspace "space-1"; }
-    Alt+Shift+2 { move-window-to-workspace "space-2"; }
-    Alt+Shift+3 { move-window-to-workspace "space-3"; }
-    Alt+Shift+4 { move-window-to-workspace "space-4"; }
-    Alt+Shift+5 { move-window-to-workspace "space-5"; }
-    Alt+Shift+6 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-6"; }
-    Alt+Shift+7 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-7"; }
-    Alt+Shift+8 { spawn-sh "exec \"$HOME/.config/niri/send-floating\" space-8"; }
-    Alt+Shift+9 { move-window-to-workspace "space-9"; }
 
     Super+Ctrl+Alt+Shift+1 { move-window-to-workspace "space-1"; }
     Super+Ctrl+Alt+Shift+2 { move-window-to-workspace "space-2"; }
@@ -125,7 +106,7 @@ binds {
 
 recent-windows {
     binds {
-        Alt+Tab { next-window; }
-        Alt+Shift+Tab { previous-window; }
+        Super+Ctrl+Alt+Tab { next-window; }
+        Super+Ctrl+Alt+Shift+Tab { previous-window; }
     }
 }
