@@ -1,0 +1,17 @@
+#!/bin/sh
+# Focus a window whose app_id matches $1 (case-insensitive regex), cycling
+# through matches on repeat presses; launch the rest of the arguments if none.
+set -e
+
+pattern=$1
+shift
+
+target=$(niri msg --json windows | jq -r --arg p "$pattern" '
+  [.[] | select((.app_id // "") | test($p; "i"))] | sort_by(.id) as $w
+  | if ($w | length) == 0 then empty
+    else ([$w[].is_focused] | index(true)) as $i
+      | if $i == null then $w[0].id else $w[($i + 1) % ($w | length)].id end
+    end')
+
+[ -n "$target" ] || exec "$@"
+exec niri msg action focus-window --id "$target"
