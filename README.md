@@ -101,6 +101,7 @@ Back up your existing configs before copying these files from the repo root. If 
 	mkdir -p "$config/nvim-cachyos"
 	cp -a nvim/. "$config/nvim-cachyos/"
 	install -Dm755 linux/niri/send-floating "$config/niri/send-floating"
+	install -Dm755 linux/niri/focus-or-launch "$config/niri/focus-or-launch"
 	install -Dm644 linux/niri/config.kdl "$config/niri/config.kdl"
 )
 ```
@@ -126,7 +127,7 @@ PY
 
 `swaybg` centers the PNG without zoom or stretch. Niri starts Waybar and `swaybg` at login. A live reload does not start them, so start missing processes once in the current niri session and reload an existing Waybar with `SIGUSR2`. The 179.998 Hz rule matches the Acer by make, model, and serial number instead of by connector.
 
-Back up your keyd configs before installing these files. Caps Lock sends Escape when tapped and Hyper (Ctrl+Alt+Super, without Shift) when held. On the three keyboards listed in `mac-layout.conf`, physical left Ctrl and left Win both send Alt. Use left Ctrl for Deadlock crouch and left Alt for app Ctrl shortcuts. Check that no existing keyd config already lists those IDs or provides a wildcard default.
+Back up your keyd configs before installing these files. Tap Caps Lock for Esc or hold it for Hyper (Ctrl+Alt+Super, without Shift). On the three keyboards listed in `mac-layout.conf`, left Ctrl stays Ctrl and left Win acts as Alt. Left Alt is the Command layer and acts as Ctrl except for the shortcuts below. Check that no existing keyd config already lists those IDs or provides a wildcard default.
 
 ```sh
 sudo install -Dm644 linux/keyd/niri.conf /etc/keyd/niri.conf
@@ -134,12 +135,12 @@ sudo install -Dm644 linux/keyd/mac-layout.conf /etc/keyd/mac-layout.conf
 sudo keyd check && sudo systemctl enable --now keyd.service && sudo keyd reload
 ```
 
-On those keyboards, physical left Alt+Space opens Fuzzel, left Alt+Q closes the focused window, and left Ctrl+left Alt+F toggles fullscreen. For app Ctrl+Space, use right Ctrl+Space, not physical left Ctrl+Space. On other keyboards, use Super+Space for Fuzzel and Alt+F4 to close a window. Hyper+F toggles fullscreen on any keyboard.
+On those keyboards, left Alt+Space opens Fuzzel, left Alt+Q closes the focused window, and left Ctrl+left Alt+F toggles fullscreen. On other keyboards, use Super+Space for Fuzzel and Alt+F4 to close a window. Hyper+F toggles fullscreen on any keyboard.
 
 Hyper+1–9 select named workspaces. Niri leaves an extra blank workspace below them. Hyper+Shift+1–9 move the focused window and follow it. Sending to 6–8 also floats the window. New windows still tile there, and floated windows stay floating when sent back.
 
 Niri scrolls columns instead of splitting a binary tree. Hyper with H, J, K, L, or the arrow keys moves focus across columns or within a column. Add Shift to move a column or swap windows within a column. Hyper+Return fills the window to the edges, Hyper+Space maximizes the column, and Hyper+grave toggles floating. Hyper+0 resets the column width to 55%. Hyper+Minus and Hyper+Equal shrink or grow it by five percentage points. Hyper+Comma groups windows vertically, and Hyper+Period separates them.
 
-Hyper+Shift+Slash shows the shortcut overlay. Hyper+Tab and Hyper+Shift+Tab cycle forward and backward through recent windows. Hyper+B opens Chromium, D opens Discord, G opens Steam, P opens KeePassXC, S opens Slack, and T opens Ghostty.
+Hyper+Shift+Slash shows the shortcut overlay. Hyper+Tab and Hyper+Shift+Tab cycle forward and backward through recent windows. The app shortcuts are Hyper+B for Chromium, D for Discord, G for Steam, P for KeePassXC, S for Slack, and T for Ghostty. Each shortcut focuses an open window or launches the app if none is open. Press the same shortcut again to cycle through that app's windows.
 
 To roll back, restore the saved configs and remove files this setup created without a prior version. If setup enabled keyd, run `sudo systemctl disable --now keyd.service`. Otherwise, run `sudo keyd reload` after restoring its config.

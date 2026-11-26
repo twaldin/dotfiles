@@ -36,12 +36,12 @@ spawn-at-startup "sh" "-c" "exec swaybg -m center -i \"$HOME/Pictures/wallpapers
 
 binds {
     Super+Space { spawn "fuzzel"; }
-    Super+Ctrl+Alt+B { spawn "chromium"; }
-    Super+Ctrl+Alt+D { spawn "discord"; }
-    Super+Ctrl+Alt+G { spawn "steam"; }
-    Super+Ctrl+Alt+P { spawn "keepassxc"; }
-    Super+Ctrl+Alt+S { spawn "slack"; }
-    Super+Ctrl+Alt+T { spawn "ghostty"; }
+    Super+Ctrl+Alt+B { spawn-sh "exec \"$HOME/.config/niri/focus-or-launch\" '^chromium$' chromium"; }
+    Super+Ctrl+Alt+D { spawn-sh "exec \"$HOME/.config/niri/focus-or-launch\" '^discord$' discord"; }
+    Super+Ctrl+Alt+G { spawn-sh "exec \"$HOME/.config/niri/focus-or-launch\" '^steam$' steam"; }
+    Super+Ctrl+Alt+P { spawn-sh "exec \"$HOME/.config/niri/focus-or-launch\" keepassxc keepassxc"; }
+    Super+Ctrl+Alt+S { spawn-sh "exec \"$HOME/.config/niri/focus-or-launch\" '^slack$' slack"; }
+    Super+Ctrl+Alt+T { spawn-sh "exec \"$HOME/.config/niri/focus-or-launch\" ghostty ghostty"; }
     Alt+F4 { close-window; }
     Super+Ctrl+Alt+F { fullscreen-window; }
     Super+Ctrl+Alt+Shift+Slash { show-hotkey-overlay; }
